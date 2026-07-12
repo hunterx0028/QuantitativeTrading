@@ -30,7 +30,9 @@ OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 3.0 代表入場價加上 
 OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
 STRATEGY_START = (9, 41) # 策略開始分k棒的(時, 分) 31
-STRATEGY_END = (10, 1) # 策略結束分k棒的(時, 分) 59
+STRATEGY_END = (10, 11) # 策略結束分k棒的(時, 分) 59
+
+PRE_STRATEGY_LOW_BUFFER_END = (9, 5) # 策略開始前昨低緩衝截止分k棒的(時, 分)，含此時間
 
 INTRADAY_COMPARE_END = (13, 0)  # 盤中停損/停利比對截止(時, 分)，若設 (13, 21)，代表用 13:21 開盤 open 價當停損停利點。
 
@@ -448,21 +450,40 @@ def scan_entry_signal(
 ):
     """
     作空進場訊號：
-    1) 自 STRATEGY_START ~ STRATEGY_END 監控分K
-    2) 任一根分K low < 昨低，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 昨低
-    3) 入場棒前一根分K average > 昨低
-    4) 進場價 = 昨低 - 1 tick
-    5) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
-    6) 進場時間 = 觸發棒時間
+    1) 排除第一根K棒，PRE_STRATEGY_LOW_BUFFER_END 前若跌破昨低，取最低 low 作為有效昨低
+    2) 自 STRATEGY_START ~ STRATEGY_END 監控分K
+    3) 任一根分K low < 有效昨低，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 有效昨低
+    4) 入場棒前一根分K average > 有效昨低
+    5) 若入場前所有分K high 皆 <= 真實昨低，則不進場
+    6) 進場價 = 有效昨低 - 1 tick
+    7) 若進場價 <= 有效昨低 - (有效昨低 - 跌停價) / 3，則不進場
+    8) 進場時間 = 觸發棒時間
     回傳：
     - (entry_bar, entry_price): 條件成立
-    - ENTRY_BLOCKED: STRATEGY_START 前已先跌破昨低（當日封單）
-    - ENTRY_BLOCKED: 首次跌破昨低但檢核失敗（當日封單）
-    - None: 尚未出現跌破昨低
+    - ENTRY_BLOCKED: 緩衝截止後、STRATEGY_START 前已先跌破有效昨低（當日封單）
+    - ENTRY_BLOCKED: 首次跌破有效昨低但檢核失敗（當日封單）
+    - None: 尚未出現跌破有效昨低
     """
+    buffer_end_hm = PRE_STRATEGY_LOW_BUFFER_END[0] * 60 + PRE_STRATEGY_LOW_BUFFER_END[1]
     start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
     end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
     yesterday_low = float(ystats['low'])
+    true_yesterday_low = yesterday_low
+
+    for idx, bar in enumerate(today_bars):
+        if idx == first_bar_idx:
+            continue
+        dtv = bar.get('dt')
+        if dtv is None:
+            continue
+        hm = dtv.hour * 60 + dtv.minute
+        if hm > buffer_end_hm:
+            continue
+        bar_low = bar.get('low')
+        if bar_low is None:
+            continue
+        yesterday_low = min(yesterday_low, float(bar_low))
+
     entry_tick = get_tick_size(yesterday_low)
     entry_price = max(yesterday_low - entry_tick, 0.0)
     max_intraday_range_before_trigger = yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
@@ -474,12 +495,16 @@ def scan_entry_signal(
     ):
         return ENTRY_BLOCKED
 
-    # STRATEGY_START 前若已跌破昨低，當日直接封單
-    for bar in today_bars:
+    # 緩衝截止後、STRATEGY_START 前若已跌破有效昨低，當日直接封單
+    for idx, bar in enumerate(today_bars):
+        if idx == first_bar_idx:
+            continue
         dtv = bar.get('dt')
         if dtv is None:
             continue
         hm = dtv.hour * 60 + dtv.minute
+        if hm <= buffer_end_hm:
+            continue
         if hm >= start_hm:
             continue
         if float(bar.get('low', 0) or 0.0) < yesterday_low:
@@ -496,12 +521,17 @@ def scan_entry_signal(
         time_indexed.append((idx, bar, hm))
 
     for original_idx, bar, _ in time_indexed:
+        if original_idx == first_bar_idx:
+            continue
         bar_low = float(bar['low'])
         if bar_low >= yesterday_low:
             continue
 
         prior_bars = today_bars[:original_idx]
         if prior_bars:
+            if all(float(item['high']) <= true_yesterday_low for item in prior_bars):
+                return ENTRY_BLOCKED
+
             prior_day_high = max(float(item['high']) for item in prior_bars)
             prior_day_low = min(float(item['low']) for item in prior_bars)
             if (prior_day_high - prior_day_low) > max_intraday_range_before_trigger:
@@ -887,6 +917,7 @@ def print_daily_optimization_results(
     print(
         f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~'
         f'{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
+        f'昨低緩衝截止={PRE_STRATEGY_LOW_BUFFER_END[0]:02d}:{PRE_STRATEGY_LOW_BUFFER_END[1]:02d}    '
         f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
     )
     print('')
@@ -1204,6 +1235,10 @@ def main() -> None:
 
         strategy_start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
         strategy_end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
+        pre_strategy_low_buffer_end_hm = PRE_STRATEGY_LOW_BUFFER_END[0] * 60 + PRE_STRATEGY_LOW_BUFFER_END[1]
+        if pre_strategy_low_buffer_end_hm >= strategy_start_hm:
+            print('[ERROR] PRE_STRATEGY_LOW_BUFFER_END 必須早於 STRATEGY_START', file=sys.stderr)
+            sys.exit(1)
         if strategy_start_hm >= strategy_end_hm:
             print('[ERROR] STRATEGY_START 必須早於 STRATEGY_END', file=sys.stderr)
             sys.exit(1)
