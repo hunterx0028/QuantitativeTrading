@@ -29,10 +29,8 @@ OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 3.0 代表入場價加上 
 
 OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
-STRATEGY_START = (9, 41) # 策略開始分k棒的(時, 分) 31
-STRATEGY_END = (10, 11) # 策略結束分k棒的(時, 分) 59
-
-PRE_STRATEGY_LOW_BUFFER_END = (9, 5) # 策略開始前昨低緩衝截止分k棒的(時, 分)，含此時間
+STRATEGY_START = (9, 40) # 策略開始分k棒的(時, 分) 31
+STRATEGY_END = (10, 0) # 策略結束分k棒的(時, 分) 59
 
 INTRADAY_COMPARE_END = (13, 0)  # 盤中停損/停利比對截止(時, 分)，若設 (13, 21)，代表用 13:21 開盤 open 價當停損停利點。
 
@@ -187,16 +185,6 @@ def calculate_stop_loss_amount_by_percent(entry_price: float, stop_loss_percent:
 def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_percent: float) -> float:
     """依入場價與停利百分比計算停利價差。"""
     return entry_price * (take_profit_percent / 100.0)
-
-
-def should_skip_entry_by_limit_down_zone(
-    entry_price: float,
-    true_yesterday_low: float,
-    limit_down_price: float,
-) -> bool:
-    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
-    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
-    return entry_price <= threshold
 
 # ---------------------------------------------------------------------------
 # 股票清單 (tuple 格式：第一個元素為「名稱:代碼.TW」)
@@ -424,25 +412,6 @@ def find_first_bar(today_bars: list):
         return None, -1
     return first_bar, first_idx
 
-
-def is_one_minute_bars(today_bars: list) -> bool:
-    """以第 2~4 根K棒判斷是否為 1 分K；若像 5 分K則排除。"""
-    dt_values = [
-        bar.get('dt')
-        for bar in today_bars
-        if bar.get('dt') is not None
-    ]
-    if len(dt_values) < 4:
-        return False
-    dt_values.sort()
-    second_to_third = dt_values[2] - dt_values[1]
-    third_to_fourth = dt_values[3] - dt_values[2]
-    return not (
-        second_to_third >= timedelta(minutes=5)
-        and third_to_fourth >= timedelta(minutes=5)
-    )
-
-
 def scan_entry_signal(
     today_bars: list,
     first_bar_idx: int,
@@ -450,61 +419,30 @@ def scan_entry_signal(
 ):
     """
     作空進場訊號：
-    1) 排除第一根K棒，PRE_STRATEGY_LOW_BUFFER_END 前若跌破昨低，取最低 low 作為有效昨低
-    2) 自 STRATEGY_START ~ STRATEGY_END 監控分K
-    3) 任一根分K low < 有效昨低，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 有效昨低
-    4) 入場棒前一根分K average > 有效昨低
-    5) 若入場前所有分K high 皆 <= 真實昨低，則不進場
-    6) 進場價 = 有效昨低 - 1 tick
-    7) 若進場價 <= 有效昨低 - (有效昨低 - 跌停價) / 3，則不進場
-    8) 進場時間 = 觸發棒時間
+    1) 自 STRATEGY_START ~ STRATEGY_END 監控分K
+    2) 任一根分K low < 昨低，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 昨低
+    3) 入場棒前一根分K average > 昨低
+    4) 進場價 = 昨低 - 1 tick
+    5) 進場時間 = 觸發棒時間
     回傳：
     - (entry_bar, entry_price): 條件成立
-    - ENTRY_BLOCKED: 緩衝截止後、STRATEGY_START 前已先跌破有效昨低（當日封單）
-    - ENTRY_BLOCKED: 首次跌破有效昨低但檢核失敗（當日封單）
-    - None: 尚未出現跌破有效昨低
+    - ENTRY_BLOCKED: STRATEGY_START 前已先跌破昨低（當日封單）
+    - ENTRY_BLOCKED: 首次跌破昨低但檢核失敗（當日封單）
+    - None: 尚未出現跌破昨低
     """
-    buffer_end_hm = PRE_STRATEGY_LOW_BUFFER_END[0] * 60 + PRE_STRATEGY_LOW_BUFFER_END[1]
     start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
     end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
     yesterday_low = float(ystats['low'])
-    true_yesterday_low = yesterday_low
-
-    for idx, bar in enumerate(today_bars):
-        if idx == first_bar_idx:
-            continue
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        if hm > buffer_end_hm:
-            continue
-        bar_low = bar.get('low')
-        if bar_low is None:
-            continue
-        yesterday_low = min(yesterday_low, float(bar_low))
-
     entry_tick = get_tick_size(yesterday_low)
     entry_price = max(yesterday_low - entry_tick, 0.0)
     max_intraday_range_before_trigger = yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
-    _, limit_down_price = calculate_limit_prices(float(ystats['close']))
-    if should_skip_entry_by_limit_down_zone(
-        entry_price,
-        yesterday_low,
-        limit_down_price,
-    ):
-        return ENTRY_BLOCKED
 
-    # 緩衝截止後、STRATEGY_START 前若已跌破有效昨低，當日直接封單
-    for idx, bar in enumerate(today_bars):
-        if idx == first_bar_idx:
-            continue
+    # STRATEGY_START 前若已跌破昨低，當日直接封單
+    for bar in today_bars:
         dtv = bar.get('dt')
         if dtv is None:
             continue
         hm = dtv.hour * 60 + dtv.minute
-        if hm <= buffer_end_hm:
-            continue
         if hm >= start_hm:
             continue
         if float(bar.get('low', 0) or 0.0) < yesterday_low:
@@ -521,17 +459,12 @@ def scan_entry_signal(
         time_indexed.append((idx, bar, hm))
 
     for original_idx, bar, _ in time_indexed:
-        if original_idx == first_bar_idx:
-            continue
         bar_low = float(bar['low'])
         if bar_low >= yesterday_low:
             continue
 
         prior_bars = today_bars[:original_idx]
         if prior_bars:
-            if all(float(item['high']) <= true_yesterday_low for item in prior_bars):
-                return ENTRY_BLOCKED
-
             prior_day_high = max(float(item['high']) for item in prior_bars)
             prior_day_low = min(float(item['low']) for item in prior_bars)
             if (prior_day_high - prior_day_low) > max_intraday_range_before_trigger:
@@ -850,65 +783,88 @@ def format_optimize_profit_parameter_text(profit_percent: float) -> str:
     return f'停利={profit_percent:.1f}%'
 
 
-def print_daily_optimization_results(
-    all_results: list,
+def print_per_stock_optimization_results(
+    stock_reports: list[dict],
     best_loss_percent: float,
     best_profit_percent: float,
     total_pnl: float,
 ) -> None:
-    """印出固定參數下依日期彙總的進出場明細。"""
+    """印出固定參數下可獲利股票與逐日進出場明細。"""
+    print(format_monitoring_time_range())
     print(
         f'損益已納入交易成本: 手續費率={BROKERAGE_FEE_RATE:.6f}, '
         f'賣出交易稅率={SELL_TRANSACTION_TAX_RATE:.6f}'
     )
+    print(
+        f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~'
+        f'{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
+        f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
+    )
+    print(
+        f'最佳參數: LOSS_PER={best_loss_percent:.2f}%  '
+        f'PROFIT_PER={best_profit_percent:.2f}%  '
+        f'總收益={total_pnl:+.2f}'
+    )
     print('')
-    summary = summarize_results(all_results)
-    if summary['total'] == 0:
-        print('固定參數下沒有交易結果。')
+
+    if not stock_reports:
+        print('固定參數下沒有總收益為正的股票。')
         return
 
-    grouped_results: dict[str, list[tuple[str, datetime | None, datetime | None, float, float, float, bool]]] = {}
-    for signal, result in all_results:
-        if not signal or not result:
+    aggregate_total = 0
+    aggregate_successes = 0
+    aggregate_failures = 0
+    aggregate_pnl = 0.0
+    grouped_results: dict[str, list[tuple[str, datetime | None, datetime | None, float, float, float]]] = {}
+    for report in stock_reports:
+        summary = report['summary']
+        stock_name = report['stock_name']
+        if summary['successes'] == 0 and summary['failures'] == 0:
             continue
-        date_key = signal['date_str']
-        grouped_results.setdefault(date_key, []).append((
-            signal['name'],
-            signal.get('entry_dt'),
-            result.get('exit_dt'),
-            signal['entry_price'],
-            result['exit_price'],
-            signed_pnl(result),
-            result.get('outcome') == 'success',
-        ))
 
-    for date_key in sorted(grouped_results.keys(), reverse=True):
-        day_rows = grouped_results[date_key]
-        day_total = sum(row[5] for row in day_rows)
-        day_successes = sum(1 for row in day_rows if row[6])
-        day_failures = len(day_rows) - day_successes
+        aggregate_total += summary['total']
+        aggregate_successes += summary['successes']
+        aggregate_failures += summary['failures']
+        aggregate_pnl += summary['total_pnl']
         print(
-            f'{format_date_with_weekday(date_key)} '
-            f'筆數={len(day_rows)}  '
-            f'成功={day_successes}  '
-            f'失敗={day_failures}  '
-            f'總收益={day_total:+.2f}'
+            f'{stock_name} 固定參數結果: '
+            f'{format_optimize_parameter_text(summary["stop_loss_percent"])}  '
+            f'{format_optimize_profit_parameter_text(summary["stop_profit_percent"])}  '
+            f'有結果筆數={summary["total"]}  '
+            f'成功數={summary["successes"]}  '
+            f'失敗數={summary["failures"]}  '
+            f'總收益={summary["total_pnl"]:+.2f}'
         )
-        for stock_name, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
-            day_rows,
-            key=lambda row: (format_entry_time(row[1]), row[0]),
-        ):
+
+        sorted_results = sorted(
+            report['results'],
+            key=lambda x: x[0]['date_str'] if x[0] else '',
+            reverse=True,
+        )
+        for signal, result in sorted_results:
+            if not signal or not result:
+                continue
             print(
-                f'{stock_name} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
-                f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
+                f'{format_entry_datetime(signal.get("entry_dt"))} '
+                f'{format_entry_time(result.get("exit_dt"))} '
+                f'[{signal["entry_price"]:.2f}|{result["exit_price"]:.2f}|{signed_pnl(result):.2f}]'
             )
+            date_key = signal['date_str']
+            grouped_results.setdefault(date_key, []).append((
+                stock_name,
+                signal.get('entry_dt'),
+                result.get('exit_dt'),
+                signal['entry_price'],
+                result['exit_price'],
+                signed_pnl(result),
+            ))
         print('')
 
     print(
-        f'有結果總筆數={summary["total"]}  '
-        f'成功總數={summary["successes"]}  '
-        f'失敗總數={summary["failures"]}  '
-        f'總收益統計={summary["total_pnl"]:+.2f}'
+        f'有結果總筆數={aggregate_total}  '
+        f'成功總數={aggregate_successes}  '
+        f'失敗總數={aggregate_failures}  '
+        f'總收益統計={aggregate_pnl:+.2f}'
     )
     print(
         f'LOSS_PER={best_loss_percent:.1f}%  '
@@ -917,10 +873,35 @@ def print_daily_optimization_results(
     print(
         f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~'
         f'{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
-        f'昨低緩衝截止={PRE_STRATEGY_LOW_BUFFER_END[0]:02d}:{PRE_STRATEGY_LOW_BUFFER_END[1]:02d}    '
         f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
     )
     print('')
+    for date_key in sorted(grouped_results.keys(), reverse=True):
+        day_rows = grouped_results[date_key]
+        day_total = sum(row[5] for row in day_rows)
+        print(f'{format_date_with_weekday(date_key)} 總收益={day_total:+.2f}')
+        for stock_name, entry_dt, exit_dt, entry_price, exit_price, pnl_value in sorted(day_rows, key=lambda row: row[0]):
+            print(
+                f'{stock_name} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
+                f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
+            )
+        print('')
+
+    print(
+        f'有結果總筆數={aggregate_total}  '
+        f'成功總數={aggregate_successes}  '
+        f'失敗總數={aggregate_failures}  '
+        f'總收益統計={aggregate_pnl:+.2f}'
+    )
+    print(
+        f'LOSS_PER={best_loss_percent:.1f}%  '
+        f'PROFIT_PER={best_profit_percent:.1f}%'
+    )
+    print(
+        f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~'
+        f'{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
+        f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -942,9 +923,6 @@ def find_trade_candidate_on_date(
 
     first_bar, first_bar_idx = find_first_bar(today_bars)
     if first_bar_idx < 0:
-        return None
-
-    if not is_one_minute_bars(today_bars):
         return None
 
     if first_bar_idx + 1 >= len(today_bars):
@@ -1138,7 +1116,6 @@ def evaluate_candidates(
 def main() -> None:
     OUTPUT_BUFFER.clear()
     builtins.print(f'開始時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-    builtins.print()
     try:
         args = parse_args()
         raw_stock_list = STOCK_LIST or selected_stocks
@@ -1198,7 +1175,7 @@ def main() -> None:
         def evaluate_one_window() -> dict:
             nonlocal total_stocks
 
-            all_candidates: list = []
+            candidates_by_stock: dict[str, list] = {}
             for idx, stock_item in enumerate(stock_list, start=1):
                 stock_name = stock_item[0]
                 print_progress(
@@ -1206,39 +1183,52 @@ def main() -> None:
                     total_stocks,
                     f'{stock_name} [{STRATEGY_START[1]:02d}-{STRATEGY_END[1]:02d}]',
                 )
-                all_candidates.extend(
-                    collect_trade_candidates(
-                        stock_item,
-                        target_date,
-                        minute_bars_by_symbol,
-                        day_candles_by_symbol,
-                    )
+                candidates_by_stock[stock_name] = collect_trade_candidates(
+                    stock_item,
+                    target_date,
+                    minute_bars_by_symbol,
+                    day_candles_by_symbol,
                 )
 
             optimize_loss_percent = OPTIMIZE_LOSS_PER
             optimize_profit_percent = OPTIMIZE_PROFIT_PER
-            results = evaluate_candidates(
-                all_candidates,
-                optimize_loss_percent=optimize_loss_percent,
-                optimize_profit_percent=optimize_profit_percent,
-                print_results=False,
-            )
-            evaluated_summary = summarize_results(results)
+            stock_reports: list[dict] = []
+            for idx, stock_item in enumerate(stock_list, start=1):
+                stock_name = stock_item[0]
+                print_progress(
+                    idx,
+                    total_stocks,
+                    f'{stock_name} [{STRATEGY_START[1]:02d}-{STRATEGY_END[1]:02d}]',
+                )
+                results = evaluate_candidates(
+                    candidates_by_stock.get(stock_name, []),
+                    optimize_loss_percent=optimize_loss_percent,
+                    optimize_profit_percent=optimize_profit_percent,
+                    print_results=False,
+                )
+                evaluated_summary = summarize_results(results)
+                evaluated_summary.update({
+                    'stop_loss_percent': optimize_loss_percent,
+                    'stop_profit_percent': optimize_profit_percent,
+                })
+                stock_reports.append({
+                    'stock_name': stock_name,
+                    'summary': evaluated_summary,
+                    'results': results,
+                })
+            total_pnl = sum(report['summary']['total_pnl'] for report in stock_reports)
+            total_failures = sum(report['summary']['failures'] for report in stock_reports)
 
             return {
-                'best_total_pnl': evaluated_summary['total_pnl'],
-                'best_total_failures': evaluated_summary['failures'],
+                'best_total_pnl': total_pnl,
+                'best_total_failures': total_failures,
                 'best_loss_percent': optimize_loss_percent,
                 'best_profit_percent': optimize_profit_percent,
-                'best_results': results,
+                'best_reports': stock_reports,
             }
 
         strategy_start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
         strategy_end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
-        pre_strategy_low_buffer_end_hm = PRE_STRATEGY_LOW_BUFFER_END[0] * 60 + PRE_STRATEGY_LOW_BUFFER_END[1]
-        if pre_strategy_low_buffer_end_hm >= strategy_start_hm:
-            print('[ERROR] PRE_STRATEGY_LOW_BUFFER_END 必須早於 STRATEGY_START', file=sys.stderr)
-            sys.exit(1)
         if strategy_start_hm >= strategy_end_hm:
             print('[ERROR] STRATEGY_START 必須早於 STRATEGY_END', file=sys.stderr)
             sys.exit(1)
@@ -1248,12 +1238,21 @@ def main() -> None:
         best_loss_percent = best_window_result['best_loss_percent']
         best_profit_percent = best_window_result['best_profit_percent']
         best_total_pnl = best_window_result['best_total_pnl']
-        best_results = best_window_result['best_results']
-        print_daily_optimization_results(
-            best_results,
+        best_reports = best_window_result['best_reports']
+        print(
+            f'最佳時間窗: START={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}, '
+            f'END={STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}, '
+            f'總淨損益={best_total_pnl:+.2f}, 總失敗次數={best_window_result["best_total_failures"]}'
+        )
+
+        stock_reports = best_reports
+        total_pnl = best_total_pnl
+        stock_reports.sort(key=lambda item: item['stock_name'])
+        print_per_stock_optimization_results(
+            stock_reports,
             best_loss_percent,
             best_profit_percent,
-            best_total_pnl,
+            total_pnl,
         )
     finally:
         builtins.print(f'結束時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')

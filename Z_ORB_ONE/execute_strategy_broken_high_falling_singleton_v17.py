@@ -48,14 +48,8 @@ OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 2.5 代表入場價加上 
 
 OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
-PROTECT_LOSS_PER = 1.0 # 新的停損
-
-PROTECT_PROFIT_PER = 3.0 # 觸發調整停利
-
-BUFFER_LOW_CHECK_END_TIME = (9,5) # 可以調降昨低的時間
-
-ENTRY_CHECK_START_TIME = (9, 41)  # 進場檢核開始時間（含）
-ENTRY_CHECK_END_TIME = (10, 11)  # 進場檢核截止時間（含）
+ENTRY_CHECK_START_TIME = (9, 40)  # 進場檢核開始時間（含）
+ENTRY_CHECK_END_TIME = (10, 0)  # 進場檢核截止時間（含）
 
 FORCE_CLOSE_TIME = (13, 0)  # 13:21 收盤前強制平倉時間
 
@@ -417,7 +411,6 @@ def build_initial_state(
         "limit_down_price": limit_down_price,  # 跌停
         "yesterday_open_price": v1,  # 昨開
         "yesterday_high_price": v2,  # 昨高
-        "original_yesterday_low_price": v3,  # 原始昨低
         "yesterday_low_price": v3,  # 昨低
         "yesterday_close_price": v4,  # 昨收
         "up_streak_days": up_streak_days,  # 連漲天數
@@ -446,9 +439,6 @@ def normalize_state(d: Dict[str, Any]) -> Dict[str, Any]:
     # 若舊檔沒有 date，補上今天
     if "date" not in base or not base["date"]:
         base["date"] = today_str_tpe()
-
-    if "original_yesterday_low_price" not in base or base["original_yesterday_low_price"] is None:
-        base["original_yesterday_low_price"] = d.get("yesterday_low_price", base.get("yesterday_low_price"))
 
     return base
 
@@ -612,85 +602,6 @@ def is_intraday_range_within_threshold_by_realtime_prices(
     return intraday_range <= max_intraday_range_before_trigger
 
 
-def adjust_buffer_yesterday_low_for_states(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-):
-    """
-    等待 BUFFER_LOW_CHECK_END_TIME 後，用已完成分K調降有效昨低。
-    調整範圍排除第一根K棒，且只取時間 <= BUFFER_LOW_CHECK_END_TIME 的分K。
-    """
-    target_hour, target_minute = BUFFER_LOW_CHECK_END_TIME
-    target_second = 0
-
-    print(f"正在等待時間到 {target_hour:02d}:{target_minute:02d}:{target_second:02d}，並於緩衝期間調降昨低 ...")
-
-    while True:
-        now_local = now_tpe()
-        if (now_local.hour, now_local.minute, now_local.second) > (target_hour, target_minute, target_second):
-            print(f"⏰ 時間到！目前時間：{now_local.strftime('%H:%M:%S')}")
-            break
-        time.sleep(5)
-
-    for st in states.values():
-        if st.get("traded"):
-            continue
-
-        completed_candles = update_latest_candle_at_second_n(st, realtime_sdk)
-        if len(completed_candles) <= 1:
-            print(f"[{st['symbol_name']}] 緩衝期分K資料不足，昨低不調整")
-            continue
-
-        buffer_lows: list[float] = []
-        for candle in completed_candles[1:]:
-            date_text = str(candle.get("date") or "")
-            if len(date_text) < 16:
-                continue
-            try:
-                candle_hour = int(date_text[11:13])
-                candle_minute = int(date_text[14:16])
-            except ValueError:
-                continue
-
-            if (candle_hour, candle_minute) > BUFFER_LOW_CHECK_END_TIME:
-                continue
-
-            low_value = candle.get("low")
-            try:
-                buffer_lows.append(float(low_value))
-            except (TypeError, ValueError):
-                continue
-
-        if not buffer_lows:
-            print(f"[{st['symbol_name']}] 緩衝期無可用分K，昨低不調整")
-            continue
-
-        buffer_low = min(buffer_lows)
-        yesterday_low_price = st.get("yesterday_low_price")
-        try:
-            yesterday_low = float(yesterday_low_price)
-        except (TypeError, ValueError):
-            continue
-
-        if buffer_low >= yesterday_low:
-            continue
-
-        symbol_key = st.get("symbol_code_with_suf", "")
-        st["yesterday_low_price"] = buffer_low
-        st["entry_time"] = now_tpe().isoformat()
-        limit_down_price = st.get("limit_down_price")
-        entry_price = adjust_price(buffer_low - get_tick_size(buffer_low), "SHORT")
-        if should_skip_entry_by_limit_down_zone(entry_price, buffer_low, limit_down_price):
-            st["traded"] = True
-            st["in_position"] = False
-            atomic_write_json(state_path(symbol_key), st)
-            print(f"[{st['symbol_name']}] 緩衝期調降昨低至 {buffer_low}，進場價低於昨低到跌停三分之一位置，不追蹤。")
-            continue
-
-        atomic_write_json(state_path(symbol_key), st)
-        print(f"[{st['symbol_name']}] 緩衝期調降昨低：{yesterday_low} -> {buffer_low}")
-
-
 def check_open_status(state: Dict[str, Any]) -> bool:
     open_pass = False
     if (not state.get("in_position")) and (not state.get("traded")):  #未持倉, 未交易
@@ -709,16 +620,6 @@ def has_none_in_entry_k_data(state: Dict[str, Any]) -> bool:
     return any(state.get(field) is None for field in required_k_fields)
 
 
-def should_skip_entry_by_limit_down_zone(
-    entry_price: float,
-    true_yesterday_low: float,
-    limit_down_price: float,
-) -> bool:
-    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
-    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
-    return entry_price <= threshold
-
-
 def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
     進場條件判斷（純函式，不修改 state）。
@@ -735,7 +636,6 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         return False
 
     yesterday_low_price = state.get("yesterday_low_price")
-    limit_down_price = state.get("limit_down_price")
     if yesterday_low_price is None:
         return False
 
@@ -748,16 +648,6 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         return False
 
     if low_price < yesterday_low_price:  # 跌破昨低即進場
-        high_price = state.get("high_price")
-        original_yesterday_low_price = state.get("original_yesterday_low_price")
-        try:
-            if float(high_price) <= float(original_yesterday_low_price):
-                print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 入場前最高價未大於原始昨低，突破失敗，不追蹤")
-                return 'BLOCKED'
-        except (TypeError, ValueError):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 無法檢核原始昨低與最高價，突破失敗，不追蹤")
-            return 'BLOCKED'
-
         completed_candles = update_latest_candle_at_second_n(state, realtime_sdk)
         if not completed_candles:
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} K棒資料不足，突破失敗，不追蹤")
@@ -774,10 +664,6 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         latest_average, _latest_volume = get_latest_complete_candle_average_and_volume(completed_candles)
         if (latest_average is None) or (latest_average <= float(yesterday_low_price)):
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 均價小於昨低，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if should_skip_entry_by_limit_down_zone(last_price, yesterday_low_price, limit_down_price):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於昨低到跌停三分之一位置，不追蹤。")
             return 'BLOCKED'
 
         return True
@@ -873,8 +759,6 @@ def try_close_position(state: Dict[str, Any], mysdk):
     if not state.get("in_position"):
         return
 
-    _protect_profit_stop(state)         # 獲利達標後，把停損推進到保住獲利的位置
-
     sl = reached_stop_to_flat(state)    # 至停損點
     rp = reached_resize_profit(state)   # 達到下一個獲利目標（純判斷，不修改 state）
     sp = reached_stop_to_profit(state)  # 追蹤停利反彈觸發
@@ -894,31 +778,6 @@ def try_close_position(state: Dict[str, Any], mysdk):
         print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
     else:
         return  # 無須平倉
-
-
-def _protect_profit_stop(state: Dict[str, Any]):
-    """SHORT 獲利達標後，將 flat_price 下修到至少保住指定獲利的位置。"""
-    if state.get("side") != "SHORT":
-        return
-
-    try:
-        px = float(state.get("last_price"))
-        entry_price = float(state.get("entry_price"))
-        current_flat_price = float(state.get("flat_price"))
-    except (TypeError, ValueError):
-        return
-
-    if entry_price <= 0:
-        return
-
-    protect_trigger_price = entry_price * (1 - PROTECT_PROFIT_PER / 100.0)
-    protected_flat_price = entry_price * (1 - PROTECT_LOSS_PER / 100.0)
-
-    if px <= protect_trigger_price and protected_flat_price < current_flat_price:
-        state["flat_price"] = protected_flat_price
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        print(f"[{state['symbol_name']}] ✅ 獲利保護啟動 停損調整為：{state['flat_price']}")
-
 
 def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
 
@@ -1331,7 +1190,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
                     if (
                         ((now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME)
-                        and ((now_local.hour, now_local.minute) > BUFFER_LOW_CHECK_END_TIME)
                         and (yesterday_low_price is not None)
                         and (low_price is not None)
                         and (low_price < yesterday_low_price)
@@ -1425,7 +1283,19 @@ if __name__ == "__main__":
         candidate_symbols = selected_stocks
         states = initialize_states(candidate_symbols, realtime_sdk)
 
-        adjust_buffer_yesterday_low_for_states(states, realtime_sdk)
+        target_hour = 9 # 9
+        target_minute = 1  # 0
+        target_second = 0 # 15
+        tz = pytz.timezone("Asia/Taipei")  # 台灣時區
+        print(f"正在等待時間到 {target_hour:02d}:{target_minute:02d}:{target_second:02d} ...")
+
+        while True:
+            now = datetime.now(tz)
+            if (now.hour, now.minute, now.second) >= (target_hour, target_minute, target_second):
+                print(f"⏰ 時間到！目前時間：{now.strftime('%H:%M:%S')}")
+                break
+            else:
+                time.sleep(5)  # 每 N 秒
 
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()
