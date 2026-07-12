@@ -449,12 +449,13 @@ def scan_entry_signal(
     """
     作空進場訊號：
     1) 自 STRATEGY_START ~ STRATEGY_END 監控分K
-    2) STRATEGY_START 前若已跌破真正昨低，改以前段新低作為後續突破門檻
-    3) 任一根分K low < 突破門檻，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 突破門檻
-    4) 入場棒前一根分K average > 突破門檻
-    5) 進場價 = 突破門檻 - 1 tick
-    6) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
-    7) 進場時間 = 觸發棒時間
+    2) 跌破目前突破門檻後，需後續任一根分K low > 候選低點，該候選低點才成為新突破門檻
+    3) 新突破門檻成立後，需自確認棒下一根起才可檢查進場
+    4) 任一根分K low < 突破門檻，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 突破門檻
+    5) 入場棒前一根分K average > 突破門檻
+    6) 進場價 = 突破門檻 - 1 tick
+    7) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
+    8) 進場時間 = 觸發棒時間
     回傳：
     - (entry_bar, entry_price): 條件成立
     - ENTRY_BLOCKED: 首次跌破突破門檻但檢核失敗（當日封單）
@@ -464,67 +465,80 @@ def scan_entry_signal(
     end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
     true_yesterday_low = float(ystats['low'])
     trigger_low = true_yesterday_low
+    has_confirmed_trigger = False
+    trigger_confirmed_idx = -1
+    pending_trigger_low = None
+    pending_trigger_idx = None
     max_intraday_range_before_trigger = true_yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
-
-    # STRATEGY_START 前若已跌破真正昨低，不封單，改以前段最低價作為後續突破門檻。
-    for bar in today_bars:
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        if hm >= start_hm:
-            continue
-        bar_low = float(bar.get('low', 0) or 0.0)
-        if bar_low < trigger_low:
-            trigger_low = bar_low
-
-    entry_tick = get_tick_size(trigger_low)
-    entry_price = max(trigger_low - entry_tick, 0.0)
     _, limit_down_price = calculate_limit_prices(float(ystats['close']))
-    if should_skip_entry_by_limit_down_zone(
-        entry_price,
-        true_yesterday_low,
-        limit_down_price,
-    ):
-        return ENTRY_BLOCKED
 
-    time_indexed = []
+    indexed_bars = []
     for idx, bar in enumerate(today_bars):
         dtv = bar.get('dt')
         if dtv is None:
             continue
         hm = dtv.hour * 60 + dtv.minute
-        if hm < start_hm or hm > end_hm:
-            continue
-        time_indexed.append((idx, bar, hm))
+        indexed_bars.append((idx, bar, hm))
 
-    for original_idx, bar, _ in time_indexed:
-        bar_low = float(bar['low'])
-        if bar_low >= trigger_low:
-            continue
+    for original_idx, bar, hm in indexed_bars:
+        bar_low = float(bar.get('low', 0) or 0.0)
 
-        prior_bars = today_bars[:original_idx]
-        if prior_bars:
-            prior_day_high = max(float(item['high']) for item in prior_bars)
-            prior_day_low = min(float(item['low']) for item in prior_bars)
-            if (prior_day_high - prior_day_low) > max_intraday_range_before_trigger:
+        if (
+            pending_trigger_low is not None
+            and pending_trigger_idx is not None
+            and original_idx > pending_trigger_idx
+            and bar_low > pending_trigger_low
+        ):
+            trigger_low = pending_trigger_low
+            has_confirmed_trigger = True
+            trigger_confirmed_idx = original_idx
+            pending_trigger_low = None
+            pending_trigger_idx = None
+
+        is_strategy_time = start_hm <= hm <= end_hm
+        can_check_entry = (
+            has_confirmed_trigger
+            and is_strategy_time
+            and original_idx > trigger_confirmed_idx
+        )
+        if can_check_entry and bar_low < trigger_low:
+            entry_tick = get_tick_size(trigger_low)
+            entry_price = max(trigger_low - entry_tick, 0.0)
+            if should_skip_entry_by_limit_down_zone(
+                entry_price,
+                true_yesterday_low,
+                limit_down_price,
+            ):
                 return ENTRY_BLOCKED
 
-        prev_lows_valid = False
-        prev_bar_average = (
-            float(today_bars[original_idx - 1].get('average', 0) or 0.0)
-            if original_idx > 0
-            else 0.0
-        )
-        if original_idx >= PREV_LOW_BARS_REQUIRED:
-            prev_lows = [
-                float(today_bars[original_idx - offset].get('low', 0) or 0.0)
-                for offset in range(1, PREV_LOW_BARS_REQUIRED + 1)
-            ]
-            prev_lows_valid = all(prev_low >= trigger_low for prev_low in prev_lows)
-        if prev_lows_valid and prev_bar_average > trigger_low:
-            return bar, entry_price
-        return ENTRY_BLOCKED
+            prior_bars = today_bars[:original_idx]
+            if prior_bars:
+                prior_day_high = max(float(item['high']) for item in prior_bars)
+                prior_day_low = min(float(item['low']) for item in prior_bars)
+                if (prior_day_high - prior_day_low) > max_intraday_range_before_trigger:
+                    return ENTRY_BLOCKED
+
+            prev_lows_valid = False
+            prev_bar_average = (
+                float(today_bars[original_idx - 1].get('average', 0) or 0.0)
+                if original_idx > 0
+                else 0.0
+            )
+            if original_idx >= PREV_LOW_BARS_REQUIRED:
+                prev_lows = [
+                    float(today_bars[original_idx - offset].get('low', 0) or 0.0)
+                    for offset in range(1, PREV_LOW_BARS_REQUIRED + 1)
+                ]
+                prev_lows_valid = all(prev_low >= trigger_low for prev_low in prev_lows)
+            if prev_lows_valid and prev_bar_average > trigger_low:
+                return bar, entry_price
+            return ENTRY_BLOCKED
+
+        if bar_low < trigger_low and (
+            pending_trigger_low is None or bar_low < pending_trigger_low
+        ):
+            pending_trigger_low = bar_low
+            pending_trigger_idx = original_idx
     return None
 
 
