@@ -45,13 +45,13 @@ STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 STOP_MONITOR_TIME = (13, 25)  # 13:25 停止監控時間
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
-OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
+OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
 
-OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
+OPTIMIZE_PROFIT_PER = 5.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
-PROTECT_LOSS_PER = 1.0 # 新的停損
+PROTECT_LOSS_PER = 0.8 # 新的停損
 
-PROTECT_PROFIT_PER = 3.0 # 觸發調整停利
+PROTECT_PROFIT_PER = 2.5 # 觸發調整停利
 
 BUFFER_LOW_CHECK_END_TIME = (9, 5) # 可以調降昨低的時間
 
@@ -68,11 +68,11 @@ MAX_ENTRY_SLIPPAGE_TICKS = 3 # 跌破昨低達幾檔後不追空
 
 ENTRY_ORDER_QUANTITY = 2 # 每次進場下單數量
 
-PROFIT_BIG_BACK_STEP = 0.0 # 獲利後允許回撤多少
-PROFIT_BIG_TARGET_STEP = 0.5 # 逐步獲利
+PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
+PROFIT_BIG_TARGET_STEP = 1.0 # 逐步獲利
 
-PROFIT_SMALL_BACK_STEP = 0.0 # 獲利後允許回撤多少
-PROFIT_SMALL_TARGET_STEP = 0.2 # 逐步獲利
+PROFIT_SMALL_BACK_STEP = 0.1 # 獲利後允許回撤多少
+PROFIT_SMALL_TARGET_STEP = 0.3 # 逐步獲利
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
@@ -906,6 +906,13 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
             return 'BLOCKED'
 
         return True
+
+    if last_px <= trigger_price and best_bid > trigger_price:
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"現價已跌破但最佳bid未跌破，暫不進場 "
+            f"last_price={last_px} best_bid={best_bid} trigger_price={trigger_price}"
+        )
 
     # 高頻路徑：entry 條件尚未觸發，繼續等待
     return False
