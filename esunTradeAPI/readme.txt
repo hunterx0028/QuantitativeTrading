@@ -13,10 +13,14 @@
 python.exe -m pip install --upgrade pip
 
 # 交易SDK, 版本 2.2.0
+cd esunTradeAPI
 pip install esun_trade-2.2.0-cp37-abi3-win_amd64.whl
+cd ..
 
 # 行情SDK, 版本 2.2.0
+cd esunTradeAPI
 pip install esun_marketdata-2.2.0-cp37-abi3-win_amd64.whl
+cd ..
 
 pip install yfinance
 
