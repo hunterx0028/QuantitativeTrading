@@ -52,7 +52,7 @@ PROTECT_LOSS_PER = 1.0 # 新的停損
 
 PROTECT_PROFIT_PER = 3.0 # 觸發調整停利
 
-BUFFER_LOW_CHECK_END_TIME = (9,5) # 可以調降昨低的時間
+BUFFER_LOW_CHECK_END_TIME = (9, 5) # 可以調降昨低的時間
 
 ENTRY_CHECK_START_TIME = (9, 41)  # 進場檢核開始時間（含）
 ENTRY_CHECK_END_TIME = (10, 11)  # 進場檢核截止時間（含）
@@ -198,8 +198,12 @@ def get_realtime_price(stock_id: str, realtime_sdk):
     low_price = stock_intraday_quote['lowPrice']
     close_price = stock_intraday_quote['closePrice']
     avg_price = stock_intraday_quote['avgPrice']
+    bids = stock_intraday_quote.get('bids') or []
+    asks = stock_intraday_quote.get('asks') or []
+    best_bid_price = bids[0].get('price') if bids else None
+    best_ask_price = asks[0].get('price') if asks else None
 
-    return last_price, open_price, high_price, low_price, close_price, avg_price
+    return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
 
 
 def adjust_price(price: float, trade_strategy: str) -> float:
@@ -400,6 +404,8 @@ def build_initial_state(
         "low_price": None,
         "close_price": None,
         "avg_price": None,
+        "best_bid_price": None,
+        "best_ask_price": None,
         "traded": False,
         "in_position": False,
         "side": "",  # 'SHORT'
@@ -743,11 +749,20 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
     if last_price is None:
         return False
 
-    low_price = state.get("low_price", 0)
-    if low_price is None:
+    best_bid_price = state.get("best_bid_price")
+    if best_bid_price is None:
         return False
 
-    if low_price < yesterday_low_price:  # 跌破昨低即進場
+    try:
+        ylow = float(yesterday_low_price)
+        last_px = float(last_price)
+        best_bid = float(best_bid_price)
+    except (TypeError, ValueError):
+        return False
+
+    trigger_price = adjust_price(ylow - get_tick_size(ylow), "SHORT")
+
+    if best_bid <= trigger_price and last_px <= trigger_price:  # 買一與成交價皆跌破昨低下一檔才進場
         high_price = state.get("high_price")
         original_yesterday_low_price = state.get("original_yesterday_low_price")
         try:
@@ -776,7 +791,7 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 均價小於昨低，突破失敗，不追蹤")
             return 'BLOCKED'
 
-        if should_skip_entry_by_limit_down_zone(last_price, yesterday_low_price, limit_down_price):
+        if should_skip_entry_by_limit_down_zone(last_px, ylow, limit_down_price):
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於昨低到跌停三分之一位置，不追蹤。")
             return 'BLOCKED'
 
@@ -1295,7 +1310,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 if round_should_update_realtime:
                     try:
                         # print("更新股價")
-                        px, open_px, high_price, low_price, close_price, avg_price = get_realtime_price(st.get("symbol_code_with_suf", ""), realtime_sdk)
+                        px, open_px, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price = get_realtime_price(st.get("symbol_code_with_suf", ""), realtime_sdk)
                     except Exception as e:
                         print(f"[{st['symbol_name']}] ⚠️ 取價失敗：{e}，略過本輪重試")
                         continue
@@ -1310,6 +1325,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["low_price"] = low_price # 最低價(目前為止的最低價)
                     st["close_price"] = close_price # 收盤價(最近成交價)
                     st["avg_price"] = avg_price # 均價(即時API avgPrice)
+                    st["best_bid_price"] = best_bid_price # 買一價
+                    st["best_ask_price"] = best_ask_price # 賣一價
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
