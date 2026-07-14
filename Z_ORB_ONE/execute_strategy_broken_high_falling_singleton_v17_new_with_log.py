@@ -47,9 +47,9 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
 
-OPTIMIZE_PROFIT_PER = 4.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
+OPTIMIZE_PROFIT_PER = 3.5 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
-PROTECT_LOSS_PER = 0.8 # 新的停損
+PROTECT_LOSS_PER = 1.0 # 新的停損
 
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利
 
@@ -71,7 +71,7 @@ ENTRY_ORDER_QUANTITY = 2 # 每次進場下單數量
 PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
 PROFIT_BIG_TARGET_STEP = 1.0 # 逐步獲利
 
-PROFIT_SMALL_BACK_STEP = 0.1 # 獲利後允許回撤多少
+PROFIT_SMALL_BACK_STEP = 0.2 # 獲利後允許回撤多少
 PROFIT_SMALL_TARGET_STEP = 0.3 # 逐步獲利
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
