@@ -47,7 +47,7 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
 
-OPTIMIZE_PROFIT_PER = 5.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
+OPTIMIZE_PROFIT_PER = 4.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
 PROTECT_LOSS_PER = 0.8 # 新的停損
 

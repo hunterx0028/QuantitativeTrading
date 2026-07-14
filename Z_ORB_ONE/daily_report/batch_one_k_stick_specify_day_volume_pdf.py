@@ -30,7 +30,7 @@ from Z_ORB_ONE.stock_data import selected_stocks
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = "20260708"  # 指定要繪圖的日期，格式 YYYYMMDD
+SPECIFIED_DATE = "20260714"  # 指定要繪圖的日期，格式 YYYYMMDD
 
 
 def normalize_config_paths(config: ConfigParser):

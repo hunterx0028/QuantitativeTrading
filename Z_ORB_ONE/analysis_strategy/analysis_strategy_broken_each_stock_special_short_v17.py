@@ -27,7 +27,7 @@ ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 
 OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER = 5.0 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_PROFIT_PER = 4.5 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
 STRATEGY_START = (9, 41) # 策略開始分k棒的(時, 分) 31
 STRATEGY_END = (10, 11) # 策略結束分k棒的(時, 分) 59
