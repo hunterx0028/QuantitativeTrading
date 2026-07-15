@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 
 ATR_PERIOD = 14
 
-ETF_CODE = ["24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "45", "46", "47"]
+ETF_CODE = ["24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "37", "38", "39", "40", "41", "45", "46", "47"]
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = CURRENT_DIR.parent
 OUTPUT_FILE = CURRENT_DIR / "yesterday_selector_result.txt"
@@ -285,7 +285,7 @@ def check_orb_filters_for_symbols(realtime_sdk: EsunMarketdata, symbols) -> List
             symbol_can_day_trade, symbol_can_buy_day_trade, security_type, industry, _, _, _ = symbol_intraday_ticker_info(code, realtime_sdk)
 
             if security_type in ETF_CODE:  # 型態:"00" -> ETF - 0.8
-                print(f'symbol:{symbol} 不考慮ETF，跳過')
+                print(f'symbol:{symbol} 不考慮ETF ETN，跳過')
                 continue # 目前不考慮ETF
 
             '''
