@@ -30,7 +30,7 @@ from Z_ORB_ONE.stock_data import selected_stocks
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = "20260708"  # 指定要繪圖的日期，格式 YYYYMMDD
+SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 
 
 def normalize_config_paths(config: ConfigParser):
@@ -58,7 +58,11 @@ def parse_iso_keep_local_walltime(s: str) -> datetime:
 
 
 def parse_specified_date(date_str: str) -> date:
-    """將 YYYYMMDD 轉成 date。"""
+    """將 YYYYMMDD 轉成 date；空值時使用台北時區今天日期。"""
+    date_str = date_str.strip()
+    if not date_str:
+        return now_tpe().date()
+
     try:
         return datetime.strptime(date_str, "%Y%m%d").date()
     except ValueError as exc:

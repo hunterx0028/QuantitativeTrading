@@ -2,7 +2,7 @@
 
 import builtins
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from esun_marketdata import EsunMarketdata
 from configparser import ConfigParser
 from pathlib import Path
@@ -15,6 +15,7 @@ ETF_CODE = ["24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "37", "3
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = CURRENT_DIR.parent
 OUTPUT_FILE = CURRENT_DIR / "yesterday_selector_result.txt"
+ST_DB_DIR = CURRENT_DIR / "st_db"
 CONFIG_PATH = PROJECT_DIR / "config.ini"
 PRINT_BUFFER: List[str] = []
 
@@ -44,6 +45,35 @@ def normalize_config_paths(config: ConfigParser, config_file: Path) -> None:
     cert_path = config.get("Cert", "Path", fallback="").strip()
     if cert_path and not Path(cert_path).is_absolute():
         config.set("Cert", "Path", str((config_file.parent / cert_path).resolve()))
+
+
+def get_next_stock_db_file(stock_db_dir: Path) -> Path:
+    latest_date = None
+    for txt_file in stock_db_dir.glob("*.txt"):
+        stem = txt_file.stem
+        if len(stem) != 8 or not stem.isdigit():
+            continue
+
+        try:
+            file_date = datetime.strptime(stem, "%Y%m%d").date()
+        except ValueError:
+            continue
+
+        if latest_date is None or file_date > latest_date:
+            latest_date = file_date
+
+    if latest_date is None:
+        raise FileNotFoundError(f"st_db 內找不到 8 位數日期命名的 txt 檔: {stock_db_dir}")
+
+    next_date = latest_date + timedelta(days=1)
+    return stock_db_dir / f"{next_date:%Y%m%d}.txt"
+
+
+def write_next_stock_db_file(targets: List[tuple]) -> Path:
+    stock_db_file = get_next_stock_db_file(ST_DB_DIR)
+    stock_db_file.write_text("".join(f"{target},\n" for target in targets), encoding="utf-8")
+    return stock_db_file
+
 
 def fmt_bool(b: bool) -> str:
     return "✅ True" if b else "❌ False"
@@ -352,6 +382,7 @@ if __name__ == "__main__":
     # print(symbols)
 
     orderTargets = check_orb_filters_for_symbols(realtime_sdk, symbols)
+    write_next_stock_db_file(orderTargets)
     #print(orderTargets)
 
     pre_symbol= [
