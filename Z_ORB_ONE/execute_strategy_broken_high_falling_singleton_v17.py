@@ -78,7 +78,7 @@ MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
 
 ENABLE_MARKET_TREND_FILTER = True # 是否啟用盤勢濾網
-MAX_MARKET_GAIN_PER = 0.3 # 指數相對昨日收盤漲幅超過此百分比，不允許放空
+MAX_MARKET_GAIN_PER = 0.0 # 指數相對昨日收盤漲幅超過此百分比，不允許放空
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 
