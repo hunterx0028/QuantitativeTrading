@@ -71,7 +71,7 @@ ENTRY_ORDER_QUANTITY = 2 # 每次進場下單數量
 PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
 PROFIT_BIG_TARGET_STEP = 1.0 # 逐步獲利
 
-PROFIT_SMALL_BACK_STEP = 0.1 # 獲利後允許回撤多少
+PROFIT_SMALL_BACK_STEP = 0.2 # 獲利後允許回撤多少
 PROFIT_SMALL_TARGET_STEP = 0.3 # 逐步獲利
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
@@ -214,11 +214,21 @@ def get_realtime_price(stock_id: str, realtime_sdk):
     return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
 
 
-def get_market_key_for_symbol(symbol_code_with_suf: str) -> str:
+def get_exchange_key_for_symbol(symbol_code_with_suf: str) -> str:
     symbol_upper = str(symbol_code_with_suf or "").upper()
     if symbol_upper.endswith(".TWO"):
         return "TPEX"
     return "TWSE"
+
+
+def get_market_key_for_symbol(symbol_code_with_suf: str, industry_code: str) -> str:
+    exchange_key = get_exchange_key_for_symbol(symbol_code_with_suf)
+    return f"{exchange_key}:{str(industry_code).zfill(2)}"
+
+
+def get_industry_index_config(symbol_code_with_suf: str, industry_code: str) -> tuple[str, Dict[str, Any]]:
+    market_key = get_market_key_for_symbol(symbol_code_with_suf, industry_code)
+    return market_key, market_previous_close_indices.get(market_key, {})
 
 
 def start_market_index_stream(realtime_sdk: EsunMarketdata):
@@ -261,11 +271,16 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
         stock_ws.on("message", handle_message)
         stock_ws.connect()
         for index_symbol in symbol_to_market_key:
+            market_key = symbol_to_market_key[index_symbol]
+            index_config = market_previous_close_indices.get(market_key, {})
             stock_ws.subscribe({
                 "channel": "indices",
                 "symbol": index_symbol,
             })
-            print(f"[MARKET] 已訂閱盤勢指數 {index_symbol}")
+            print(
+                f"[MARKET] 已訂閱產業別指數 {market_key} "
+                f"{index_symbol} {index_config.get('name', '')}"
+            )
         return stock_ws
     except Exception as e:
         print(f"[WARN] 啟動盤勢指數 WebSocket 失敗，盤勢濾網將等待指數資料: {e}")
@@ -276,7 +291,13 @@ def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
     if not ENABLE_MARKET_TREND_FILTER:
         return True
 
-    market_key = get_market_key_for_symbol(state.get("symbol_code_with_suf", ""))
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
     index_config = market_previous_close_indices.get(market_key, {})
     previous_close = index_config.get("previous_close")
     market_state = MARKET_INDEX_STATE.get(market_key, {})
@@ -286,17 +307,18 @@ def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
         previous_close_float = float(previous_close)
         last_index_float = float(last_index)
     except (TypeError, ValueError):
-        print(f"[{state['symbol_name']}] 盤勢濾網等待 {market_key} 指數資料")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網等待 {market_key} 指數資料")
         return False
 
     if previous_close_float <= 0:
-        print(f"[{state['symbol_name']}] 盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
     market_gain_per = ((last_index_float - previous_close_float) / previous_close_float) * 100.0
     if market_gain_per > MAX_MARKET_GAIN_PER:
+        index_name = index_config.get("name", "")
         print(
-            f"[{state['symbol_name']}] 盤勢濾網未通過：{market_key} 指數漲幅 "
+            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} 指數漲幅 "
             f"{market_gain_per:.2f}% > {MAX_MARKET_GAIN_PER:.2f}%"
         )
         return False
@@ -488,6 +510,8 @@ def build_initial_state(
     v2: float,
     v3: float,
     v4: float,
+    industry_code: str,
+    market_index_key: str,
     limit_up_price: float,
     limit_down_price: float,
     up_streak_days: int = 0,
@@ -499,6 +523,8 @@ def build_initial_state(
         "symbol_name": symbol_str, # 完整的股票名稱
         "symbol_code": code, # 只有四位數的股票代碼
         "symbol_code_with_suf": code_with_suf, # 包含.tw .two 的股票代碼
+        "industry_code": str(industry_code).zfill(2), # 產業別代碼
+        "market_index_key": market_index_key, # 產業別盤勢濾網 key，例如 TWSE:24
         "date": today_str_tpe(),  # 當前交易日（Asia/Taipei）
         "open_price": None,
         "high_price": None,
@@ -543,6 +569,8 @@ def normalize_state(d: Dict[str, Any]) -> Dict[str, Any]:
         d.get("yesterday_high_price", 0.0),
         d.get("yesterday_low_price", 0.0),
         d.get("yesterday_close_price", 0.0),
+        d.get("industry_code", ""),
+        d.get("market_index_key", ""),
         d.get("limit_up_price", 0.0),
         d.get("limit_down_price", 0.0),
         d.get("up_streak_days", 0),
@@ -1242,6 +1270,8 @@ def load_or_init_state(
     v2: float,
     v3: float,
     v4: float,
+    industry_code: str,
+    market_index_key: str,
     limit_up_price: float,
     limit_down_price: float,
     up_streak_days: int,
@@ -1274,12 +1304,16 @@ def load_or_init_state(
                 v2,
                 v3,
                 v4,
+                industry_code,
+                market_index_key,
                 limit_up_price,
                 limit_down_price,
                 up_streak_days,
                 down_streak_days,
             )
             atomic_write_json(path, st)
+        st["industry_code"] = str(industry_code).zfill(2)
+        st["market_index_key"] = market_index_key
         return st
     else:
         st = build_initial_state(
@@ -1289,6 +1323,8 @@ def load_or_init_state(
             v2,
             v3,
             v4,
+            industry_code,
+            market_index_key,
             limit_up_price,
             limit_down_price,
             up_streak_days,
@@ -1317,6 +1353,12 @@ def initialize_states(
     filtered_stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]] = []
     for symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple in stocks:
         _, code_with_suf = get_pure_symbol(symbolStr)
+        normalized_industry_code = str(industry_code).zfill(2)
+        market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
+        if not market_index_config.get("symbol"):
+            print(f"[{symbolStr}] ⚠️ 無對應之產業別指數代碼，排除")
+            continue
+
         up_streak_days, down_streak_days = streak_tuple
 
         try:
@@ -1356,13 +1398,18 @@ def initialize_states(
             v2,
             v3,
             v4,
+            normalized_industry_code,
+            market_index_key,
             limit_up_price,
             limit_down_price,
             up_streak_days,
             down_streak_days,
         )
+        st["industry_name"] = market_index_config.get("industry_name")
+        st["market_index_symbol"] = market_index_config.get("symbol")
+        st["market_index_name"] = market_index_config.get("name")
         states[code_with_suf] = st
-        filtered_stocks.append((symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple))
+        filtered_stocks.append((symbolStr, qty, v1, v2, v3, v4, normalized_industry_code, volatility_value, streak_tuple))
 
         st["entry_time"] = now_tpe().isoformat()
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
