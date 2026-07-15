@@ -147,6 +147,44 @@ def select_records_for_repeat_count(ranked: list[tuple[tuple, int]]) -> tuple[li
     return records, header_suffix
 
 
+def format_selected_stocks(records: list[tuple]) -> str:
+    lines = ["selected_stocks = ["]
+    lines.extend(f"    {record!r}," for record in records)
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def find_selected_stocks_assignment(source: str) -> tuple[int, int]:
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if "selected_stocks" in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "selected_stocks"
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+
+    raise ValueError("找不到 selected_stocks 宣告")
+
+
+def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> None:
+    source = stock_data_path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    start_line, end_line = find_selected_stocks_assignment(source)
+    replacement = format_selected_stocks(records).splitlines()
+    updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+    stock_data_path.write_text(updated_source, encoding="utf-8")
+
+
 def replace_top_repeat_section(lines: list[str], blocks: list[tuple[list[tuple], str]]) -> list[str]:
     new_block: list[str] = []
     for records, header_suffix in blocks:
@@ -212,6 +250,7 @@ def main() -> None:
     base_dir = Path(__file__).resolve().parent
     result_path = base_dir / RESULT_FILE_NAME
     output_result_path = base_dir / OUTPUT_RESULT_FILE_NAME
+    stock_data_path = base_dir.parent.parent / "esunAPItest" / "stock_data.py"
 
     if not result_path.exists():
         raise FileNotFoundError(f"找不到檔案: {result_path}")
@@ -231,8 +270,10 @@ def main() -> None:
         ],
     )
     output_result_path.write_text("".join(updated_lines), encoding="utf-8")
+    update_selected_stocks_file(stock_data_path, repeat_records)
 
     log(f"done: {output_result_path}")
+    log(f"updated selected_stocks: {stock_data_path}")
     log(f"source={result_path}")
     log(f"ranked_count={len(ranked_records)}")
     log(f"filtered_ranked_count={len(filtered_ranked_records)}")
