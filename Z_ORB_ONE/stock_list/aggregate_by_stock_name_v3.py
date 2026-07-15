@@ -25,6 +25,7 @@ ST_DB_KEEP_RECENT_FILE_COUNT = 25
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 TOP_REPEAT_RESULT_HEADER_PREFIX = "# FILTER_RESULT"
 
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -269,6 +270,44 @@ def cleanup_old_stock_db_files(stock_db_dir: Path, keep_count: int) -> None:
         log(f"[INFO] st_db 日期檔案數量未超過 {keep_count}，不需刪除")
 
 
+def format_selected_stocks(records: list[tuple]) -> str:
+    lines = ["selected_stocks = ["]
+    lines.extend(f"    {record!r}," for record in records)
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def find_selected_stocks_assignment(source: str) -> tuple[int, int]:
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if "selected_stocks" in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "selected_stocks"
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+
+    raise ValueError("找不到 selected_stocks 宣告")
+
+
+def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> None:
+    source = stock_data_path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    start_line, end_line = find_selected_stocks_assignment(source)
+    replacement = format_selected_stocks(records).splitlines()
+    updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+    stock_data_path.write_text(updated_source, encoding="utf-8")
+
+
 def main() -> None:
     execution_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log(f"[INFO] 執行開始時間: {execution_start_time}")
@@ -369,6 +408,7 @@ def main() -> None:
             fallback_count += 1
 
     output_path = base_dir / "aggregate_by_stock_name_v3_result.txt"
+    stock_data_path = base_dir.parent.parent / "esunAPItest" / "stock_data.py"
     top_rank_updated_by_stock = {
         stock_name: updated_by_stock[stock_name]
         for stock_name in top_rank_stock_names
@@ -403,6 +443,12 @@ def main() -> None:
         for stock_name in sorted(min_repeat_updated_by_stock.keys()):
             f.write(f"{min_repeat_updated_by_stock[stock_name]},\n")
 
+    selected_stock_records = [
+        min_repeat_updated_by_stock[stock_name]
+        for stock_name in sorted(min_repeat_updated_by_stock.keys())
+    ]
+    update_selected_stocks_file(stock_data_path, selected_stock_records)
+
     log("# ALL_RESULT_REPEAT_COUNT_SORT")
     for stock_name, count in all_result_repeat_count_sort[:CONSOLE_RANKING_PREVIEW_COUNT]:
         log(f"{updated_by_stock[stock_name]},{count},")
@@ -415,6 +461,7 @@ def main() -> None:
         log(f"{min_repeat_updated_by_stock[stock_name]},")
 
     log(f"done: {output_path}")
+    log(f"updated selected_stocks: {stock_data_path}")
     log(f"stock_count={len(updated_by_stock)}")
     log(
         f"[SUMMARY] success={success_count}, "

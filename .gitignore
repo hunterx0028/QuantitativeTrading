@@ -10,6 +10,7 @@ __pycache__/
 /Z_ORB_ONE/stock_list/st_db/
 T122260516_20260828.p12
 *_result.txt
+*_result_re.txt
 *.whl
 stock_data.py
 main.py
