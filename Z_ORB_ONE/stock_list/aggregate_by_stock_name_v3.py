@@ -408,7 +408,7 @@ def main() -> None:
             fallback_count += 1
 
     output_path = base_dir / "aggregate_by_stock_name_v3_result.txt"
-    stock_data_path = base_dir.parent.parent / "esunAPItest" / "stock_data.py"
+    stock_data_path = base_dir.parent.parent / "Z_ORB_ONE" / "stock_data.py"
     top_rank_updated_by_stock = {
         stock_name: updated_by_stock[stock_name]
         for stock_name in top_rank_stock_names

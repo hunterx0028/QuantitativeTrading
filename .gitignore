@@ -15,3 +15,6 @@ T122260516_20260828.p12
 stock_data.py
 main.py
 /esunAPItest/
+Z_ORB_ONE/tpex_indices.json
+Z_ORB_ONE/twse_indices.json
+Z_ORB_ONE/industry_index_map.json

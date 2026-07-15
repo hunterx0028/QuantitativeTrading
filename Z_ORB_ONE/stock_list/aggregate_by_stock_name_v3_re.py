@@ -250,7 +250,7 @@ def main() -> None:
     base_dir = Path(__file__).resolve().parent
     result_path = base_dir / RESULT_FILE_NAME
     output_result_path = base_dir / OUTPUT_RESULT_FILE_NAME
-    stock_data_path = base_dir.parent.parent / "esunAPItest" / "stock_data.py"
+    stock_data_path = base_dir.parent.parent / "Z_ORB_ONE" / "stock_data.py"
 
     if not result_path.exists():
         raise FileNotFoundError(f"找不到檔案: {result_path}")
