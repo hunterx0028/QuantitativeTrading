@@ -49,7 +49,7 @@ OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 2.5 代表入場價加上 
 
 OPTIMIZE_PROFIT_PER = 3.5 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
-PROTECT_LOSS_PER = 1.0 # 新的停損
+PROTECT_LOSS_PER = 1.5 # 新的停損
 
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利
 
