@@ -6,6 +6,7 @@ import sys
 import math
 import shutil
 import io
+from pprint import pformat
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime
 import pytz
@@ -16,7 +17,7 @@ from esun_trade.order import OrderObject
 from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 from esun_marketdata import EsunMarketdata
 
-from stock_data import selected_stocks
+from stock_data import selected_stocks, market_previous_close_indices
 
 
 class TeeStream:
@@ -47,6 +48,10 @@ OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 2.5 代表入場價加上 
 
 OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 6.0 代表入場價減去 6%
 
+PROTECT_LOSS_PER = 1.5 # 新的停損
+
+PROTECT_PROFIT_PER = 2.5 # 觸發調整停利
+
 ENTRY_CHECK_START_TIME = (9, 40)  # 進場檢核開始時間（含）
 ENTRY_CHECK_END_TIME = (10, 0)  # 進場檢核截止時間（含）
 
@@ -55,6 +60,8 @@ FORCE_CLOSE_TIME = (13, 0)  # 13:21 收盤前強制平倉時間
 MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 5.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
 
 PREV_LOW_BARS_REQUIRED = 5  # 跌破昨低前，需連續幾根分K low >= 昨低
+
+MAX_ENTRY_SLIPPAGE_TICKS = 3 # 跌破昨低達幾檔後不追空
 
 ENTRY_ORDER_QUANTITY = 2 # 每次進場下單數量
 
@@ -66,6 +73,11 @@ PROFIT_SMALL_TARGET_STEP = 0.2 # 逐步獲利
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
+
+ENABLE_MARKET_TREND_FILTER = True # 是否啟用盤勢濾網
+MAX_MARKET_GAIN_PER = 0.0 # 指數相對昨日收盤漲幅超過此百分比，不允許放空
+
+MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 
 # ============ 下單函式 ============
 # symbol: '2330' '0050'
@@ -191,8 +203,140 @@ def get_realtime_price(stock_id: str, realtime_sdk):
     low_price = stock_intraday_quote['lowPrice']
     close_price = stock_intraday_quote['closePrice']
     avg_price = stock_intraday_quote['avgPrice']
+    bids = stock_intraday_quote.get('bids') or []
+    asks = stock_intraday_quote.get('asks') or []
+    best_bid_price = bids[0].get('price') if bids else None
+    best_ask_price = asks[0].get('price') if asks else None
 
-    return last_price, open_price, high_price, low_price, close_price, avg_price
+    return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
+
+
+def get_exchange_key_for_symbol(symbol_code_with_suf: str) -> str:
+    symbol_upper = str(symbol_code_with_suf or "").upper()
+    if symbol_upper.endswith(".TWO"):
+        return "TPEX"
+    return "TWSE"
+
+
+def get_market_key_for_symbol(symbol_code_with_suf: str, industry_code: str) -> str:
+    exchange_key = get_exchange_key_for_symbol(symbol_code_with_suf)
+    return f"{exchange_key}:{str(industry_code).zfill(2)}"
+
+
+def get_industry_index_config(symbol_code_with_suf: str, industry_code: str) -> tuple[str, Dict[str, Any]]:
+    market_key = get_market_key_for_symbol(symbol_code_with_suf, industry_code)
+    return market_key, market_previous_close_indices.get(market_key, {})
+
+
+def start_market_index_stream(realtime_sdk: EsunMarketdata):
+    if not ENABLE_MARKET_TREND_FILTER:
+        return None
+
+    symbol_to_market_key = {
+        str(info.get("symbol", "")): market_key
+        for market_key, info in market_previous_close_indices.items()
+        if info.get("symbol")
+    }
+    if not symbol_to_market_key:
+        print("[WARN] 未設定 market_previous_close_indices，盤勢濾網將等待指數資料")
+        return None
+
+    def handle_message(message):
+        try:
+            payload = json.loads(message) if isinstance(message, str) else message
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            index_symbol = str(data.get("symbol", ""))
+            market_key = symbol_to_market_key.get(index_symbol)
+            if not market_key:
+                return
+
+            index_value = data.get("index")
+            if index_value is None:
+                return
+
+            index_float = float(index_value)
+            market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
+            market_state["symbol"] = index_symbol
+            market_state["last_index"] = index_float
+            market_state["time"] = data.get("time")
+            market_state["last_updated"] = now_tpe().isoformat()
+        except Exception as e:
+            print(f"[WARN] 處理盤勢指數訊息失敗: {e}")
+
+    try:
+        stock_ws = realtime_sdk.websocket_client.stock
+        stock_ws.on("message", handle_message)
+        stock_ws.connect()
+        for index_symbol in symbol_to_market_key:
+            market_key = symbol_to_market_key[index_symbol]
+            index_config = market_previous_close_indices.get(market_key, {})
+            stock_ws.subscribe({
+                "channel": "indices",
+                "symbol": index_symbol,
+            })
+            print(
+                f"[MARKET] 已訂閱產業別指數 {market_key} "
+                f"{index_symbol} {index_config.get('name', '')}"
+            )
+        return stock_ws
+    except Exception as e:
+        print(f"[WARN] 啟動盤勢指數 WebSocket 失敗，盤勢濾網將等待指數資料: {e}")
+        return None
+
+
+def close_market_index_stream(stock_ws: Any) -> None:
+    if stock_ws is None:
+        return
+
+    for method_name in ("disconnect", "close", "stop"):
+        method = getattr(stock_ws, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+            print(f"[MARKET] WebSocket 已執行 {method_name}()")
+            return
+        except Exception as e:
+            print(f"[WARN] 關閉盤勢指數 WebSocket {method_name}() 失敗: {e}")
+
+
+def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
+    if not ENABLE_MARKET_TREND_FILTER:
+        return True
+
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
+    index_config = market_previous_close_indices.get(market_key, {})
+    previous_close = index_config.get("previous_close")
+    market_state = MARKET_INDEX_STATE.get(market_key, {})
+    last_index = market_state.get("last_index")
+
+    try:
+        previous_close_float = float(previous_close)
+        last_index_float = float(last_index)
+    except (TypeError, ValueError):
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網等待 {market_key} 指數資料")
+        return False
+
+    if previous_close_float <= 0:
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        return False
+
+    market_gain_per = ((last_index_float - previous_close_float) / previous_close_float) * 100.0
+    if market_gain_per > MAX_MARKET_GAIN_PER:
+        index_name = index_config.get("name", "")
+        print(
+            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} 指數漲幅 "
+            f"{market_gain_per:.2f}% > {MAX_MARKET_GAIN_PER:.2f}%"
+        )
+        return False
+
+    return True
 
 
 def adjust_price(price: float, trade_strategy: str) -> float:
@@ -285,6 +429,9 @@ def persist_selected_stocks_to_stock_data(
     stock_data_path = os.path.join(os.path.dirname(__file__), "stock_data.py")
 
     lines = ["# 股票代碼、購買量、昨天開盤、昨天最高、昨天最低、昨天收盤、產業別代碼、真實平均波動幅度、(連漲天數, 連跌天數)\n"]
+    lines.append("market_previous_close_indices = ")
+    lines.append(pformat(market_previous_close_indices, sort_dicts=False))
+    lines.append("\n\n")
     lines.append("selected_stocks = [\n")
 
     for item in stocks:
@@ -376,6 +523,8 @@ def build_initial_state(
     v2: float,
     v3: float,
     v4: float,
+    industry_code: str,
+    market_index_key: str,
     limit_up_price: float,
     limit_down_price: float,
     up_streak_days: int = 0,
@@ -387,12 +536,16 @@ def build_initial_state(
         "symbol_name": symbol_str, # 完整的股票名稱
         "symbol_code": code, # 只有四位數的股票代碼
         "symbol_code_with_suf": code_with_suf, # 包含.tw .two 的股票代碼
+        "industry_code": str(industry_code).zfill(2), # 產業別代碼
+        "market_index_key": market_index_key, # 產業別盤勢濾網 key，例如 TWSE:24
         "date": today_str_tpe(),  # 當前交易日（Asia/Taipei）
         "open_price": None,
         "high_price": None,
         "low_price": None,
         "close_price": None,
         "avg_price": None,
+        "best_bid_price": None,
+        "best_ask_price": None,
         "traded": False,
         "in_position": False,
         "side": "",  # 'SHORT'
@@ -428,6 +581,8 @@ def normalize_state(d: Dict[str, Any]) -> Dict[str, Any]:
         d.get("yesterday_high_price", 0.0),
         d.get("yesterday_low_price", 0.0),
         d.get("yesterday_close_price", 0.0),
+        d.get("industry_code", ""),
+        d.get("market_index_key", ""),
         d.get("limit_up_price", 0.0),
         d.get("limit_down_price", 0.0),
         d.get("up_streak_days", 0),
@@ -614,6 +769,16 @@ def has_none_in_entry_k_data(state: Dict[str, Any]) -> bool:
     return any(state.get(field) is None for field in required_k_fields)
 
 
+def should_skip_entry_by_limit_down_zone(
+    entry_price: float,
+    true_yesterday_low: float,
+    limit_down_price: float,
+) -> bool:
+    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
+    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
+    return entry_price <= threshold
+
+
 def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
     進場條件判斷（純函式，不修改 state）。
@@ -630,6 +795,7 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         return False
 
     yesterday_low_price = state.get("yesterday_low_price")
+    limit_down_price = state.get("limit_down_price")
     if yesterday_low_price is None:
         return False
 
@@ -637,11 +803,29 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
     if last_price is None:
         return False
 
-    low_price = state.get("low_price", 0)
-    if low_price is None:
+    best_bid_price = state.get("best_bid_price")
+    if best_bid_price is None:
         return False
 
-    if low_price < yesterday_low_price:  # 跌破昨低即進場
+    try:
+        ylow = float(yesterday_low_price)
+        last_px = float(last_price)
+        best_bid = float(best_bid_price)
+    except (TypeError, ValueError):
+        return False
+
+    ylow_tick_size = get_tick_size(ylow)
+    trigger_price = adjust_price(ylow - ylow_tick_size, "SHORT")
+    max_slippage_price = adjust_price(ylow - (ylow_tick_size * MAX_ENTRY_SLIPPAGE_TICKS), "SHORT")
+
+    if best_bid <= trigger_price and last_px <= trigger_price:  # 買一與成交價皆跌破昨低下一檔才進場
+        if last_px <= max_slippage_price:
+            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破昨低達 {MAX_ENTRY_SLIPPAGE_TICKS} 檔，不追蹤")
+            return 'BLOCKED'
+
+        if not market_trend_filter_pass(state):
+            return False
+
         completed_candles = update_latest_candle_at_second_n(state, realtime_sdk)
         if not completed_candles:
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} K棒資料不足，突破失敗，不追蹤")
@@ -660,7 +844,18 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 均價小於昨低，突破失敗，不追蹤")
             return 'BLOCKED'
 
+        if should_skip_entry_by_limit_down_zone(last_px, ylow, limit_down_price):
+            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於昨低到跌停三分之一位置，不追蹤。")
+            return 'BLOCKED'
+
         return True
+
+    if last_px <= trigger_price and best_bid > trigger_price:
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"現價已跌破但最佳bid未跌破，暫不進場 "
+            f"last_price={last_px} best_bid={best_bid} trigger_price={trigger_price}"
+        )
 
     # 高頻路徑：entry 條件尚未觸發，繼續等待
     return False
@@ -753,6 +948,8 @@ def try_close_position(state: Dict[str, Any], mysdk):
     if not state.get("in_position"):
         return
 
+    _protect_profit_stop(state)         # 獲利達標後，把停損推進到保住獲利的位置
+
     sl = reached_stop_to_flat(state)    # 至停損點
     rp = reached_resize_profit(state)   # 達到下一個獲利目標（純判斷，不修改 state）
     sp = reached_stop_to_profit(state)  # 追蹤停利反彈觸發
@@ -772,6 +969,31 @@ def try_close_position(state: Dict[str, Any], mysdk):
         print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
     else:
         return  # 無須平倉
+
+
+def _protect_profit_stop(state: Dict[str, Any]):
+    """SHORT 獲利達標後，將 flat_price 下修到至少保住指定獲利的位置。"""
+    if state.get("side") != "SHORT":
+        return
+
+    try:
+        px = float(state.get("last_price"))
+        entry_price = float(state.get("entry_price"))
+        current_flat_price = float(state.get("flat_price"))
+    except (TypeError, ValueError):
+        return
+
+    if entry_price <= 0:
+        return
+
+    protect_trigger_price = entry_price * (1 - PROTECT_PROFIT_PER / 100.0)
+    protected_flat_price = entry_price * (1 - PROTECT_LOSS_PER / 100.0)
+
+    if px <= protect_trigger_price and protected_flat_price < current_flat_price:
+        state["flat_price"] = protected_flat_price
+        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        print(f"[{state['symbol_name']}] ✅ 獲利保護啟動 停損調整為：{state['flat_price']}")
+
 
 def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
 
@@ -953,6 +1175,8 @@ def load_or_init_state(
     v2: float,
     v3: float,
     v4: float,
+    industry_code: str,
+    market_index_key: str,
     limit_up_price: float,
     limit_down_price: float,
     up_streak_days: int,
@@ -985,12 +1209,16 @@ def load_or_init_state(
                 v2,
                 v3,
                 v4,
+                industry_code,
+                market_index_key,
                 limit_up_price,
                 limit_down_price,
                 up_streak_days,
                 down_streak_days,
             )
             atomic_write_json(path, st)
+        st["industry_code"] = str(industry_code).zfill(2)
+        st["market_index_key"] = market_index_key
         return st
     else:
         st = build_initial_state(
@@ -1000,6 +1228,8 @@ def load_or_init_state(
             v2,
             v3,
             v4,
+            industry_code,
+            market_index_key,
             limit_up_price,
             limit_down_price,
             up_streak_days,
@@ -1028,6 +1258,12 @@ def initialize_states(
     filtered_stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]] = []
     for symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple in stocks:
         _, code_with_suf = get_pure_symbol(symbolStr)
+        normalized_industry_code = str(industry_code).zfill(2)
+        market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
+        if not market_index_config.get("symbol"):
+            print(f"[{symbolStr}] ⚠️ 無對應之產業別指數代碼，排除")
+            continue
+
         up_streak_days, down_streak_days = streak_tuple
 
         try:
@@ -1067,13 +1303,18 @@ def initialize_states(
             v2,
             v3,
             v4,
+            normalized_industry_code,
+            market_index_key,
             limit_up_price,
             limit_down_price,
             up_streak_days,
             down_streak_days,
         )
+        st["industry_name"] = market_index_config.get("industry_name")
+        st["market_index_symbol"] = market_index_config.get("symbol")
+        st["market_index_name"] = market_index_config.get("name")
         states[code_with_suf] = st
-        filtered_stocks.append((symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple))
+        filtered_stocks.append((symbolStr, qty, v1, v2, v3, v4, normalized_industry_code, volatility_value, streak_tuple))
 
         st["entry_time"] = now_tpe().isoformat()
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
@@ -1130,7 +1371,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 if round_should_update_realtime:
                     try:
                         # print("更新股價")
-                        px, open_px, high_price, low_price, close_price, avg_price = get_realtime_price(st.get("symbol_code_with_suf", ""), realtime_sdk)
+                        px, open_px, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price = get_realtime_price(st.get("symbol_code_with_suf", ""), realtime_sdk)
                     except Exception as e:
                         print(f"[{st['symbol_name']}] ⚠️ 取價失敗：{e}，略過本輪重試")
                         continue
@@ -1145,6 +1386,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["low_price"] = low_price # 最低價(目前為止的最低價)
                     st["close_price"] = close_price # 收盤價(最近成交價)
                     st["avg_price"] = avg_price # 均價(即時API avgPrice)
+                    st["best_bid_price"] = best_bid_price # 買一價
+                    st["best_ask_price"] = best_ask_price # 賣一價
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
@@ -1242,6 +1485,7 @@ if __name__ == "__main__":
     original_stderr = sys.stderr
     sys.stdout = TeeStream(original_stdout, capture_buffer)
     sys.stderr = TeeStream(original_stderr, capture_buffer)
+    market_index_ws = None
 
     try:
         clear_state_dir()
@@ -1252,6 +1496,7 @@ if __name__ == "__main__":
 
         realtime_sdk = EsunMarketdata(config)
         realtime_sdk.login()
+        market_index_ws = start_market_index_stream(realtime_sdk)
 
         sdk = SDK(config)
         sdk.login()
@@ -1282,6 +1527,7 @@ if __name__ == "__main__":
         # 開始正式作業
         monitor(states, sdk, realtime_sdk)
     finally:
+        close_market_index_stream(market_index_ws)
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         try:
