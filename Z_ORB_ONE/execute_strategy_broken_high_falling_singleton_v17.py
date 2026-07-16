@@ -42,7 +42,6 @@ class TeeStream:
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
-STOP_MONITOR_TIME = (13, 25)  # 13:25 停止監控時間
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
@@ -591,11 +590,6 @@ def normalize_state(d: Dict[str, Any]) -> Dict[str, Any]:
 def force_close_time_reached() -> bool:
     t = now_tpe()
     return (t.hour, t.minute) >= FORCE_CLOSE_TIME
-
-
-def force_monitor_time_reached() -> bool:
-    t = now_tpe()
-    return (t.hour, t.minute) >= STOP_MONITOR_TIME
 
 
 # ============ 訊號與狀態邏輯 ============
@@ -1252,16 +1246,6 @@ def endtime_close_position(state: Dict[str, Any], mysdk):
         print(f'[{state.get("symbol_name")}] 已至收盤時間，漲跌停平倉交易失敗，須手動下單平倉')
 
 
-def close_monitor(state: Dict[str, Any]):
-    if state.get("in_position") or state.get("traded"): # 已持倉或已交易就不處理
-        return
-    else:
-        state["traded"] = True
-        state["in_position"] = False  # 確保持倉狀態為 False
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        return
-
-
 # ============ 主監控流程 ============
 def load_or_init_state(
     symbol: str,
@@ -1425,7 +1409,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     update_status = False
     entry_check_start_announced = False
     entry_check_end_announced = False
-    stop_monitor_processed = False
     while True:
         # round_has_market_update = False
         now_local = now_tpe()
@@ -1437,15 +1420,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             print(f"⏰ 進場檢核截止時間！目前時間：{now_local.strftime('%H:%M:%S')}")
             entry_check_end_announced = True
 
-        monitor_time_reached = force_monitor_time_reached()
         close_time_reached = force_close_time_reached()
         round_should_update_realtime = update_status
-
-        if monitor_time_reached and not stop_monitor_processed:
-            for state in states.values():
-                close_monitor(state)
-                print(f"[{state['symbol_name']}] ✅ 停止 己達停止追蹤時間")
-            stop_monitor_processed = True
 
         if close_time_reached:
             for st in states.values():
