@@ -12,6 +12,7 @@ T122260516_20260828.p12
 *_result.txt
 *_result_re.txt
 *.whl
+*.pyc
 stock_data.py
 main.py
 /esunAPItest/
