@@ -203,6 +203,16 @@ def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_perc
     """依入場價與停利百分比計算停利價差。"""
     return entry_price * (take_profit_percent / 100.0)
 
+
+def should_skip_entry_by_limit_down_zone(
+    entry_price: float,
+    true_yesterday_low: float,
+    limit_down_price: float,
+) -> bool:
+    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
+    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
+    return entry_price <= threshold
+
 # ---------------------------------------------------------------------------
 # 股票清單 (tuple 格式：第一個元素為「名稱:代碼.TW」)
 # ---------------------------------------------------------------------------
@@ -549,7 +559,8 @@ def scan_entry_signal(
     2) 任一根分K low < 昨低，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 昨低
     3) 入場棒前一根分K average > 昨低
     4) 進場價 = 昨低 - 1 tick
-    5) 進場時間 = 觸發棒時間
+    5) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
+    6) 進場時間 = 觸發棒時間
     回傳：
     - (entry_bar, entry_price): 條件成立
     - ENTRY_BLOCKED: STRATEGY_START 前已先跌破昨低（當日封單）
@@ -562,6 +573,7 @@ def scan_entry_signal(
     entry_tick = get_tick_size(yesterday_low)
     entry_price = max(yesterday_low - entry_tick, 0.0)
     max_intraday_range_before_trigger = yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
+    _, limit_down_price = calculate_limit_prices(float(ystats['close']))
 
     # STRATEGY_START 前若已跌破昨低，當日直接封單
     for bar in today_bars:
@@ -588,6 +600,13 @@ def scan_entry_signal(
         bar_low = float(bar['low'])
         if bar_low >= yesterday_low:
             continue
+
+        if should_skip_entry_by_limit_down_zone(
+            entry_price,
+            yesterday_low,
+            limit_down_price,
+        ):
+            return ENTRY_BLOCKED
 
         prior_bars = today_bars[:original_idx]
         if prior_bars:
