@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Subscribe industry index symbols through E.SUN WebSocket and update
-stock_data.py market_previous_close_indices.
+Fetch industry index symbols through E.SUN REST API and update stock_data.py
+market_previous_close_indices.
 
-Run this after the close, or at the time you want to capture as the next
-trading day's reference index value.
+Run this after the close to capture today's close as the next trading day's
+reference index value.
 """
 
 import argparse
@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from configparser import ConfigParser
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from pprint import pformat
 from tempfile import NamedTemporaryFile
@@ -30,9 +30,6 @@ DEFAULT_INDUSTRY_MAP_PATH = BASE_DIR / "industry_index_map.json"
 
 StockTuple = Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]
 IndexKey = Tuple[str, str]
-
-
-INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 def now_text() -> str:
@@ -110,7 +107,7 @@ def get_index_entry(
     }
 
 
-def build_subscription_targets(
+def build_index_targets(
     stocks: Iterable[StockTuple],
     industry_map: Dict[str, Any],
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[IndexKey, List[str]]]:
@@ -134,74 +131,154 @@ def build_subscription_targets(
     return targets, missing_stocks
 
 
-def handle_index_message(message: Any, symbol_to_key: Dict[str, str]) -> None:
-    payload = json.loads(message) if isinstance(message, str) else message
-    data = payload.get("data", payload) if isinstance(payload, dict) else {}
-    index_symbol = str(data.get("symbol", ""))
-    map_key = symbol_to_key.get(index_symbol)
-    if not map_key:
-        return
-
-    index_value = data.get("index")
-    if index_value is None:
-        return
-
-    INDEX_STATE[map_key] = {
-        "symbol": index_symbol,
-        "previous_close": float(index_value),
-        "time": data.get("time"),
-        "last_updated": now_text(),
-        "raw": data,
-    }
-    log(f"[{now_text()}] {map_key} {index_symbol} index={float(index_value)}")
+def parse_api_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value)[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
-def start_index_stream(
+def extract_close_from_quote(payload: Dict[str, Any]) -> float | None:
+    for key in ("closePrice", "lastPrice", "index"):
+        value = payload.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def extract_latest_candle_close(
+    payload: Dict[str, Any],
+    target_date: date,
+    exact_date: bool,
+) -> Tuple[float, str | None] | None:
+    candles = payload.get("data", []) if isinstance(payload, dict) else []
+    dated_rows: List[Tuple[date, str, Dict[str, Any]]] = []
+    for row in candles:
+        if not isinstance(row, dict):
+            continue
+        row_date = parse_api_date(row.get("date"))
+        if row_date is None:
+            continue
+        if exact_date and row_date != target_date:
+            continue
+        if not exact_date and row_date > target_date:
+            continue
+        if row.get("close") is None:
+            continue
+        dated_rows.append((row_date, str(row.get("date")), row))
+
+    if not dated_rows:
+        return None
+
+    dated_rows.sort(key=lambda item: item[1])
+    row_date, row_time, row = dated_rows[-1]
+    if exact_date and row_date != target_date:
+        return None
+    return float(row["close"]), row_time
+
+
+def fetch_index_close_by_api(
+    rest_stock: Any,
+    map_key: str,
+    target: Dict[str, Any],
+    target_date: date,
+    exact_date: bool,
+) -> Dict[str, Any] | None:
+    symbol = str(target["symbol"])
+    from_date = target_date - timedelta(days=14)
+    errors: List[str] = []
+
+    try:
+        response = rest_stock.historical.candles(
+            **{
+                "symbol": symbol,
+                "from": from_date.strftime("%Y-%m-%d"),
+                "to": target_date.strftime("%Y-%m-%d"),
+            }
+        )
+        candle_close = extract_latest_candle_close(response, target_date, exact_date)
+        if candle_close is not None:
+            close_value, close_time = candle_close
+            return {
+                "symbol": symbol,
+                "previous_close": close_value,
+                "time": close_time,
+                "last_updated": now_text(),
+                "raw": response,
+                "source": "historical.candles",
+            }
+        errors.append("historical.candles 無符合日期 close")
+    except Exception as exc:
+        errors.append(f"historical.candles: {exc}")
+
+    try:
+        response = rest_stock.intraday.candles(symbol=symbol)
+        candle_close = extract_latest_candle_close(response, target_date, exact_date)
+        if candle_close is not None:
+            close_value, close_time = candle_close
+            return {
+                "symbol": symbol,
+                "previous_close": close_value,
+                "time": close_time,
+                "last_updated": now_text(),
+                "raw": response,
+                "source": "intraday.candles",
+            }
+        errors.append("intraday.candles 無符合日期 close")
+    except Exception as exc:
+        errors.append(f"intraday.candles: {exc}")
+
+    try:
+        response = rest_stock.intraday.quote(symbol=symbol)
+        close_value = extract_close_from_quote(response)
+        if close_value is not None:
+            return {
+                "symbol": symbol,
+                "previous_close": close_value,
+                "time": response.get("time") or response.get("date"),
+                "last_updated": now_text(),
+                "raw": response,
+                "source": "intraday.quote",
+            }
+        errors.append("intraday.quote 無 closePrice/lastPrice/index")
+    except Exception as exc:
+        errors.append(f"intraday.quote: {exc}")
+
+    log(f"[WARN] {map_key} {symbol} API 取得收盤價失敗: {'; '.join(errors)}")
+    return None
+
+
+def fetch_indices_by_api(
     realtime_sdk: EsunMarketdata,
     targets: Dict[str, Dict[str, Any]],
-) -> Any:
-    symbol_to_key = {
-        str(info["symbol"]): map_key
-        for map_key, info in targets.items()
-        if info.get("symbol")
-    }
-
-    def on_message(message: Any) -> None:
-        try:
-            handle_index_message(message, symbol_to_key)
-        except Exception as exc:
-            log(f"[WARN] 處理指數訊息失敗: {exc}")
-
-    stock_ws = realtime_sdk.websocket_client.stock
-    stock_ws.on("message", on_message)
-    log("[INFO] 正在連線 WebSocket")
-    stock_ws.connect()
-    log("[INFO] WebSocket 已連線")
-
-    for map_key, info in targets.items():
-        stock_ws.subscribe({
-            "channel": "indices",
-            "symbol": info["symbol"],
-        })
-        log(f"[MARKET] 已訂閱 {map_key} {info['symbol']} {info.get('name')}")
-
-    return stock_ws
-
-
-def close_index_stream(stock_ws: Any) -> None:
-    if stock_ws is None:
-        return
-
-    for method_name in ("disconnect", "close", "stop"):
-        method = getattr(stock_ws, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            method()
-            log(f"[INFO] WebSocket 已執行 {method_name}()")
-            return
-        except Exception as exc:
-            log(f"[WARN] WebSocket {method_name}() 失敗: {exc}")
+    target_date: date,
+    exact_date: bool,
+    request_delay: float,
+) -> Dict[str, Dict[str, Any]]:
+    rest_stock = realtime_sdk.rest_client.stock
+    state: Dict[str, Dict[str, Any]] = {}
+    total = len(targets)
+    for idx, (map_key, target) in enumerate(sorted(targets.items()), start=1):
+        log(f"[API] ({idx}/{total}) 取得 {map_key} {target['symbol']} {target.get('name')}")
+        index_state = fetch_index_close_by_api(
+            rest_stock,
+            map_key,
+            target,
+            target_date,
+            exact_date,
+        )
+        if index_state is not None:
+            state[map_key] = index_state
+            log(
+                f"[API] {map_key} {target['symbol']} close="
+                f"{index_state['previous_close']} source={index_state.get('source')}"
+            )
+        if request_delay > 0 and idx < total:
+            time.sleep(request_delay)
+    return state
 
 
 def build_market_previous_close_indices(
@@ -221,6 +298,7 @@ def build_market_previous_close_indices(
             "previous_close": state["previous_close"],
             "time": state.get("time"),
             "last_updated": state.get("last_updated"),
+            "source": state.get("source", "rest_api"),
         }
     return result
 
@@ -260,7 +338,7 @@ def print_missing_stocks(missing_stocks: Dict[IndexKey, List[str]]) -> None:
     if not missing_stocks:
         return
 
-    log("[WARN] 下列候選股票產業沒有對應類股指數，未訂閱；之後可在策略初始化時排除：")
+    log("[WARN] 下列候選股票產業沒有對應類股指數；之後可在策略初始化時排除：")
     for (exchange, industry_code), names in sorted(missing_stocks.items()):
         preview = ", ".join(names[:8])
         if len(names) > 8:
@@ -268,34 +346,39 @@ def print_missing_stocks(missing_stocks: Dict[IndexKey, List[str]]) -> None:
         log(f"  {exchange}:{industry_code} -> {preview}")
 
 
-def wait_for_indices(expected_keys: Iterable[str], seconds: int) -> List[str]:
-    expected = set(expected_keys)
-    deadline = time.time() + max(0, seconds)
-    while time.time() < deadline:
-        missing = sorted(expected - set(INDEX_STATE))
-        if not missing:
-            return []
-        time.sleep(1)
-    return sorted(expected - set(INDEX_STATE))
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="訂閱候選股票產業類股指數，並更新 stock_data.py 的 previous_close。"
+        description="使用 REST API 更新候選股票產業類股指數 previous_close。"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--stock-data", type=Path, default=DEFAULT_STOCK_DATA_PATH)
     parser.add_argument("--industry-map", type=Path, default=DEFAULT_INDUSTRY_MAP_PATH)
-    parser.add_argument("--seconds", type=int, default=120, help="等待所有指數回傳的秒數")
+    parser.add_argument(
+        "--target-date",
+        type=lambda value: datetime.strptime(value, "%Y-%m-%d").date(),
+        default=date.today(),
+        help="要更新成哪一天的收盤價，格式 YYYY-MM-DD，預設今天",
+    )
+    parser.add_argument(
+        "--allow-latest-before-target",
+        action="store_true",
+        help="API 若找不到 target-date 資料，允許使用 target-date 以前最新一筆 K 棒 close",
+    )
+    parser.add_argument(
+        "--request-delay",
+        type=float,
+        default=0.3,
+        help="API 每個指數請求間隔秒數，預設 0.3",
+    )
     parser.add_argument(
         "--allow-partial",
         action="store_true",
-        help="逾時仍允許只用已收到的指數更新 stock_data.py",
+        help="API 未取得全部指數時，允許只用已取得的指數更新 stock_data.py",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="只訂閱並顯示結果，不寫回 stock_data.py",
+        help="只抓取並顯示結果，不寫回 stock_data.py",
     )
     args = parser.parse_args()
 
@@ -303,16 +386,15 @@ def main() -> int:
     selected_stocks: List[StockTuple] = list(stock_module.selected_stocks)
     industry_map = load_json(args.industry_map.resolve())
 
-    targets, missing_stocks = build_subscription_targets(selected_stocks, industry_map)
+    targets, missing_stocks = build_index_targets(selected_stocks, industry_map)
     if not targets:
-        raise ValueError("候選股票沒有任何可訂閱的產業類股指數。")
+        raise ValueError("候選股票沒有任何可更新的產業類股指數。")
 
     log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(selected_stocks))} 個交易所/產業組合")
-    log(f"[INFO] 可訂閱產業類股指數 {len(targets)} 個")
+    log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
     print_missing_stocks(missing_stocks)
 
     original_cwd = Path.cwd()
-    stock_ws = None
     try:
         os.chdir(args.config.resolve().parent)
         config = load_config(args.config.resolve())
@@ -321,24 +403,30 @@ def main() -> int:
         realtime_sdk.login()
         log("[INFO] EsunMarketdata session 初始化完成")
 
-        stock_ws = start_index_stream(realtime_sdk, targets)
-        log(f"[INFO] 等待最多 {args.seconds} 秒收集指數資料")
-        missing_keys = wait_for_indices(targets.keys(), args.seconds)
+        log(f"[INFO] 使用 REST API 取得 {args.target_date:%Y-%m-%d} 指數收盤價")
+        index_state = fetch_indices_by_api(
+            realtime_sdk,
+            targets,
+            args.target_date,
+            not args.allow_latest_before_target,
+            args.request_delay,
+        )
+        missing_keys = sorted(set(targets) - set(index_state))
 
         if missing_keys:
-            log(f"[WARN] 逾時仍未收到 {len(missing_keys)} 個指數: {', '.join(missing_keys)}")
+            log(f"[WARN] API 仍未取得 {len(missing_keys)} 個指數: {', '.join(missing_keys)}")
             if not args.allow_partial:
                 log("[WARN] 未寫回 stock_data.py；如要部分更新，請加 --allow-partial")
                 return 2
         else:
-            log("[INFO] 所有訂閱指數都已收到至少一筆資料")
+            log("[INFO] 所有指數都已取得至少一筆資料")
 
         received_targets = {
             map_key: targets[map_key]
             for map_key in targets
-            if map_key in INDEX_STATE
+            if map_key in index_state
         }
-        updated_indices = build_market_previous_close_indices(received_targets, INDEX_STATE)
+        updated_indices = build_market_previous_close_indices(received_targets, index_state)
 
         log(json.dumps(updated_indices, ensure_ascii=False, indent=2))
         if args.dry_run:
@@ -349,7 +437,6 @@ def main() -> int:
         log(f"[INFO] 已更新 {args.stock_data.resolve()}")
         return 0
     finally:
-        close_index_stream(stock_ws)
         os.chdir(original_cwd)
 
 
