@@ -286,6 +286,22 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
         return None
 
 
+def close_market_index_stream(stock_ws: Any) -> None:
+    if stock_ws is None:
+        return
+
+    for method_name in ("disconnect", "close", "stop"):
+        method = getattr(stock_ws, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+            print(f"[MARKET] WebSocket 已執行 {method_name}()")
+            return
+        except Exception as e:
+            print(f"[WARN] 關閉盤勢指數 WebSocket {method_name}() 失敗: {e}")
+
+
 def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
     if not ENABLE_MARKET_TREND_FILTER:
         return True
@@ -1565,6 +1581,7 @@ if __name__ == "__main__":
     original_stderr = sys.stderr
     sys.stdout = TeeStream(original_stdout, capture_buffer)
     sys.stderr = TeeStream(original_stderr, capture_buffer)
+    market_index_ws = None
 
     try:
         clear_state_dir()
@@ -1575,7 +1592,7 @@ if __name__ == "__main__":
 
         realtime_sdk = EsunMarketdata(config)
         realtime_sdk.login()
-        start_market_index_stream(realtime_sdk)
+        market_index_ws = start_market_index_stream(realtime_sdk)
 
         sdk = SDK(config)
         sdk.login()
@@ -1594,6 +1611,7 @@ if __name__ == "__main__":
         # 開始正式作業
         monitor(states, sdk, realtime_sdk)
     finally:
+        close_market_index_stream(market_index_ws)
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         try:
