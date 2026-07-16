@@ -29,14 +29,13 @@ OPTIMIZE_LOSS_PER = 3.0 # 停損百分比(%)，例如 3.0 代表入場價加上 
 
 OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
-STRATEGY_START = (9, 41) # 策略開始分k棒的(時, 分) 35 40 40 41
-STRATEGY_END = (10, 11) # 策略結束分k棒的(時, 分) 10 10 5 11
+STRATEGY_END = (10, 11) # 策略可進場截止分k棒的(時, 分)，包含此時間
 
 INTRADAY_COMPARE_END = (13, 0)  # 盤中停損/停利比對截止(時, 分)，若設 (13, 21)，代表用 13:21 開盤 open 價當停損停利點。
 
 MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 5.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
 
-PREV_LOW_BARS_REQUIRED = 5 # 跌破突破門檻前，需連續幾根分K low >= 突破門檻
+TRIGGER_PULLBACKS_REQUIRED = 3 # 從第二根K棒開始，需完成幾次「低點後拉回」才形成 trigger_low
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
@@ -448,27 +447,24 @@ def scan_entry_signal(
 ):
     """
     作空進場訊號：
-    1) 自 STRATEGY_START ~ STRATEGY_END 監控分K
-    2) 跌破目前突破門檻後，需後續任一根分K low > 候選低點，該候選低點才成為新突破門檻
-    3) 新突破門檻成立後，需自確認棒下一根起才可檢查進場
-    4) 任一根分K low < 突破門檻，且該棒前 PREV_LOW_BARS_REQUIRED 根分K的 low 皆 >= 突破門檻
-    5) 入場棒前一根分K average > 突破門檻
-    6) 進場價 = 突破門檻 - 1 tick
-    7) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
-    8) 進場時間 = 觸發棒時間
+    1) 排除今日第一根K棒，從第二根K棒 low 開始追蹤候選低點
+    2) 若後續K棒 low 更低，候選低點持續更新為更低者
+    3) 候選低點之後，任一根K棒 low > 候選低點，才完成一次「低點後拉回」
+    4) 完成 TRIGGER_PULLBACKS_REQUIRED 次後，該次確認的候選低點成為 trigger_low
+    5) trigger_low 形成後，需後續另一根K棒 low < trigger_low 才可進場
+    6) 進場檢查時間為 STRATEGY_END 前（含該分鐘），不限制開始時間
+    7) 進場價 = trigger_low - 1 tick
+    8) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
     回傳：
     - (entry_bar, entry_price): 條件成立
-    - ENTRY_BLOCKED: 首次跌破突破門檻但檢核失敗（當日封單）
-    - None: 尚未出現跌破突破門檻
+    - ENTRY_BLOCKED: 正式 trigger_low 後首次跌破但檢核失敗（當日封單）
+    - None: 尚未形成 trigger_low 或未出現進場跌破
     """
-    start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
     end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
     true_yesterday_low = float(ystats['low'])
-    trigger_low = true_yesterday_low
-    has_confirmed_trigger = False
+    trigger_low = None
     trigger_confirmed_idx = -1
-    pending_trigger_low = None
-    pending_trigger_idx = None
+    confirmed_pullbacks = 0
     max_intraday_range_before_trigger = true_yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
     _, limit_down_price = calculate_limit_prices(float(ystats['close']))
 
@@ -479,25 +475,26 @@ def scan_entry_signal(
             continue
         hm = dtv.hour * 60 + dtv.minute
         indexed_bars.append((idx, bar, hm))
+    indexed_bars.sort(key=lambda item: item[1]['dt'])
 
-    for original_idx, bar, hm in indexed_bars:
+    if len(indexed_bars) < 2:
+        return None
+
+    base_idx, base_bar, _ = indexed_bars[1]
+    current_base_low = float(base_bar.get('low', 0) or 0.0)
+    candidate_low = current_base_low
+    candidate_idx = base_idx
+    required_pullbacks = max(int(TRIGGER_PULLBACKS_REQUIRED), 0)
+    if required_pullbacks == 0:
+        trigger_low = current_base_low
+        trigger_confirmed_idx = base_idx
+
+    for original_idx, bar, hm in indexed_bars[2:]:
         bar_low = float(bar.get('low', 0) or 0.0)
 
-        if (
-            pending_trigger_low is not None
-            and pending_trigger_idx is not None
-            and original_idx > pending_trigger_idx
-            and bar_low > pending_trigger_low
-        ):
-            trigger_low = pending_trigger_low
-            has_confirmed_trigger = True
-            trigger_confirmed_idx = original_idx
-            pending_trigger_low = None
-            pending_trigger_idx = None
-
-        is_strategy_time = start_hm <= hm <= end_hm
+        is_strategy_time = hm <= end_hm
         can_check_entry = (
-            has_confirmed_trigger
+            trigger_low is not None
             and is_strategy_time
             and original_idx > trigger_confirmed_idx
         )
@@ -518,27 +515,30 @@ def scan_entry_signal(
                 if (prior_day_high - prior_day_low) > max_intraday_range_before_trigger:
                     return ENTRY_BLOCKED
 
-            prev_lows_valid = False
-            prev_bar_average = (
-                float(today_bars[original_idx - 1].get('average', 0) or 0.0)
-                if original_idx > 0
-                else 0.0
-            )
-            if original_idx >= PREV_LOW_BARS_REQUIRED:
-                prev_lows = [
-                    float(today_bars[original_idx - offset].get('low', 0) or 0.0)
-                    for offset in range(1, PREV_LOW_BARS_REQUIRED + 1)
-                ]
-                prev_lows_valid = all(prev_low >= trigger_low for prev_low in prev_lows)
-            if prev_lows_valid and prev_bar_average > trigger_low:
-                return bar, entry_price
-            return ENTRY_BLOCKED
+            return bar, entry_price
 
-        if bar_low < trigger_low and (
-            pending_trigger_low is None or bar_low < pending_trigger_low
-        ):
-            pending_trigger_low = bar_low
-            pending_trigger_idx = original_idx
+        if trigger_low is not None:
+            continue
+
+        if candidate_low is not None and original_idx > candidate_idx and bar_low > candidate_low:
+            current_base_low = candidate_low
+            confirmed_pullbacks += 1
+            if confirmed_pullbacks >= required_pullbacks:
+                trigger_low = current_base_low
+                trigger_confirmed_idx = original_idx
+            candidate_low = None
+            candidate_idx = -1
+            continue
+
+        if candidate_low is not None:
+            if bar_low < candidate_low:
+                candidate_low = bar_low
+                candidate_idx = original_idx
+            continue
+
+        if bar_low < current_base_low:
+            candidate_low = bar_low
+            candidate_idx = original_idx
     return None
 
 
@@ -903,8 +903,8 @@ def print_daily_optimization_results(
         f'PROFIT_PER={best_profit_percent:.1f}%'
     )
     print(
-        f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~'
-        f'{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
+        f'進場時間窗=第二根K後~{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
+        f'低點拉回次數={TRIGGER_PULLBACKS_REQUIRED}    '
         f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
     )
     print('')
@@ -1191,7 +1191,7 @@ def main() -> None:
                 print_progress(
                     idx,
                     total_stocks,
-                    f'{stock_name} [{STRATEGY_START[1]:02d}-{STRATEGY_END[1]:02d}]',
+                    f'{stock_name} [~{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}]',
                 )
                 all_candidates.extend(
                     collect_trade_candidates(
@@ -1220,10 +1220,12 @@ def main() -> None:
                 'best_results': results,
             }
 
-        strategy_start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
         strategy_end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
-        if strategy_start_hm >= strategy_end_hm:
-            print('[ERROR] STRATEGY_START 必須早於 STRATEGY_END', file=sys.stderr)
+        if not (0 <= strategy_end_hm <= 23 * 60 + 59):
+            print('[ERROR] STRATEGY_END 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
+            sys.exit(1)
+        if TRIGGER_PULLBACKS_REQUIRED < 0:
+            print('[ERROR] TRIGGER_PULLBACKS_REQUIRED 不可小於 0', file=sys.stderr)
             sys.exit(1)
 
         best_window_result = evaluate_one_window()
