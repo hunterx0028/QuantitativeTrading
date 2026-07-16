@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from esun_marketdata import EsunMarketdata
-from Z_ORB_ONE.stock_data import selected_stocks
+from Z_ORB_ONE.stock_data import market_previous_close_indices, selected_stocks
 
 EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each_stock_special_short_v17_result.txt')
 OUTPUT_BUFFER: list[str] = []
@@ -48,13 +48,17 @@ SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 # 額外API的配置
 API_REQUEST_DELAY_SEC = 1 # 每次 API 查詢前的延遲
 
+# 產業盤勢過濾：原策略入場條件成立後，產業指數當下 high 必須嚴格小於前一營業日最後一根分K close。
+INDUSTRY_MARKET_FILTER_ENABLED = True
+INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0.0
+
 
 def get_api_cache_path(target_date: date) -> Path:
     """回傳 API 快取檔路徑（json_cache 資料夾）。"""
     return Path(__file__).resolve().parent / 'analysis_json_cache' / f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
 
 
-def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str, list], dict[str, dict[str, list]]] | None:
+def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str, list], dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
     """載入 API 快取；若不存在或格式不符則回傳 None。"""
     if not cache_path.exists():
         return None
@@ -66,11 +70,22 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
             return None
         day_candles_by_symbol = payload.get('day_candles_by_symbol', {})
         raw_minute_by_symbol = payload.get('minute_raw_by_symbol', {})
+        raw_index_minute_by_key = payload.get('index_minute_raw_by_key', {})
+        required_index_keys = get_required_industry_index_keys(stock_list)
+        if INDUSTRY_MARKET_FILTER_ENABLED and any(
+            key not in raw_index_minute_by_key
+            for key in required_index_keys
+        ):
+            return None
         minute_bars_by_symbol = {
             stock_name: parse_bars(raw_minute_by_symbol.get(stock_name, []))
             for stock_name in current_names
         }
-        return day_candles_by_symbol, minute_bars_by_symbol
+        index_minute_bars_by_key = {
+            index_key: parse_bars(raw_index_minute_by_key.get(index_key, []))
+            for index_key in required_index_keys
+        }
+        return day_candles_by_symbol, minute_bars_by_symbol, index_minute_bars_by_key
     except Exception:
         return None
 
@@ -80,12 +95,14 @@ def save_api_cache(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
     minute_raw_by_symbol: dict[str, list],
+    index_minute_raw_by_key: dict[str, list],
 ) -> None:
     """儲存 API 快取。"""
     payload = {
         'stock_names': [item[0] for item in stock_list],
         'day_candles_by_symbol': day_candles_by_symbol,
         'minute_raw_by_symbol': minute_raw_by_symbol,
+        'index_minute_raw_by_key': index_minute_raw_by_key,
     }
     cache_path.write_text(
         json.dumps(payload, ensure_ascii=False),
@@ -273,6 +290,44 @@ def extract_symbol(stock_name: str) -> str:
     return m.group(1)
 
 
+def get_exchange_for_stock(stock_name: str) -> str | None:
+    """依股票代碼後綴判斷上市(TWSE)或上櫃(TPEX)。"""
+    symbol_text = stock_name.split(':', 1)[-1].upper()
+    if symbol_text.endswith('.TWO'):
+        return 'TPEX'
+    if symbol_text.endswith('.TW'):
+        return 'TWSE'
+    return None
+
+
+def get_industry_index_key(stock_item: tuple) -> str | None:
+    """回傳 market_previous_close_indices 的 key，例如 TWSE:26。"""
+    if len(stock_item) <= 6:
+        return None
+    stock_name = stock_item[0]
+    exchange = get_exchange_for_stock(stock_name)
+    if exchange is None:
+        return None
+    industry_code = str(stock_item[6]).zfill(2)
+    index_key = f'{exchange}:{industry_code}'
+    index_meta = market_previous_close_indices.get(index_key)
+    if not index_meta or not index_meta.get('symbol'):
+        return None
+    return index_key
+
+
+def get_required_industry_index_keys(stock_list: list[tuple]) -> set[str]:
+    """取得本次股票清單會用到的產業指數 key。"""
+    required_keys: set[str] = set()
+    if not INDUSTRY_MARKET_FILTER_ENABLED:
+        return required_keys
+    for stock_item in stock_list:
+        index_key = get_industry_index_key(stock_item)
+        if index_key is not None:
+            required_keys.add(index_key)
+    return required_keys
+
+
 def fetch_minute_candles(rest_stock, symbol: str, target_date: date) -> list:
     """呼叫 SDK 取得 1-minute K棒，回傳 data 陣列（最新在前）。"""
     from_date = target_date - timedelta(days=40)
@@ -290,6 +345,16 @@ def fetch_minute_candles(rest_stock, symbol: str, target_date: date) -> list:
     except Exception as exc:
         print(f'[ERROR] 取得 {symbol} K棒失敗: {exc}', file=sys.stderr)
     return []
+
+
+def fetch_index_minute_candles(rest_stock, index_key: str, target_date: date) -> list:
+    """呼叫 SDK 取得產業指數 1-minute K棒，回傳 data 陣列（最新在前）。"""
+    index_meta = market_previous_close_indices.get(index_key, {})
+    symbol = index_meta.get('symbol')
+    if not symbol:
+        print(f'[ERROR] 找不到產業指數代碼: {index_key}', file=sys.stderr)
+        return []
+    return fetch_minute_candles(rest_stock, symbol, target_date)
 
 
 def fetch_day_candles(stock_item: tuple, target_date: date, rest_stock) -> list:
@@ -364,6 +429,67 @@ def get_target_and_yesterday(bars_by_date: dict, target_date: date):
     yesterday_key = previous_dates[-1]
     yesterday_bars = bars_by_date.get(yesterday_key, [])
     return today_bars, yesterday_bars
+
+
+def find_bar_at_or_before(bars: list, target_dt: datetime) -> dict | None:
+    """找出 target_dt 同時間或之前最近一根K棒。"""
+    matched_bar = None
+    for bar in bars:
+        dtv = bar.get('dt')
+        if dtv is None:
+            continue
+        if dtv <= target_dt:
+            matched_bar = bar
+        else:
+            break
+    return matched_bar
+
+
+def get_previous_trading_day_last_close(bars_by_date: dict, target_date: date) -> float | None:
+    """取 target_date 前最近一個有資料日的最後一根分K close。"""
+    target_key = target_date.strftime('%Y-%m-%d')
+    previous_dates = sorted(k for k in bars_by_date if k < target_key)
+    if not previous_dates:
+        return None
+    yesterday_bars = bars_by_date.get(previous_dates[-1], [])
+    if not yesterday_bars:
+        return None
+    return float(yesterday_bars[-1]['close'])
+
+
+def is_industry_market_filter_passed(
+    stock_item: tuple,
+    target_date: date,
+    entry_dt: datetime,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """產業指數當下 high 必須嚴格小於前一營業日最後一根分K close。"""
+    if not INDUSTRY_MARKET_FILTER_ENABLED:
+        return True
+
+    index_key = get_industry_index_key(stock_item)
+    if index_key is None:
+        return False
+
+    index_bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    if not index_bars_by_date:
+        return False
+
+    previous_close = get_previous_trading_day_last_close(index_bars_by_date, target_date)
+    if previous_close is None:
+        return False
+
+    today_key = target_date.strftime('%Y-%m-%d')
+    today_index_bars = index_bars_by_date.get(today_key, [])
+    if not today_index_bars:
+        return False
+
+    entry_index_bar = find_bar_at_or_before(today_index_bars, entry_dt)
+    if entry_index_bar is None:
+        return False
+
+    threshold = previous_close * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
+    return float(entry_index_bar['high']) < threshold
 
 
 def compute_yesterday_stats(yesterday_bars: list) -> dict:
@@ -526,6 +652,13 @@ def scan_entry_signal(
         bar_low = float(bar['low'])
         if bar_low >= yesterday_low:
             continue
+
+        if should_skip_entry_by_limit_down_zone(
+            entry_price,
+            yesterday_low,
+            limit_down_price,
+        ):
+            return ENTRY_BLOCKED
 
         prior_bars = today_bars[:original_idx]
         if prior_bars:
@@ -850,6 +983,17 @@ def format_optimize_profit_parameter_text(profit_percent: float) -> str:
     return f'停利={profit_percent:.1f}%'
 
 
+def format_industry_market_filter_text() -> str:
+    """格式化產業盤勢過濾設定。"""
+    if not INDUSTRY_MARKET_FILTER_ENABLED:
+        return '產業盤勢過濾=停用'
+    return (
+        '產業盤勢過濾=啟用 '
+        f'(entry當下產業指數high < 前一營業日最後close * '
+        f'{1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0:.4f})'
+    )
+
+
 def print_daily_optimization_results(
     all_results: list,
     best_loss_percent: float,
@@ -920,6 +1064,7 @@ def print_daily_optimization_results(
         f'昨低緩衝截止={PRE_STRATEGY_LOW_BUFFER_END[0]:02d}:{PRE_STRATEGY_LOW_BUFFER_END[1]:02d}    '
         f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
     )
+    print(format_industry_market_filter_text())
     print('')
 
 
@@ -928,12 +1073,14 @@ def print_daily_optimization_results(
 # ---------------------------------------------------------------------------
 
 def find_trade_candidate_on_date(
-    stock_name: str,
+    stock_item: tuple,
     target_date: date,
     bars_by_date: dict,
     day_candles_by_symbol: dict[str, list],
+    index_minute_bars_by_key: dict[str, dict[str, list]],
 ):
     """找出單日候選交易；無訊號則回傳 None。"""
+    stock_name = stock_item[0]
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
     if not today_bars or not yesterday_bars:
         return None
@@ -961,6 +1108,14 @@ def find_trade_candidate_on_date(
         return None
 
     entry_bar, entry_price = pair
+    if not is_industry_market_filter_passed(
+        stock_item,
+        target_date,
+        entry_bar['dt'],
+        index_minute_bars_by_key,
+    ):
+        return None
+
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
     return build_trade_candidate(
         stock_name,
@@ -978,6 +1133,7 @@ def collect_trade_candidates(
     target_date: date,
     minute_bars_by_symbol: dict[str, dict[str, list]],
     day_candles_by_symbol: dict[str, list],
+    index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> list:
     """蒐集單支股票自 target_date 起往前的所有候選交易。"""
     stock_name = stock_item[0]
@@ -996,10 +1152,11 @@ def collect_trade_candidates(
     candidates = []
     for current_date in available_dates:
         candidate = find_trade_candidate_on_date(
-            stock_name,
+            stock_item,
             current_date,
             bars_by_date,
             day_candles_by_symbol,
+            index_minute_bars_by_key,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -1157,7 +1314,7 @@ def main() -> None:
         cache_path = get_api_cache_path(target_date)
         cached = load_api_cache(cache_path, stock_list)
         if cached is not None:
-            day_candles_by_symbol, minute_bars_by_symbol = cached
+            day_candles_by_symbol, minute_bars_by_symbol, index_minute_bars_by_key = cached
             print(f'已載入API快取: {cache_path.name}')
         else:
             # 初始化 SDK
@@ -1168,6 +1325,8 @@ def main() -> None:
             # 先蒐集分K（raw + parsed）
             minute_raw_by_symbol: dict[str, list] = {}
             minute_bars_by_symbol: dict[str, dict[str, list]] = {}
+            index_minute_raw_by_key: dict[str, list] = {}
+            index_minute_bars_by_key: dict[str, dict[str, list]] = {}
             total_stocks = len(stock_list)
             for idx, stock_item in enumerate(stock_list, start=1):
                 stock_name = stock_item[0]
@@ -1185,11 +1344,25 @@ def main() -> None:
                 minute_bars_by_symbol[stock_name] = parse_bars(raw_data) if raw_data else {}
             if total_stocks > 0:
                 builtins.print()
+
+            required_index_keys = sorted(get_required_industry_index_keys(stock_list))
+            total_indices = len(required_index_keys)
+            for idx, index_key in enumerate(required_index_keys, start=1):
+                index_meta = market_previous_close_indices.get(index_key, {})
+                index_label = f'{index_key} {index_meta.get("name", "")}'.strip()
+                print_api_progress(idx, total_indices, index_label)
+                raw_index_data = fetch_index_minute_candles(rest_stock, index_key, target_date)
+                index_minute_raw_by_key[index_key] = raw_index_data if raw_index_data else []
+                index_minute_bars_by_key[index_key] = parse_bars(raw_index_data) if raw_index_data else {}
+            if total_indices > 0:
+                builtins.print()
+
             save_api_cache(
                 cache_path,
                 stock_list,
                 day_candles_by_symbol,
                 minute_raw_by_symbol,
+                index_minute_raw_by_key,
             )
             print(f'已儲存API快取: {cache_path.name}')
 
@@ -1212,6 +1385,7 @@ def main() -> None:
                         target_date,
                         minute_bars_by_symbol,
                         day_candles_by_symbol,
+                        index_minute_bars_by_key,
                     )
                 )
 
