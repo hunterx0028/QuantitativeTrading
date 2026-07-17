@@ -27,17 +27,21 @@ ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 
 OPTIMIZE_LOSS_PER = 2.5 # 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER = 3.5 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_PROFIT_PER = 6.0 # 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
-STRATEGY_START = (9, 31) # 策略可進場起始分k棒的(時, 分)，包含此時間；低點拉回需在此時間前完成
+STRATEGY_START = (9, 41) # 策略啟動判斷截止分K棒的(時, 分)，個股進場檢查不包含此時間
 
-STRATEGY_END = (10, 1) # 策略可進場截止分k棒的(時, 分)，包含此時間
+STRATEGY_END = (10, 11) # 策略可進場截止分k棒的(時, 分)，包含此時間
 
 INTRADAY_COMPARE_END = (13, 0)  # 盤中停損/停利比對截止(時, 分)，若設 (13, 21)，代表用 13:21 開盤 open 價當停損停利點。
 
 MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 5.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
 
-TRIGGER_PULLBACKS_REQUIRED = 2 # 從第二根K棒開始，需完成幾次「低點後拉回」才形成 trigger_low
+IX0001_STRATEGY_START_DROP_PERCENT = 1.0 # IX0001 啟動門檻：STRATEGY_START 前含當根最後 low 需低於前日最後 close 的百分比
+IX0043_STRATEGY_START_DROP_PERCENT = 1.0 # IX0043 啟動門檻：STRATEGY_START 前含當根最後 low 需低於前日最後 close 的百分比
+
+IX0001_STRATEGY_START_REBOUND_PERCENT = 0.5 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0043_STRATEGY_START_REBOUND_PERCENT = 0.5 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
@@ -475,6 +479,249 @@ def get_previous_trading_day_last_close(bars_by_date: dict, target_date: date) -
     return float(yesterday_bars[-1]['close'])
 
 
+def get_previous_trading_day_low(bars_by_date: dict, target_date: date) -> float | None:
+    """取 target_date 前最近一個有資料日的最低 low。"""
+    target_key = target_date.strftime('%Y-%m-%d')
+    previous_dates = sorted(k for k in bars_by_date if k < target_key)
+    if not previous_dates:
+        return None
+    yesterday_bars = bars_by_date.get(previous_dates[-1], [])
+    if not yesterday_bars:
+        return None
+    return min(float(bar['low']) for bar in yesterday_bars)
+
+
+def find_strategy_start_threshold_break(
+    bars_by_date: dict,
+    target_date: date,
+    threshold: float,
+) -> tuple[float, datetime] | None:
+    """找出 STRATEGY_START 前含當根第一個 low 跌破 threshold 的分K。"""
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
+    valid_bars = [
+        bar
+        for bar in today_bars
+        if bar.get('dt') is not None and bar.get('low') is not None
+        and (bar['dt'].hour * 60 + bar['dt'].minute) <= start_hm
+    ]
+    if not valid_bars:
+        return None
+    for bar in sorted(valid_bars, key=lambda item: item['dt']):
+        bar_low = float(bar['low'])
+        if bar_low < threshold:
+            return bar_low, bar['dt']
+    return None
+
+
+def find_strategy_start_rebound_to_threshold(
+    bars_by_date: dict,
+    target_date: date,
+    break_dt: datetime,
+    rebound_threshold: float,
+) -> tuple[float, datetime] | None:
+    """找出跌破後到 STRATEGY_START 含當根第一個 high >= 反彈門檻的分K。"""
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
+    valid_bars = [
+        bar
+        for bar in today_bars
+        if bar.get('dt') is not None and bar.get('high') is not None
+        and break_dt <= bar['dt']
+        and (bar['dt'].hour * 60 + bar['dt'].minute) <= start_hm
+    ]
+    for bar in sorted(valid_bars, key=lambda item: item['dt']):
+        bar_high = float(bar['high'])
+        if bar_high >= rebound_threshold:
+            return bar_high, bar['dt']
+    return None
+
+
+def build_market_index_daily_low_summary(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> list[str]:
+    """建立每日彙總用的 IX0001/IX0043 前日低點與啟動低點文字。"""
+    rows = []
+    for index_key, label in (
+        ('TWSE:MARKET', 'IX0001'),
+        ('TPEX:MARKET', 'IX0043'),
+    ):
+        bars_by_date = index_minute_bars_by_key.get(index_key, {})
+        previous_low = get_previous_trading_day_low(bars_by_date, target_date)
+        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+        drop_percent = get_strategy_start_drop_percent(index_key)
+        rebound_percent = get_strategy_start_rebound_percent(index_key)
+        previous_low_text = f'{previous_low:.2f}' if previous_low is not None else 'N/A'
+        previous_close_text = f'{previous_close:.2f}' if previous_close is not None else 'N/A'
+        if previous_close is None or drop_percent is None or rebound_percent is None:
+            threshold_text = 'N/A'
+            break_low_text = 'N/A'
+            break_percent_text = 'N/A'
+            break_time_text = '--:--:--'
+            rebound_threshold_text = 'N/A'
+            rebound_high_text = 'N/A'
+            rebound_percent_text = 'N/A'
+            rebound_time_text = '--:--:--'
+        else:
+            threshold = previous_close * (1 - drop_percent / 100.0)
+            rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
+            threshold_text = f'{threshold:.2f}'
+            rebound_threshold_text = f'{rebound_threshold:.2f}'
+            break_low = find_strategy_start_threshold_break(
+                bars_by_date,
+                target_date,
+                threshold,
+            )
+            if break_low is None:
+                break_low_text = 'N/A'
+                break_percent_text = 'N/A'
+                break_time_text = '--:--:--'
+                rebound_high_text = 'N/A'
+                rebound_percent_text = 'N/A'
+                rebound_time_text = '--:--:--'
+            else:
+                break_low_value, break_low_dt = break_low
+                break_percent = ((previous_close - break_low_value) / previous_close) * 100.0
+                break_low_text = f'{break_low_value:.2f}'
+                break_percent_text = f'{break_percent:.2f}%'
+                break_time_text = break_low_dt.strftime('%H:%M:%S')
+                rebound = find_strategy_start_rebound_to_threshold(
+                    bars_by_date,
+                    target_date,
+                    break_low_dt,
+                    rebound_threshold,
+                )
+                if rebound is None:
+                    rebound_high_text = 'N/A'
+                    rebound_percent_text = 'N/A'
+                    rebound_time_text = '--:--:--'
+                else:
+                    rebound_high, rebound_dt = rebound
+                    rebound_percent_value = ((rebound_high - break_low_value) / break_low_value) * 100.0
+                    rebound_high_text = f'{rebound_high:.2f}'
+                    rebound_percent_text = f'{rebound_percent_value:.2f}%'
+                    rebound_time_text = rebound_dt.strftime('%H:%M:%S')
+        rows.append(
+            f'{label} 前日昨低={previous_low_text}  '
+            f'昨收={previous_close_text}  '
+            f'門檻={threshold_text}  '
+            f'跌破low={break_low_text}  '
+            f'跌幅={break_percent_text}  '
+            f'時間={break_time_text}  '
+            f'反彈門檻={rebound_threshold_text}  '
+            f'反彈high={rebound_high_text}  '
+            f'反彈漲幅={rebound_percent_text}  '
+            f'反彈時間={rebound_time_text}'
+        )
+    return rows
+
+
+def has_strategy_market_rebound_block(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """回傳市場 gate 是否因跌破後反彈到反彈門檻而被擋下。"""
+    for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
+        bars_by_date = index_minute_bars_by_key.get(index_key, {})
+        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+        drop_percent = get_strategy_start_drop_percent(index_key)
+        rebound_percent = get_strategy_start_rebound_percent(index_key)
+        if previous_close is None or drop_percent is None or rebound_percent is None:
+            continue
+
+        threshold = previous_close * (1 - drop_percent / 100.0)
+        threshold_break = find_strategy_start_threshold_break(
+            bars_by_date,
+            target_date,
+            threshold,
+        )
+        if threshold_break is None:
+            continue
+
+        _, break_dt = threshold_break
+        rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
+        if find_strategy_start_rebound_to_threshold(
+            bars_by_date,
+            target_date,
+            break_dt,
+            rebound_threshold,
+        ) is not None:
+            return True
+    return False
+
+
+def get_strategy_start_drop_percent(index_key: str) -> float | None:
+    """回傳大盤啟動 gate 對應指數的跌幅百分比門檻。"""
+    if index_key == 'TWSE:MARKET':
+        return IX0001_STRATEGY_START_DROP_PERCENT
+    if index_key == 'TPEX:MARKET':
+        return IX0043_STRATEGY_START_DROP_PERCENT
+    return None
+
+
+def get_strategy_start_rebound_percent(index_key: str) -> float | None:
+    """回傳大盤啟動 gate 對應指數的反彈百分比門檻。"""
+    if index_key == 'TWSE:MARKET':
+        return IX0001_STRATEGY_START_REBOUND_PERCENT
+    if index_key == 'TPEX:MARKET':
+        return IX0043_STRATEGY_START_REBOUND_PERCENT
+    return None
+
+
+def is_market_index_strategy_start_passed(
+    index_key: str,
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """檢查單一市場指數是否符合策略啟動條件。"""
+    drop_percent = get_strategy_start_drop_percent(index_key)
+    rebound_percent = get_strategy_start_rebound_percent(index_key)
+    if drop_percent is None or rebound_percent is None:
+        return False
+
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    if not bars_by_date:
+        return False
+
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if previous_close is None:
+        return False
+
+    threshold = previous_close * (1 - drop_percent / 100.0)
+    rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
+    threshold_break = find_strategy_start_threshold_break(
+        bars_by_date,
+        target_date,
+        threshold,
+    )
+    if threshold_break is None:
+        return False
+
+    _, break_dt = threshold_break
+    return find_strategy_start_rebound_to_threshold(
+        bars_by_date,
+        target_date,
+        break_dt,
+        rebound_threshold,
+    ) is None
+
+
+def is_strategy_market_start_gate_passed(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """全體策略啟動 gate：IX0001 與 IX0043 必須同時通過。"""
+    return all(
+        is_market_index_strategy_start_passed(
+            index_key,
+            target_date,
+            index_minute_bars_by_key,
+        )
+        for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
+    )
+
+
 def is_industry_market_filter_passed(
     stock_item: tuple,
     target_date: date,
@@ -589,31 +836,23 @@ def is_one_minute_bars(today_bars: list) -> bool:
 
 def scan_entry_signal(
     today_bars: list,
-    first_bar_idx: int,
     ystats: dict,
 ):
     """
     作空進場訊號：
-    1) 排除今日第一根K棒，從第二根K棒 low 開始追蹤候選低點
-    2) 若後續K棒 low 更低，候選低點持續更新為更低者
-    3) 候選低點之後，任一根K棒 low > 候選低點，才完成一次「低點後拉回」
-    4) 完成 TRIGGER_PULLBACKS_REQUIRED 次後，該次確認的候選低點成為 trigger_low
-    5) trigger_low 必須在 STRATEGY_START 前（含該分鐘）完成
-    6) trigger_low 形成後，需後續另一根K棒 low < trigger_low 才可進場
-    7) 進場檢查時間為 STRATEGY_START~STRATEGY_END（皆含該分鐘）
-    8) 進場價 = trigger_low - 1 tick
-    9) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
+    1) 取前一營業日最低價作為 trigger_low
+    2) 進場檢查時間為 STRATEGY_START 之後到 STRATEGY_END（含截止）
+    3) 若任一根K棒 low < trigger_low，則可進場
+    4) 進場價 = trigger_low - 1 tick
+    5) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
     回傳：
     - (entry_bar, entry_price): 條件成立
-    - ENTRY_BLOCKED: 正式 trigger_low 後首次跌破但檢核失敗（當日封單）
-    - None: 尚未形成 trigger_low 或未出現進場跌破
+    - ENTRY_BLOCKED: 首次跌破但檢核失敗（當日封單）
+    - None: 未形成 trigger_low 或未出現進場跌破
     """
     start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
     end_hm = STRATEGY_END[0] * 60 + STRATEGY_END[1]
     true_yesterday_low = float(ystats['low'])
-    trigger_low = None
-    trigger_confirmed_idx = -1
-    confirmed_pullbacks = 0
     max_intraday_range_before_trigger = true_yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
     _, limit_down_price = calculate_limit_prices(float(ystats['close']))
 
@@ -629,25 +868,15 @@ def scan_entry_signal(
     if len(indexed_bars) < 2:
         return None
 
-    base_idx, base_bar, _ = indexed_bars[1]
-    current_base_low = float(base_bar.get('low', 0) or 0.0)
-    candidate_low = current_base_low
-    candidate_idx = base_idx
-    required_pullbacks = max(int(TRIGGER_PULLBACKS_REQUIRED), 0)
-    if required_pullbacks == 0:
-        trigger_low = current_base_low
-        trigger_confirmed_idx = base_idx
+    trigger_low = true_yesterday_low
 
-    for original_idx, bar, hm in indexed_bars[2:]:
+    for original_idx, bar, hm in indexed_bars:
         bar_low = float(bar.get('low', 0) or 0.0)
 
-        is_strategy_time = start_hm <= hm <= end_hm
-        can_check_entry = (
-            trigger_low is not None
-            and is_strategy_time
-            and original_idx > trigger_confirmed_idx
-        )
-        if can_check_entry and bar_low < trigger_low:
+        if not (start_hm < hm <= end_hm):
+            continue
+
+        if bar_low < trigger_low:
             entry_tick = get_tick_size(trigger_low)
             entry_price = max(trigger_low - entry_tick, 0.0)
             if should_skip_entry_by_limit_down_zone(
@@ -665,31 +894,6 @@ def scan_entry_signal(
                     return ENTRY_BLOCKED
 
             return bar, entry_price
-
-        if trigger_low is not None:
-            continue
-
-        if candidate_low is not None and original_idx > candidate_idx and bar_low > candidate_low:
-            current_base_low = candidate_low
-            confirmed_pullbacks += 1
-            if confirmed_pullbacks >= required_pullbacks:
-                if hm > start_hm:
-                    return None
-                trigger_low = current_base_low
-                trigger_confirmed_idx = original_idx
-            candidate_low = None
-            candidate_idx = -1
-            continue
-
-        if candidate_low is not None:
-            if bar_low < candidate_low:
-                candidate_low = bar_low
-                candidate_idx = original_idx
-            continue
-
-        if bar_low < current_base_low:
-            candidate_low = bar_low
-            candidate_idx = original_idx
     return None
 
 
@@ -999,22 +1203,45 @@ def format_industry_market_filter_text() -> str:
     )
 
 
+def format_strategy_market_start_gate_text() -> str:
+    """格式化全體市場啟動 gate 設定。"""
+    return (
+        '策略啟動gate=IX0001與IX0043皆需通過 '
+        f'(IX0001於STRATEGY_START前含當根曾low < 前日最後close * {1 - IX0001_STRATEGY_START_DROP_PERCENT / 100.0:.4f}, '
+        f'IX0043於STRATEGY_START前含當根曾low < 前日最後close * {1 - IX0043_STRATEGY_START_DROP_PERCENT / 100.0:.4f}, '
+        f'跌破後至STRATEGY_START含當根IX0001 high不可 >= 前日最後close * {1 - IX0001_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f}, '
+        f'IX0043 high不可 >= 前日最後close * {1 - IX0043_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f})'
+    )
+
+
 def print_daily_optimization_results(
     all_results: list,
     best_loss_percent: float,
     best_profit_percent: float,
     total_pnl: float,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+    market_start_gate_cache: dict[date, bool],
 ) -> None:
     """印出固定參數下依日期彙總的進出場明細。"""
     print(
         f'損益已納入交易成本: 手續費率={BROKERAGE_FEE_RATE:.6f}, '
         f'賣出交易稅率={SELL_TRANSACTION_TAX_RATE:.6f}'
     )
+    print(format_strategy_market_start_gate_text())
     print(format_industry_market_filter_text())
     print('')
 
     summary = summarize_results(all_results)
-    if summary['total'] == 0:
+    rebound_blocked_date_keys = {
+        current_date.strftime('%Y-%m-%d')
+        for current_date, is_gate_passed in market_start_gate_cache.items()
+        if not is_gate_passed
+        and has_strategy_market_rebound_block(
+            current_date,
+            index_minute_bars_by_key,
+        )
+    }
+    if summary['total'] == 0 and not rebound_blocked_date_keys:
         print('固定參數下沒有交易結果。')
         return
 
@@ -1033,8 +1260,9 @@ def print_daily_optimization_results(
             result.get('outcome') == 'success',
         ))
 
-    for date_key in sorted(grouped_results.keys(), reverse=True):
-        day_rows = grouped_results[date_key]
+    daily_date_keys = set(grouped_results) | rebound_blocked_date_keys
+    for date_key in sorted(daily_date_keys, reverse=True):
+        day_rows = grouped_results.get(date_key, [])
         day_total = sum(row[5] for row in day_rows)
         day_successes = sum(1 for row in day_rows if row[6])
         day_failures = len(day_rows) - day_successes
@@ -1045,6 +1273,12 @@ def print_daily_optimization_results(
             f'失敗={day_failures}  '
             f'總收益={day_total:+.2f}'
         )
+        target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
+        for index_summary in build_market_index_daily_low_summary(
+            target_date,
+            index_minute_bars_by_key,
+        ):
+            print(index_summary)
         for stock_name, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
             day_rows,
             key=lambda row: (format_entry_time(row[1]), row[0]),
@@ -1067,9 +1301,9 @@ def print_daily_optimization_results(
     )
     print(
         f'進場時間窗={STRATEGY_START[0]:02d}:{STRATEGY_START[1]:02d}~{STRATEGY_END[0]:02d}:{STRATEGY_END[1]:02d}    '
-        f'低點拉回次數={TRIGGER_PULLBACKS_REQUIRED}    '
         f'出場時間窗={INTRADAY_COMPARE_END[0]:02d}:{INTRADAY_COMPARE_END[1]:02d}'
     )
+    print(format_strategy_market_start_gate_text())
     print(format_industry_market_filter_text())
 
 
@@ -1104,7 +1338,6 @@ def find_trade_candidate_on_date(
 
     pair = scan_entry_signal(
         today_bars,
-        first_bar_idx,
         ystats,
     )
     if pair is None:
@@ -1139,6 +1372,7 @@ def collect_trade_candidates(
     minute_bars_by_symbol: dict[str, dict[str, list]],
     day_candles_by_symbol: dict[str, list],
     index_minute_bars_by_key: dict[str, dict[str, list]],
+    market_start_gate_cache: dict[date, bool],
 ) -> list:
     """蒐集單支股票自 target_date 起往前的所有候選交易。"""
     stock_name = stock_item[0]
@@ -1156,6 +1390,14 @@ def collect_trade_candidates(
 
     candidates = []
     for current_date in available_dates:
+        if current_date not in market_start_gate_cache:
+            market_start_gate_cache[current_date] = is_strategy_market_start_gate_passed(
+                current_date,
+                index_minute_bars_by_key,
+            )
+        if not market_start_gate_cache[current_date]:
+            continue
+
         candidate = find_trade_candidate_on_date(
             stock_item,
             current_date,
@@ -1377,6 +1619,7 @@ def main() -> None:
             nonlocal total_stocks
 
             all_candidates: list = []
+            market_start_gate_cache: dict[date, bool] = {}
             for idx, stock_item in enumerate(stock_list, start=1):
                 stock_name = stock_item[0]
                 print_progress(
@@ -1391,6 +1634,7 @@ def main() -> None:
                         minute_bars_by_symbol,
                         day_candles_by_symbol,
                         index_minute_bars_by_key,
+                        market_start_gate_cache,
                     )
                 )
 
@@ -1410,6 +1654,7 @@ def main() -> None:
                 'best_loss_percent': optimize_loss_percent,
                 'best_profit_percent': optimize_profit_percent,
                 'best_results': results,
+                'market_start_gate_cache': market_start_gate_cache,
             }
 
         strategy_start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
@@ -1423,8 +1668,17 @@ def main() -> None:
         if strategy_start_hm > strategy_end_hm:
             print('[ERROR] STRATEGY_START 不可晚於 STRATEGY_END', file=sys.stderr)
             sys.exit(1)
-        if TRIGGER_PULLBACKS_REQUIRED < 0:
-            print('[ERROR] TRIGGER_PULLBACKS_REQUIRED 不可小於 0', file=sys.stderr)
+        if IX0001_STRATEGY_START_DROP_PERCENT < 0:
+            print('[ERROR] IX0001_STRATEGY_START_DROP_PERCENT 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0043_STRATEGY_START_DROP_PERCENT < 0:
+            print('[ERROR] IX0043_STRATEGY_START_DROP_PERCENT 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0001_STRATEGY_START_REBOUND_PERCENT < 0:
+            print('[ERROR] IX0001_STRATEGY_START_REBOUND_PERCENT 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0043_STRATEGY_START_REBOUND_PERCENT < 0:
+            print('[ERROR] IX0043_STRATEGY_START_REBOUND_PERCENT 不可小於 0', file=sys.stderr)
             sys.exit(1)
 
         best_window_result = evaluate_one_window()
@@ -1433,12 +1687,15 @@ def main() -> None:
         best_profit_percent = best_window_result['best_profit_percent']
         best_total_pnl = best_window_result['best_total_pnl']
         best_results = best_window_result['best_results']
+        market_start_gate_cache = best_window_result['market_start_gate_cache']
 
         print_daily_optimization_results(
             best_results,
             best_loss_percent,
             best_profit_percent,
             best_total_pnl,
+            index_minute_bars_by_key,
+            market_start_gate_cache,
         )
     finally:
         builtins.print(f'結束時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
