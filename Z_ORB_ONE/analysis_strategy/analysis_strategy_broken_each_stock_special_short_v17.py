@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from esun_marketdata import EsunMarketdata
 from Z_ORB_ONE.stock_data import market_previous_close_indices, selected_stocks
 
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each_stock_special_short_v17_result.txt')
 OUTPUT_BUFFER: list[str] = []
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
@@ -31,19 +32,21 @@ STRATEGY_LOWER = 'LOWER'
 # ---------------------------------------------------------------------------
 
 OPTIMIZE_LOSS_PER_CHANCE = 2.5 # v17 停損百分比(%)，例如 3.0 代表入場價加上 3%
-OPTIMIZE_LOSS_PER_LOWER = 2.5 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
-
 OPTIMIZE_PROFIT_PER_CHANCE = 3.5 # v17 停利百分比(%)，例如 5.0 代表入場價減去 5%
-OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
+
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
+OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
 STRATEGY_START = (9, 41) # 策略啟動判斷截止分K棒的(時, 分)，個股進場檢查不包含此時間
 
 STRATEGY_END_CHANCE = (10, 11) # v17 策略結束分k棒的(時, 分)
+
 STRATEGY_END_LOWER = (10, 11) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
 PRE_STRATEGY_LOW_BUFFER_END_CHANCE = (9, 5) # v17 策略開始前昨低緩衝截止分k棒的(時, 分)，含此時間
 
 INTRADAY_COMPARE_END_CHANCE = (13, 0)  # v17 盤中停損/停利比對截止(時, 分)
+
 INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
 
 MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 5.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
@@ -56,7 +59,7 @@ IX0043_STRATEGY_START_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_
 IX0001_STRATEGY_START_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 IX0043_STRATEGY_START_REBOUND_PERCENT_LOWER = 0.5 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
+
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
@@ -64,7 +67,7 @@ SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 # 額外API的配置
 API_REQUEST_DELAY_SEC = 1 # 每次 API 查詢前的延遲
 
-# 產業盤勢過濾：原策略入場條件成立後，產業指數當下 high 必須嚴格小於前一營業日最後一根分K close。
+# 產業盤勢過濾：原策略入場條件成立後，產業指數當下 high 必須小於等於前一根分K high 的指定倍數。
 INDUSTRY_MARKET_FILTER_ENABLED = True
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0.0
 RESERVE_MARKET_INDICES = {
@@ -480,6 +483,22 @@ def find_bar_at_or_before(bars: list, target_dt: datetime) -> dict | None:
     return matched_bar
 
 
+def find_bar_at_or_before_with_previous(bars: list, target_dt: datetime) -> tuple[dict | None, dict | None]:
+    """找出 target_dt 同時間或之前最近一根K棒，以及它的前一根K棒。"""
+    previous_bar = None
+    matched_bar = None
+    for bar in bars:
+        dtv = bar.get('dt')
+        if dtv is None:
+            continue
+        if dtv <= target_dt:
+            previous_bar = matched_bar
+            matched_bar = bar
+        else:
+            break
+    return matched_bar, previous_bar
+
+
 def get_previous_trading_day_last_close(bars_by_date: dict, target_date: date) -> float | None:
     """取 target_date 前最近一個有資料日的最後一根分K close。"""
     target_key = target_date.strftime('%Y-%m-%d')
@@ -748,7 +767,7 @@ def is_industry_market_filter_passed(
     entry_dt: datetime,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> bool:
-    """產業指數當下 high 必須嚴格小於前一營業日最後一根分K close。"""
+    """產業指數當下 high 必須小於等於前一根分K high 的指定倍數。"""
     if not INDUSTRY_MARKET_FILTER_ENABLED:
         return True
 
@@ -760,21 +779,18 @@ def is_industry_market_filter_passed(
     if not index_bars_by_date:
         return False
 
-    previous_close = get_previous_trading_day_last_close(index_bars_by_date, target_date)
-    if previous_close is None:
-        return False
-
     today_key = target_date.strftime('%Y-%m-%d')
     today_index_bars = index_bars_by_date.get(today_key, [])
     if not today_index_bars:
         return False
 
-    entry_index_bar = find_bar_at_or_before(today_index_bars, entry_dt)
-    if entry_index_bar is None:
+    entry_index_bar, previous_index_bar = find_bar_at_or_before_with_previous(today_index_bars, entry_dt)
+    if entry_index_bar is None or previous_index_bar is None:
         return False
 
-    threshold = previous_close * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
-    return float(entry_index_bar['high']) < threshold
+    previous_high = float(previous_index_bar['high'])
+    threshold = previous_high * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
+    return float(entry_index_bar['high']) <= threshold
 
 
 def compute_yesterday_stats(yesterday_bars: list) -> dict:
@@ -1330,7 +1346,7 @@ def format_industry_market_filter_text() -> str:
         return '產業盤勢過濾=停用'
     return (
         '產業盤勢過濾=啟用 '
-        f'(entry當下產業指數high < 前一營業日最後close * '
+        f'(entry當下產業指數high <= 前一根分K high * '
         f'{1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0:.4f})'
     )
 
