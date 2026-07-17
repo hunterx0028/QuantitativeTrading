@@ -520,14 +520,14 @@ def find_strategy_start_rebound_to_threshold(
     break_dt: datetime,
     rebound_threshold: float,
 ) -> tuple[float, datetime] | None:
-    """找出跌破後到 STRATEGY_START 含當根第一個 high >= 反彈門檻的分K。"""
+    """找出跌破後下一根起到 STRATEGY_START 含當根第一個 high >= 反彈門檻的分K。"""
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
     start_hm = STRATEGY_START[0] * 60 + STRATEGY_START[1]
     valid_bars = [
         bar
         for bar in today_bars
         if bar.get('dt') is not None and bar.get('high') is not None
-        and break_dt <= bar['dt']
+        and break_dt < bar['dt']
         and (bar['dt'].hour * 60 + bar['dt'].minute) <= start_hm
     ]
     for bar in sorted(valid_bars, key=lambda item: item['dt']):
@@ -1209,8 +1209,8 @@ def format_strategy_market_start_gate_text() -> str:
         '策略啟動gate=IX0001與IX0043皆需通過 '
         f'(IX0001於STRATEGY_START前含當根曾low < 前日最後close * {1 - IX0001_STRATEGY_START_DROP_PERCENT / 100.0:.4f}, '
         f'IX0043於STRATEGY_START前含當根曾low < 前日最後close * {1 - IX0043_STRATEGY_START_DROP_PERCENT / 100.0:.4f}, '
-        f'跌破後至STRATEGY_START含當根IX0001 high不可 >= 前日最後close * {1 - IX0001_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f}, '
-        f'IX0043 high不可 >= 前日最後close * {1 - IX0043_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f})'
+        f'跌破後下一根至STRATEGY_START含當根IX0001 high不可 >= 前日最後close * {1 - IX0001_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f}, '
+        f'IX0043跌破後下一根至STRATEGY_START含當根 high不可 >= 前日最後close * {1 - IX0043_STRATEGY_START_REBOUND_PERCENT / 100.0:.4f})'
     )
 
 
