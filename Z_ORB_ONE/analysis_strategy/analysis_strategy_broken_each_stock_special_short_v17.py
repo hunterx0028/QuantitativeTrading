@@ -49,6 +49,25 @@ API_REQUEST_DELAY_SEC = 1 # 每次 API 查詢前的延遲
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下 high 必須嚴格小於前一營業日最後一根分K close。
 INDUSTRY_MARKET_FILTER_ENABLED = True
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0.0
+RESERVE_MARKET_INDICES = {
+    'TWSE:MARKET': {
+        'exchange': 'TWSE',
+        'industry_code': None,
+        'industry_name': '上市',
+        'symbol': 'IX0001',
+        'name': '發行量加權股價指數',
+        'source': 'historical.candles',
+    },
+    'TPEX:MARKET': {
+        'exchange': 'TPEX',
+        'industry_code': None,
+        'industry_name': '上櫃',
+        'symbol': 'IX0043',
+        'name': '櫃買指數',
+        'source': 'historical.candles',
+    },
+}
+MARKET_INDEX_METADATA = {**market_previous_close_indices, **RESERVE_MARKET_INDICES}
 
 
 def get_api_cache_path(target_date: date) -> Path:
@@ -69,8 +88,8 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
         day_candles_by_symbol = payload.get('day_candles_by_symbol', {})
         raw_minute_by_symbol = payload.get('minute_raw_by_symbol', {})
         raw_index_minute_by_key = payload.get('index_minute_raw_by_key', {})
-        required_index_keys = get_required_industry_index_keys(stock_list)
-        if INDUSTRY_MARKET_FILTER_ENABLED and any(
+        required_index_keys = set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list)
+        if any(
             key not in raw_index_minute_by_key
             for key in required_index_keys
         ):
@@ -347,7 +366,7 @@ def fetch_minute_candles(rest_stock, symbol: str, target_date: date) -> list:
 
 def fetch_index_minute_candles(rest_stock, index_key: str, target_date: date) -> list:
     """呼叫 SDK 取得產業指數 1-minute K棒，回傳 data 陣列（最新在前）。"""
-    index_meta = market_previous_close_indices.get(index_key, {})
+    index_meta = MARKET_INDEX_METADATA.get(index_key, {})
     symbol = index_meta.get('symbol')
     if not symbol:
         print(f'[ERROR] 找不到產業指數代碼: {index_key}', file=sys.stderr)
@@ -1336,10 +1355,10 @@ def main() -> None:
             if total_stocks > 0:
                 builtins.print()
 
-            required_index_keys = sorted(get_required_industry_index_keys(stock_list))
+            required_index_keys = sorted(set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list))
             total_indices = len(required_index_keys)
             for idx, index_key in enumerate(required_index_keys, start=1):
-                index_meta = market_previous_close_indices.get(index_key, {})
+                index_meta = MARKET_INDEX_METADATA.get(index_key, {})
                 index_label = f'{index_key} {index_meta.get("name", "")}'.strip()
                 print_api_progress(idx, total_indices, index_label)
                 raw_index_data = fetch_index_minute_candles(rest_stock, index_key, target_date)
