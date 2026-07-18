@@ -27,6 +27,26 @@ DEFAULT_TPEX_OUTPUT = BASE_DIR / "tpex_indices.json"
 DEFAULT_INDUSTRY_MAP_OUTPUT = BASE_DIR / "industry_index_map.json"
 
 
+RESERVE_MARKET_INDICES: Dict[str, Dict[str, Any]] = {
+    "TWSE:MARKET": {
+        "exchange": "TWSE",
+        "industry_code": None,
+        "industry_name": "上市",
+        "symbol": "IX0001",
+        "name": "發行量加權股價指數",
+        "source": "historical.candles",
+    },
+    "TPEX:MARKET": {
+        "exchange": "TPEX",
+        "industry_code": None,
+        "industry_name": "上櫃",
+        "symbol": "IX0043",
+        "name": "櫃買指數",
+        "source": "historical.candles",
+    },
+}
+
+
 # Source: E.SUN MarketData Intraday Tickers "產業別代碼".
 # Update this table manually if E.SUN changes the code list.
 INDUSTRY_CODES: Dict[str, str] = {
@@ -225,6 +245,7 @@ def build_industry_index_map(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "note": "industry code table is maintained in generate_indices_json.py",
         "industry_codes": INDUSTRY_CODES,
+        "market_indices": RESERVE_MARKET_INDICES,
         "exchanges": {
             "TWSE": build_exchange_mapping("TWSE", twse_payload),
             "TPEX": build_exchange_mapping("TPEX", tpex_payload),

@@ -864,7 +864,7 @@ def scan_entry_signal_lower(
     """
     作空進場訊號：
     1) 取前一營業日最低價作為 trigger_low
-    2) 進場檢查時間為 STRATEGY_START 之後到 STRATEGY_END（含截止）
+    2) 進場檢查時間為 STRATEGY_START 到 STRATEGY_END（含起訖）
     3) 若任一根K棒 low < trigger_low，則可進場
     4) 進場價 = trigger_low - 1 tick
     5) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
@@ -896,7 +896,7 @@ def scan_entry_signal_lower(
     for original_idx, bar, hm in indexed_bars:
         bar_low = float(bar.get('low', 0) or 0.0)
 
-        if not (start_hm < hm <= end_hm):
+        if not (start_hm <= hm <= end_hm):
             continue
 
         if bar_low < trigger_low:
@@ -953,7 +953,7 @@ def scan_entry_signal_chance(
 
     entry_tick = get_tick_size(yesterday_low)
     entry_price = max(yesterday_low - entry_tick, 0.0)
-    max_intraday_range_before_trigger = yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
+    max_intraday_range_before_trigger = true_yesterday_low * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
     _, limit_down_price = calculate_limit_prices(float(ystats['close']))
     if should_skip_entry_by_limit_down_zone(
         entry_price,
