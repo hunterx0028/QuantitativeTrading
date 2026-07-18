@@ -419,6 +419,7 @@ def main() -> int:
     stock_module = load_python_module(args.stock_data.resolve(), "stock_data_for_index_update")
     selected_stocks: List[StockTuple] = list(stock_module.selected_stocks)
     entry_mode = getattr(stock_module, "entry_mode", 1)
+    existing_indices = dict(getattr(stock_module, "market_previous_close_indices", {}))
     industry_map = load_json(args.industry_map.resolve())
 
     targets, missing_stocks = build_index_targets(selected_stocks, industry_map)
@@ -461,7 +462,8 @@ def main() -> int:
             for map_key in targets
             if map_key in index_state
         }
-        updated_indices = build_market_previous_close_indices(received_targets, index_state)
+        refreshed_indices = build_market_previous_close_indices(received_targets, index_state)
+        updated_indices = {**existing_indices, **refreshed_indices}
 
         log(json.dumps(updated_indices, ensure_ascii=False, indent=2))
         if args.dry_run:
