@@ -46,22 +46,20 @@ STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 OPTIMIZE_LOSS_PER_CHANCE = 2.5 # chance 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
-
 OPTIMIZE_PROFIT_PER_CHANCE = 3.5 # chance 停利百分比(%)，例如 3.5 代表入場價減去 3.5%
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 2.0 代表入場價加上 2.0%
-
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 6.0 代表入場價減去 6.0%
 
 PROTECT_LOSS_PER = 1.5 # 新的停損
-
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利
 
 BUFFER_LOW_CHECK_END_TIME = (9, 5) # 可以調降昨低的時間
 
 ENTRY_CHECK_START_TIME = (9, 41)  # 進場檢核開始時間（含）
+
 ENTRY_CHECK_END_TIME_CHANCE = (10, 11)  # chance 進場檢核截止時間（含）
-ENTRY_CHECK_END_TIME_LOWER = (10, 11)  # lower 進場檢核截止時間（含）
+ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 
 FORCE_CLOSE_TIME_CHANCE = (13, 0)  # chance 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
@@ -76,9 +74,9 @@ ENTRY_ORDER_QUANTITY_CHANCE = 2 # chance 每次進場下單數量
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
 
 IX0001_STRATEGY_START_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_START 前含當根最後 low 需低於前日最後 close 的百分比
-IX0043_STRATEGY_START_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_START 前含當根最後 low 需低於前日最後 close 的百分比
-
 IX0001_STRATEGY_START_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+
+IX0043_STRATEGY_START_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_START 前含當根最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_START_REBOUND_PERCENT_LOWER = 0.5 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
