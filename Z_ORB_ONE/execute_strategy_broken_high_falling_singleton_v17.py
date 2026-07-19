@@ -66,7 +66,7 @@ ENTRY_CHECK_END_TIME_LOWER = (10, 11)  # lower 進場檢核截止時間（含）
 FORCE_CLOSE_TIME_CHANCE = (13, 0)  # chance 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
 
-MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 5.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
+MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 6.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
 
 PREV_LOW_BARS_REQUIRED = 5  # 跌破昨低前，需連續幾根分K low >= 昨低
 
