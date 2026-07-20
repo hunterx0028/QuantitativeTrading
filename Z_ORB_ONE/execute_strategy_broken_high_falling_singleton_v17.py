@@ -207,6 +207,22 @@ def hhmm_text(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def print_close_position_log(state: Dict[str, Any]) -> None:
+    print(f'[{state.get("symbol_name")}] {now_tpe().strftime("%H:%M:%S")} 平倉')
+
+
+def print_entry_position_prices(state: Dict[str, Any]) -> None:
+    try:
+        entry_price = float(state.get("entry_price", 0))
+        flat_price = float(state.get("flat_price", 0))
+        profit_price = float(state.get("profit_price", 0))
+    except (TypeError, ValueError):
+        return
+
+    protect_profit_price = entry_price * (1 - PROTECT_PROFIT_PER / 100.0)
+    print(f"停損：{flat_price:.2f}，保本：{protect_profit_price:.2f}，停利：{profit_price:.2f}")
+
+
 def get_realtime_price(stock_id: str, realtime_sdk):
     code_num = stock_id.split(".")[0]
     stock = realtime_sdk.rest_client.stock  # Stock REST API client
@@ -369,6 +385,37 @@ def format_market_gate_value(value: Any) -> str:
         return "N/A"
 
 
+def format_market_gate_time(value: Any) -> str:
+    if value in (None, ""):
+        return "--"
+
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                return "--"
+            if text.replace(".", "", 1).isdigit():
+                timestamp = float(text)
+            else:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = TZ.localize(dt)
+                else:
+                    dt = dt.astimezone(TZ)
+                return dt.strftime("%H:%M:%S")
+
+        if timestamp > 10_000_000_000_000:
+            timestamp /= 1_000_000
+        elif timestamp > 10_000_000_000:
+            timestamp /= 1_000
+        dt = datetime.fromtimestamp(timestamp, TZ)
+        return dt.strftime("%H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return str(value)
+
+
 def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]]) -> None:
     mode_text = "LOWER" if entry_mode == 2 else "CHANCE"
     print(f"[MODE] ENTRY_CHECK_START_TIME 模式判斷：{mode_text}")
@@ -378,11 +425,9 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
             f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"last_index={format_market_gate_value(result.get('last_index'))} "
             f"drop_threshold={format_market_gate_value(result.get('drop_threshold'))} "
-            f"broken={result.get('broken')} "
-            f"break_time={result.get('break_time') or '--'} "
+            f"break_time={format_market_gate_time(result.get('break_time'))} "
             f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
-            f"rebound_blocked={result.get('rebound_blocked')} "
-            f"rebound_time={result.get('rebound_time') or '--'} "
+            f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
             f"reason={result.get('reason')}"
         )
 
@@ -1246,7 +1291,7 @@ def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
     if last_px <= trigger_price and best_bid > trigger_price:
         print(
             f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"現價已跌破但最佳bid未跌破，lower 暫不進場 "
+            f"現價已跌破但最佳bid未跌破，暫不進場 "
             f"last_price={last_px} best_bid={best_bid} trigger_price={trigger_price}"
         )
 
@@ -1336,7 +1381,8 @@ def try_open_position(state: Dict[str, Any], mysdk):
                     state.get("limit_up_price", 0)
                 )
 
-                print(f"[{state['symbol_name']}] SHORT 已至入場時機，下單成功")
+                print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功")
+                print_entry_position_prices(state)
                 # type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash, quantity=qty, price_flag=PriceFlag.LimitDown, price=0) # 舊方案註解：目前不預掛，避免增加額度。
             else:  # 下單失敗
                 state["traded"] = True
@@ -1479,6 +1525,7 @@ def close_profit_position(state: Dict[str, Any], mysdk):
         print(f'[{state.get("symbol_name")}] 停利市價平倉失敗，略過本輪等待下一輪')
         return
 
+    print_close_position_log(state)
     state["traded"] = True
     state["in_position"] = False  # 確保持倉狀態為 False
     atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -1489,6 +1536,7 @@ def close_flat_position(state: Dict[str, Any], mysdk):
     last_px = state.get("last_price", 0.0)
     side = state.get("side")
     exit_place_result = False
+    close_order_sent = False
 
     # SHORT：先嘗試市價買回平倉
     if side == "SHORT":
@@ -1501,6 +1549,7 @@ def close_flat_position(state: Dict[str, Any], mysdk):
             price_flag=PriceFlag.Market,
             price=last_px
         )
+        close_order_sent = bool(exit_place_result)
 
     # 集合競價等情境若無法市價，改掛預約單
     if not exit_place_result and side == "SHORT":
@@ -1519,7 +1568,12 @@ def close_flat_position(state: Dict[str, Any], mysdk):
             return
 
         print(f'[{state.get("symbol_name")}] SHORT 市價平倉失敗，已改掛預約平倉單')
+        close_order_sent = True
 
+    if not close_order_sent:
+        return
+
+    print_close_position_log(state)
     state["traded"] = True
     state["in_position"] = False  # 確保持倉狀態為 False
     atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -1546,6 +1600,7 @@ def endtime_close_position(state: Dict[str, Any], mysdk):
                                              price_flag=PriceFlag.Market, price=last_px)
     if exit_place_result: # 有成功平倉
         # 更新狀態
+        print_close_position_log(state)
         state["traded"] = True
         state["in_position"] = False  # 確保持倉狀態為 False
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -1560,6 +1615,7 @@ def endtime_close_position(state: Dict[str, Any], mysdk):
             limit_order_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash,
                                                   quantity=state.get("qty", 0), price_flag=PriceFlag.LimitUp, price=0)
         if limit_order_result:
+            print_close_position_log(state)
             state["traded"] = True
             state["in_position"] = False  # 確保持倉狀態為 False
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
