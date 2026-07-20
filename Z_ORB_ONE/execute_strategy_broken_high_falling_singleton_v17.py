@@ -125,7 +125,7 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
 
     try:
         mysdk.place_order(order)
-        # time.sleep(0.1) # 避免下單頻率過快
+        time.sleep(0.1) # 交易 API 限制每秒委託含取消不可超過 20 筆，保守控制在約 10 筆/秒
     except Exception as e:
         print(f"[ERROR] {symbol_code_with_suf} : {priceInfo} {action_type} x {quantity} - {trade_type} - {e}")
         return False
