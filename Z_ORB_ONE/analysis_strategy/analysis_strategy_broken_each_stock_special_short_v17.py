@@ -710,23 +710,27 @@ def get_market_index_strategy_decision_gate_status(
 
     threshold = previous_close * (1 - drop_percent / 100.0)
     rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
-    threshold_break = find_strategy_decision_threshold_break(
-        bars_by_date,
-        target_date,
-        threshold,
-    )
-    if threshold_break is None:
-        return GATE_NOT_PASSED
-
-    _, break_dt = threshold_break
-    if find_strategy_decision_rebound_to_threshold(
-        bars_by_date,
-        target_date,
-        break_dt,
-        rebound_threshold,
-    ) is not None:
-        return GATE_REBOUND_BLOCKED
-    return GATE_LOWER_PASSED
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    valid_bars = [
+        bar
+        for bar in today_bars
+        if bar.get('dt') is not None and bar.get('low') is not None
+        and (bar['dt'].hour * 60 + bar['dt'].minute) < decision_hm
+    ]
+    had_rebound_block = False
+    for bar in sorted(valid_bars, key=lambda item: item['dt']):
+        if float(bar['low']) >= threshold:
+            continue
+        if find_strategy_decision_rebound_to_threshold(
+            bars_by_date,
+            target_date,
+            bar['dt'],
+            rebound_threshold,
+        ) is None:
+            return GATE_LOWER_PASSED
+        had_rebound_block = True
+    return GATE_REBOUND_BLOCKED if had_rebound_block else GATE_NOT_PASSED
 
 
 def get_strategy_market_decision_gate_status(
