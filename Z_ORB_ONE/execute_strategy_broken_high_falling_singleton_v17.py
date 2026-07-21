@@ -1462,6 +1462,9 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
     依 entry_mode 分派進場條件判斷。
     """
     if get_current_entry_mode() == ENTRY_MODE_CHANCE and not ENABLE_CHANCE:
+        now_local = now_tpe()
+        if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
+            return False
         return 'BLOCKED'
     if is_lower_mode():
         return entry_lower_mode_price_check(state, realtime_sdk)
