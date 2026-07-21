@@ -327,9 +327,15 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
     rebound_threshold = previous_close_float * (1 - rebound_percent / 100.0)
     market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
 
-    if not market_state.get("strategy_decision_broken") and index_value < drop_threshold:
+    if index_value < drop_threshold:
+        if (
+            (not market_state.get("strategy_decision_broken"))
+            or market_state.get("strategy_decision_rebound_blocked")
+        ):
+            market_state["strategy_decision_break_time"] = event_time or now_local.isoformat()
         market_state["strategy_decision_broken"] = True
-        market_state["strategy_decision_break_time"] = event_time or now_local.isoformat()
+        market_state["strategy_decision_rebound_blocked"] = False
+        market_state.pop("strategy_decision_rebound_time", None)
 
     if (
         market_state.get("strategy_decision_broken")
@@ -404,9 +410,9 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
     ]
     if all(result["passed"] for result in gate_results):
         return ENTRY_MODE_LOWER, gate_results
-    if all(not result["broken"] for result in gate_results):
-        return ENTRY_MODE_CHANCE, gate_results
-    return ENTRY_MODE_DELAY, gate_results
+    if any(result["rebound_blocked"] for result in gate_results):
+        return ENTRY_MODE_DELAY, gate_results
+    return ENTRY_MODE_CHANCE, gate_results
 
 
 def format_market_gate_value(value: Any) -> str:
@@ -470,8 +476,6 @@ def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: in
     for st in states.values():
         st["qty"] = get_entry_order_quantity()
         st["entry_time"] = now_tpe().isoformat()
-        if entry_mode == ENTRY_MODE_CHANCE and not ENABLE_CHANCE:
-            st["traded"] = True
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
 
 
@@ -1465,6 +1469,7 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         now_local = now_tpe()
         if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
             return False
+        print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} ENABLE_CHANCE=False，chance 模式不追蹤")
         return 'BLOCKED'
     if is_lower_mode():
         return entry_lower_mode_price_check(state, realtime_sdk)

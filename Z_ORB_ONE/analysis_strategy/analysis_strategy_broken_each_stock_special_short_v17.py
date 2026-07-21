@@ -733,7 +733,7 @@ def get_strategy_market_decision_gate_status(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> str:
-    """全體策略決策 gate：兩指數都 lower 才 lower，都未跌破才 chance，其餘 delay。"""
+    """全體策略決策 gate：兩指數都 lower 才 lower，lower 失效才 delay，其餘 chance。"""
     statuses = [
         get_market_index_strategy_decision_gate_status(
             index_key,
@@ -744,9 +744,9 @@ def get_strategy_market_decision_gate_status(
     ]
     if all(status == GATE_LOWER_PASSED for status in statuses):
         return GATE_LOWER_PASSED
-    if all(status == GATE_NOT_PASSED for status in statuses):
-        return GATE_NOT_PASSED
-    return GATE_REBOUND_BLOCKED
+    if any(status == GATE_REBOUND_BLOCKED for status in statuses):
+        return GATE_REBOUND_BLOCKED
+    return GATE_NOT_PASSED
 
 
 def is_industry_market_filter_passed(
