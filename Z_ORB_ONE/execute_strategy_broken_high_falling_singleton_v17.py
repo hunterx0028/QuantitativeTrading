@@ -111,7 +111,7 @@ MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
 ENTRY_MODE_CHANCE = 1
 ENTRY_MODE_LOWER = 2
 ENTRY_MODE_DELAY = 3
-ENABLE_CHANCE = False # 是否允許 chance 模式執行
+ENABLE_CHANCE = True # 是否允許 chance 模式執行
 
 # ============ 下單函式 ============
 # symbol: '2330' '0050'
