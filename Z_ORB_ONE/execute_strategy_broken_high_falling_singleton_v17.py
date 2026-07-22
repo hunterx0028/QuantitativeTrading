@@ -45,55 +45,58 @@ BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
-OPTIMIZE_LOSS_PER_CHANCE = 2.5 # chance 停損百分比(%)，例如 2.5 代表入場價加上 2.5%
-OPTIMIZE_PROFIT_PER_CHANCE = 3.5 # chance 停利百分比(%)，例如 3.5 代表入場價減去 3.5%
+ENTRY_BLOCKED = 'ENTRY_BLOCKED'
+GATE_LOWER_PASSED = 'LOWER_PASSED'
+GATE_FOLLOW_PASSED = 'FOLLOW_PASSED'
+GATE_NOT_PASSED = 'NOT_PASSED'
+GATE_NO_TRADE = 'NO_TRADE'
+STRATEGY_LOWER = 'LOWER'
+STRATEGY_FOLLOW = 'FOLLOW'
+STRATEGY_NO_TRADE = 'NO_TRADE'
+TRADE_SIDE_SHORT = 'SHORT'
+TRADE_SIDE_LONG = 'LONG'
 
-OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 2.0 代表入場價加上 2.0%
-OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 6.0 代表入場價減去 6.0%
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
+OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
-OPTIMIZE_LOSS_PER_DELAY = 2.5 # delay 停損百分比(%)，預設沿用 chance
-OPTIMIZE_PROFIT_PER_DELAY = 3.5 # delay 停利百分比(%)，預設沿用 chance
-
-PROTECT_LOSS_PER_CHANCE = 1.5 # chance 獲利保護後的新停損百分比
-PROTECT_PROFIT_PER_CHANCE = 2.5 # chance 觸發調整停利百分比
+OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)
+OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
 
 PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發調整停利百分比
 
-PROTECT_LOSS_PER_DELAY = 1.0 # delay 獲利保護後的新停損百分比
-PROTECT_PROFIT_PER_DELAY = 2.0 # delay 觸發調整停利百分比
-
-BUFFER_LOW_CHECK_END_TIME = (9, 5) # 可以調降昨低的時間
-
 STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
 
-ENTRY_CHECK_START_TIME_CHANCE = (9, 41)  # chance 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
-ENTRY_CHECK_START_TIME_DELAY = (9, 51)  # delay 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
 
-ENTRY_CHECK_END_TIME_CHANCE = (10, 1)  # chance 進場檢核截止時間（含）
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
-ENTRY_CHECK_END_TIME_DELAY = (10, 1)  # delay 進場檢核截止時間（含），預設沿用 chance
+ENTRY_CHECK_END_TIME_FOLLOW = (10, 1)  # follow 進場檢核截止時間（含）
 
-FORCE_CLOSE_TIME_CHANCE = (13, 0)  # chance 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
-FORCE_CLOSE_TIME_DELAY = (13, 0)  # delay 收盤前強制平倉時間，預設沿用 chance
+FORCE_CLOSE_TIME_FOLLOW = (13, 0)  # follow 收盤前強制平倉時間
 
-MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER = 6.0 # 觸發棒前當日高低價差上限(%)，以上一日最低價為基準
-
-PREV_LOW_BARS_REQUIRED = 5  # 跌破昨低前，需連續幾根分K low >= 昨低
-
-MAX_ENTRY_SLIPPAGE_TICKS = 3 # 跌破昨低達幾檔後不追空
-
-ENTRY_ORDER_QUANTITY_CHANCE = 2 # chance 每次進場下單數量
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
-ENTRY_ORDER_QUANTITY_DELAY = 2 # delay 每次進場下單數量，預設沿用 chance
+ENTRY_ORDER_QUANTITY_FOLLOW = 1 # follow 每次進場下單數量
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.8 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.5 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.75 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+
+IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.75 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+
+BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
+SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
+
+# 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
+INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數即時值不可高於昨收指數上漲此百分比後的位置
+INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數即時值必須嚴格大於昨收指數下跌此百分比後的位置
 
 PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
 PROFIT_BIG_TARGET_STEP = 1.0 # 逐步獲利
@@ -104,14 +107,11 @@ PROFIT_SMALL_TARGET_STEP = 0.3 # 逐步獲利
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
 
-MAX_MARKET_GAIN_PER = 0.0 # 指數相對昨日收盤漲幅超過此百分比，不允許放空
-
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
-ENTRY_MODE_CHANCE = 1
+ENTRY_MODE_NO_TRADE = 0
+ENTRY_MODE_FOLLOW = 1
 ENTRY_MODE_LOWER = 2
-ENTRY_MODE_DELAY = 3
-ENABLE_CHANCE = False # 是否允許 chance 模式執行
 
 # ============ 下單函式 ============
 # symbol: '2330' '0050'
@@ -228,11 +228,13 @@ def hhmm_text(hour: int, minute: int) -> str:
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
     mode = get_current_entry_mode() if entry_mode is None else entry_mode
+    if mode == ENTRY_MODE_NO_TRADE:
+        return "NO_TRADE"
+    if mode == ENTRY_MODE_FOLLOW:
+        return "FOLLOW"
     if mode == ENTRY_MODE_LOWER:
         return "LOWER"
-    if mode == ENTRY_MODE_DELAY:
-        return "DELAY"
-    return "CHANCE"
+    return "UNKNOWN"
 
 
 def print_close_position_log(state: Dict[str, Any]) -> None:
@@ -248,7 +250,10 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
         return
 
     _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
-    protect_profit_price = entry_price * (1 - protect_profit_per / 100.0)
+    if state.get("side") == TRADE_SIDE_LONG:
+        protect_profit_price = entry_price * (1 + protect_profit_per / 100.0)
+    else:
+        protect_profit_price = entry_price * (1 - protect_profit_per / 100.0)
     print(f"停損：{flat_price:.2f}，保本：{protect_profit_price:.2f}，停利：{profit_price:.2f}")
 
 
@@ -304,6 +309,22 @@ def get_strategy_decision_rebound_percent(index_key: str) -> float | None:
     return None
 
 
+def get_strategy_decision_raise_percent(index_key: str) -> float | None:
+    if index_key == "TWSE:MARKET":
+        return IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW
+    if index_key == "TPEX:MARKET":
+        return IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW
+    return None
+
+
+def get_strategy_decision_decline_percent(index_key: str) -> float | None:
+    if index_key == "TWSE:MARKET":
+        return IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW
+    if index_key == "TPEX:MARKET":
+        return IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW
+    return None
+
+
 def update_market_strategy_decision_gate_state(market_key: str, index_value: float, event_time: Any) -> None:
     if market_key not in MARKET_GATE_INDEX_KEYS:
         return
@@ -315,16 +336,26 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
     index_config = market_previous_close_indices.get(market_key, {})
     drop_percent = get_strategy_decision_drop_percent(market_key)
     rebound_percent = get_strategy_decision_rebound_percent(market_key)
+    raise_percent = get_strategy_decision_raise_percent(market_key)
+    decline_percent = get_strategy_decision_decline_percent(market_key)
     previous_close = index_config.get("previous_close")
     try:
         previous_close_float = float(previous_close)
     except (TypeError, ValueError):
         return
-    if previous_close_float <= 0 or drop_percent is None or rebound_percent is None:
+    if (
+        previous_close_float <= 0
+        or drop_percent is None
+        or rebound_percent is None
+        or raise_percent is None
+        or decline_percent is None
+    ):
         return
 
     drop_threshold = previous_close_float * (1 - drop_percent / 100.0)
     rebound_threshold = previous_close_float * (1 - rebound_percent / 100.0)
+    raise_threshold = previous_close_float * (1 + raise_percent / 100.0)
+    decline_threshold = previous_close_float * (1 + decline_percent / 100.0)
     market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
 
     if index_value < drop_threshold:
@@ -345,11 +376,31 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         market_state["strategy_decision_rebound_blocked"] = True
         market_state["strategy_decision_rebound_time"] = event_time or now_local.isoformat()
 
+    if index_value > raise_threshold:
+        if (
+            (not market_state.get("strategy_decision_raised"))
+            or market_state.get("strategy_decision_decline_blocked")
+        ):
+            market_state["strategy_decision_raise_time"] = event_time or now_local.isoformat()
+        market_state["strategy_decision_raised"] = True
+        market_state["strategy_decision_decline_blocked"] = False
+        market_state.pop("strategy_decision_decline_time", None)
+
+    if (
+        market_state.get("strategy_decision_raised")
+        and (not market_state.get("strategy_decision_decline_blocked"))
+        and index_value <= decline_threshold
+    ):
+        market_state["strategy_decision_decline_blocked"] = True
+        market_state["strategy_decision_decline_time"] = event_time or now_local.isoformat()
+
 
 def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
     index_config = market_previous_close_indices.get(index_key, {})
     drop_percent = get_strategy_decision_drop_percent(index_key)
     rebound_percent = get_strategy_decision_rebound_percent(index_key)
+    raise_percent = get_strategy_decision_raise_percent(index_key)
+    decline_percent = get_strategy_decision_decline_percent(index_key)
     previous_close = index_config.get("previous_close")
     market_state = MARKET_INDEX_STATE.get(index_key, {})
 
@@ -361,45 +412,83 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         "last_index": market_state.get("last_index"),
         "drop_threshold": None,
         "rebound_threshold": None,
+        "raise_threshold": None,
+        "decline_threshold": None,
         "broken": bool(market_state.get("strategy_decision_broken")),
         "rebound_blocked": bool(market_state.get("strategy_decision_rebound_blocked")),
+        "raised": bool(market_state.get("strategy_decision_raised")),
+        "decline_blocked": bool(market_state.get("strategy_decision_decline_blocked")),
         "break_time": market_state.get("strategy_decision_break_time"),
         "rebound_time": market_state.get("strategy_decision_rebound_time"),
+        "raise_time": market_state.get("strategy_decision_raise_time"),
+        "decline_time": market_state.get("strategy_decision_decline_time"),
         "passed": False,
-        "reason": "",
+        "lower_passed": False,
+        "follow_passed": False,
+        "final_above_previous_close": False,
+        "final_below_previous_close": False,
+        "lower_reason": "",
+        "follow_reason": "",
     }
 
     if not index_config.get("symbol"):
-        result["reason"] = "stock_data.py 缺少市場指數設定"
+        result["lower_reason"] = "stock_data.py 缺少市場指數設定"
+        result["follow_reason"] = "stock_data.py 缺少市場指數設定"
         return result
 
     try:
         previous_close_float = float(previous_close)
     except (TypeError, ValueError):
-        result["reason"] = "previous_close 無效"
+        result["lower_reason"] = "previous_close 無效"
+        result["follow_reason"] = "previous_close 無效"
         return result
 
-    if previous_close_float <= 0 or drop_percent is None or rebound_percent is None:
-        result["reason"] = "門檻設定無效"
+    if (
+        previous_close_float <= 0
+        or drop_percent is None
+        or rebound_percent is None
+        or raise_percent is None
+        or decline_percent is None
+    ):
+        result["lower_reason"] = "門檻設定無效"
+        result["follow_reason"] = "門檻設定無效"
         return result
 
     result["drop_threshold"] = previous_close_float * (1 - drop_percent / 100.0)
     result["rebound_threshold"] = previous_close_float * (1 - rebound_percent / 100.0)
+    result["raise_threshold"] = previous_close_float * (1 + raise_percent / 100.0)
+    result["decline_threshold"] = previous_close_float * (1 + decline_percent / 100.0)
 
     if result["last_index"] is None:
-        result["reason"] = "尚未收到 websocket 指數資料"
+        result["lower_reason"] = "尚未收到 websocket 指數資料"
+        result["follow_reason"] = "尚未收到 websocket 指數資料"
         return result
+
+    last_index_float = float(result["last_index"])
+    result["final_above_previous_close"] = last_index_float > previous_close_float
+    result["final_below_previous_close"] = last_index_float < previous_close_float
 
     if not result["broken"]:
-        result["reason"] = "未跌破啟動門檻"
-        return result
+        result["lower_reason"] = "未跌破啟動門檻"
+    elif last_index_float >= result["rebound_threshold"]:
+        result["lower_reason"] = "決策時已反彈至失效門檻"
+    elif not result["final_below_previous_close"]:
+        result["lower_reason"] = "決策時未在昨收下方"
+    else:
+        result["lower_passed"] = True
+        result["lower_reason"] = "通過"
 
-    if result["rebound_blocked"]:
-        result["reason"] = "跌破後已反彈至失效門檻"
-        return result
+    if not result["raised"]:
+        result["follow_reason"] = "未突破啟動門檻"
+    elif last_index_float <= result["decline_threshold"]:
+        result["follow_reason"] = "決策時已回跌至失效門檻"
+    elif not result["final_above_previous_close"]:
+        result["follow_reason"] = "決策時未在昨收上方"
+    else:
+        result["follow_passed"] = True
+        result["follow_reason"] = "通過"
 
-    result["passed"] = True
-    result["reason"] = "通過"
+    result["passed"] = result["lower_passed"]
     return result
 
 
@@ -408,11 +497,18 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
         get_market_strategy_decision_gate_result(index_key)
         for index_key in MARKET_GATE_INDEX_KEYS
     ]
-    if all(result["passed"] for result in gate_results):
+
+    follow_mode_passed = all(result["follow_passed"] for result in gate_results)
+    lower_mode_passed = all(result["lower_passed"] for result in gate_results)
+
+    if follow_mode_passed and lower_mode_passed:
+        print("[WARN] STRATEGY_DECISION 同時符合 FOLLOW 與 LOWER，視為資料異常，今日 NO_TRADE")
+        return ENTRY_MODE_NO_TRADE, gate_results
+    if follow_mode_passed:
+        return ENTRY_MODE_FOLLOW, gate_results
+    if lower_mode_passed:
         return ENTRY_MODE_LOWER, gate_results
-    if any(result["rebound_blocked"] for result in gate_results):
-        return ENTRY_MODE_DELAY, gate_results
-    return ENTRY_MODE_CHANCE, gate_results
+    return ENTRY_MODE_NO_TRADE, gate_results
 
 
 def format_market_gate_value(value: Any) -> str:
@@ -456,8 +552,6 @@ def format_market_gate_time(value: Any) -> str:
 def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]]) -> None:
     mode_text = get_entry_mode_text(entry_mode)
     print(f"[MODE] STRATEGY_DECISION 模式判斷：{mode_text}")
-    if entry_mode == ENTRY_MODE_CHANCE and not ENABLE_CHANCE:
-        print("[MODE] ENABLE_CHANCE=False，chance 模式不執行")
     for result in gate_results:
         print(
             f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
@@ -467,7 +561,19 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
             f"break_time={format_market_gate_time(result.get('break_time'))} "
             f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
             f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
-            f"reason={result.get('reason')}"
+            f"lower_passed={result.get('lower_passed')} "
+            f"lower_reason={result.get('lower_reason')}"
+        )
+        print(
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
+            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
+            f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"raise_threshold={format_market_gate_value(result.get('raise_threshold'))} "
+            f"raise_time={format_market_gate_time(result.get('raise_time'))} "
+            f"decline_threshold={format_market_gate_value(result.get('decline_threshold'))} "
+            f"decline_time={format_market_gate_time(result.get('decline_time'))} "
+            f"follow_passed={result.get('follow_passed')} "
+            f"follow_reason={result.get('follow_reason')}"
         )
 
 
@@ -549,7 +655,7 @@ def close_market_index_stream(stock_ws: Any) -> None:
             print(f"[WARN] 關閉盤勢指數 WebSocket {method_name}() 失敗: {e}")
 
 
-def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
+def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
     market_key = state.get("market_index_key")
     if not market_key:
         market_key = get_market_key_for_symbol(
@@ -573,12 +679,48 @@ def market_trend_filter_pass(state: Dict[str, Any]) -> bool:
         print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
-    market_gain_per = ((last_index_float - previous_close_float) / previous_close_float) * 100.0
-    if market_gain_per > MAX_MARKET_GAIN_PER:
+    threshold = previous_close_float * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
+    if last_index_float > threshold:
         index_name = index_config.get("name", "")
         print(
-            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} 指數漲幅 "
-            f"{market_gain_per:.2f}% > {MAX_MARKET_GAIN_PER:.2f}%"
+            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
+            f"指數 {last_index_float:.2f} > 門檻 {threshold:.2f}"
+        )
+        return False
+
+    return True
+
+
+def follow_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
+    index_config = market_previous_close_indices.get(market_key, {})
+    previous_close = index_config.get("previous_close")
+    market_state = MARKET_INDEX_STATE.get(market_key, {})
+    last_index = market_state.get("last_index")
+
+    try:
+        previous_close_float = float(previous_close)
+        last_index_float = float(last_index)
+    except (TypeError, ValueError):
+        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網等待 {market_key} 指數資料")
+        return False
+
+    if previous_close_float <= 0:
+        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        return False
+
+    threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0)
+    if last_index_float <= threshold:
+        index_name = index_config.get("name", "")
+        print(
+            f"[{state['symbol_name']}] follow 產業別盤勢濾網未通過：{market_key} {index_name} "
+            f"指數 {last_index_float:.2f} <= 門檻 {threshold:.2f}"
         )
         return False
 
@@ -675,7 +817,7 @@ def persist_selected_stocks_to_stock_data(
     stock_data_path = os.path.join(os.path.dirname(__file__), "stock_data.py")
 
     lines = ["# 股票代碼、購買量、昨天開盤、昨天最高、昨天最低、昨天收盤、產業別代碼、真實平均波動幅度、(連漲天數, 連跌天數)\n"]
-    lines.append(f"entry_mode = {get_current_entry_mode()}  # 1=chance, 2=lower, 3=delay\n\n")
+    lines.append(f"entry_mode = {get_current_entry_mode()}  # 0=no_trade, 1=follow, 2=lower\n\n")
     lines.append("market_previous_close_indices = ")
     lines.append(pformat(market_previous_close_indices, sort_dicts=False))
     lines.append("\n\n")
@@ -800,10 +942,9 @@ def build_initial_state(
         "best_ask_price": None,
         "traded": False,
         "in_position": False,
-        "side": "",  # 'SHORT'
+        "side": "",  # 'SHORT' or 'LONG'
         "entry_price": 0,
         "entry_time": None,
-        "broken_trigger_low": False,  # STRATEGY_DECISION 前是否已跌破 chance/delay 有效昨低
         "flat_price": 0, # 強制平倉價格
         "stop_profit_price": limit_down_price, # 追蹤停利點（啟動後才有意義）
         "profit_price": 0, # 下一個獲利目標價
@@ -816,7 +957,6 @@ def build_initial_state(
         "limit_down_price": limit_down_price,  # 跌停
         "yesterday_open_price": v1,  # 昨開
         "yesterday_high_price": v2,  # 昨高
-        "original_yesterday_low_price": v3,  # 原始昨低
         "yesterday_low_price": v3,  # 昨低
         "yesterday_close_price": v4,  # 昨收
         "up_streak_days": up_streak_days,  # 連漲天數
@@ -848,63 +988,55 @@ def normalize_state(d: Dict[str, Any]) -> Dict[str, Any]:
     if "date" not in base or not base["date"]:
         base["date"] = today_str_tpe()
 
-    if "original_yesterday_low_price" not in base or base["original_yesterday_low_price"] is None:
-        base["original_yesterday_low_price"] = d.get("yesterday_low_price", base.get("yesterday_low_price"))
-
-    if "broken_trigger_low" not in base or base["broken_trigger_low"] is None:
-        base["broken_trigger_low"] = False
-
     return base
 
 
 def get_current_entry_mode() -> int:
     try:
-        entry_mode = int(getattr(stock_data, "entry_mode", 1))
+        entry_mode = int(getattr(stock_data, "entry_mode", ENTRY_MODE_NO_TRADE))
     except (TypeError, ValueError):
-        return ENTRY_MODE_CHANCE
-    if entry_mode in (ENTRY_MODE_CHANCE, ENTRY_MODE_LOWER, ENTRY_MODE_DELAY):
+        return ENTRY_MODE_NO_TRADE
+    if entry_mode in (ENTRY_MODE_NO_TRADE, ENTRY_MODE_FOLLOW, ENTRY_MODE_LOWER):
         return entry_mode
-    return ENTRY_MODE_CHANCE
+    return ENTRY_MODE_NO_TRADE
+
+
+def is_follow_mode() -> bool:
+    return get_current_entry_mode() == ENTRY_MODE_FOLLOW
 
 
 def is_lower_mode() -> bool:
     return get_current_entry_mode() == ENTRY_MODE_LOWER
 
 
-def is_delay_mode() -> bool:
-    return get_current_entry_mode() == ENTRY_MODE_DELAY
-
-
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
+    if is_follow_mode():
+        return OPTIMIZE_LOSS_PER_FOLLOW, OPTIMIZE_PROFIT_PER_FOLLOW
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
-    if is_delay_mode():
-        return OPTIMIZE_LOSS_PER_DELAY, OPTIMIZE_PROFIT_PER_DELAY
-    return OPTIMIZE_LOSS_PER_CHANCE, OPTIMIZE_PROFIT_PER_CHANCE
+    return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
     if is_lower_mode():
         return PROTECT_LOSS_PER_LOWER, PROTECT_PROFIT_PER_LOWER
-    if is_delay_mode():
-        return PROTECT_LOSS_PER_DELAY, PROTECT_PROFIT_PER_DELAY
-    return PROTECT_LOSS_PER_CHANCE, PROTECT_PROFIT_PER_CHANCE
+    return PROTECT_LOSS_PER_LOWER, PROTECT_PROFIT_PER_LOWER
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if is_follow_mode():
+        return FORCE_CLOSE_TIME_FOLLOW
     if is_lower_mode():
         return FORCE_CLOSE_TIME_LOWER
-    if is_delay_mode():
-        return FORCE_CLOSE_TIME_DELAY
-    return FORCE_CLOSE_TIME_CHANCE
+    return FORCE_CLOSE_TIME_LOWER
 
 
 def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
+    if is_follow_mode():
+        return ENTRY_ORDER_QUANTITY_FOLLOW
     if is_lower_mode():
         return ENTRY_ORDER_QUANTITY_LOWER
-    if is_delay_mode():
-        return ENTRY_ORDER_QUANTITY_DELAY
-    return ENTRY_ORDER_QUANTITY_CHANCE
+    return 0
 
 
 def force_close_time_reached(state: Dict[str, Any] | None = None) -> bool:
@@ -914,233 +1046,6 @@ def force_close_time_reached(state: Dict[str, Any] | None = None) -> bool:
 
 
 # ============ 訊號與狀態邏輯 ============
-def update_latest_candle_at_second_n(state: Dict[str, Any], realtime_sdk) -> list[Dict[str, Any]]:
-    """
-    取得今日分K，回傳排除最新一根（尚未完整）的其餘K棒。
-    """
-    try:
-        code_num = state.get("symbol_code", "")
-        rest_stock = realtime_sdk.rest_client.stock
-        stock_intraday_candles = rest_stock.intraday.candles(symbol=code_num)
-        all_candles = stock_intraday_candles.get("data", [])
-    except Exception as e:
-        print(f"[{state['symbol_name']}] ⚠️ 取得最新分K失敗：{e}")
-        return []
-
-    if not all_candles:
-        print(f"[{state['symbol_name']}] ⚠️ 查無最新分K資料")
-        return []
-
-    normalized_all_candles = [
-        {
-            "open": candle.get("open"),
-            "high": candle.get("high"),
-            "low": candle.get("low"),
-            "close": candle.get("close"),
-            "date": candle.get("date"),
-            "average": candle.get("average"),
-            "volume": candle.get("volume"),
-        }
-        for candle in all_candles
-    ]
-    normalized_all_candles.sort(key=lambda candle: candle.get("date") or "")
-
-    today_prefix = now_tpe().date().isoformat()
-    today_candles = [
-        candle for candle in normalized_all_candles
-        if str(candle.get("date") or "").startswith(today_prefix)
-    ]
-
-    if len(today_candles) <= 1:
-        return []
-    return today_candles[:-1]
-
-
-def get_latest_complete_candle_average_and_volume(
-    completed_candles: list[Dict[str, Any]]
-) -> tuple[float | None, float | None]:
-    """
-    從已完成分K清單中，取得最新一根分K的 average 與 volume。
-    回傳 (average, volume)；若資料不足則回傳 (None, None)。
-    """
-    if not completed_candles:
-        return None, None
-
-    latest_complete_candle = completed_candles[-1]
-    average_value = latest_complete_candle.get("average")
-    volume_value = latest_complete_candle.get("volume")
-
-    try:
-        average_value = float(average_value) if average_value is not None else None
-    except (TypeError, ValueError):
-        average_value = None
-
-    try:
-        volume_value = float(volume_value) if volume_value is not None else None
-    except (TypeError, ValueError):
-        volume_value = None
-
-    return average_value, volume_value
-
-
-def are_recent_lows_above_or_equal_yesterday_low(
-    completed_candles: list[Dict[str, Any]],
-    state: Dict[str, Any],
-) -> bool:
-    """
-    檢查 completed_candles 最後 PREV_LOW_BARS_REQUIRED 根分K的 low，是否皆 >= 昨低。
-    completed_candles 預期為已排除觸發K棒後的K棒資料。
-    """
-    if PREV_LOW_BARS_REQUIRED <= 0:
-        return False
-
-    yesterday_low_price = state.get("yesterday_low_price")
-    if yesterday_low_price is None:
-        return False
-
-    if len(completed_candles) < PREV_LOW_BARS_REQUIRED:
-        return False
-
-    try:
-        yesterday_low = float(yesterday_low_price)
-    except (TypeError, ValueError):
-        return False
-
-    recent_candles = completed_candles[-PREV_LOW_BARS_REQUIRED:]
-    for candle in recent_candles:
-        low_value = candle.get("low")
-        try:
-            if float(low_value) < yesterday_low:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-    return True
-
-
-def is_intraday_range_within_threshold_before_trigger(
-    completed_candles: list[Dict[str, Any]],
-    reference_low_price: float,
-) -> bool:
-    """
-    檢查觸發棒前（已完成分K）的當日高低價差是否在允許範圍內。
-    回傳 True 代表可繼續進場檢核；False 代表超過門檻或資料異常。
-    """
-    if not completed_candles:
-        return True
-
-    highs: list[float] = []
-    lows: list[float] = []
-    for candle in completed_candles:
-        high_value = candle.get("high")
-        low_value = candle.get("low")
-        try:
-            highs.append(float(high_value))
-            lows.append(float(low_value))
-        except (TypeError, ValueError):
-            return False
-
-    if not highs or not lows:
-        return False
-
-    intraday_range = max(highs) - min(lows)
-    max_intraday_range_before_trigger = float(reference_low_price) * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
-    return intraday_range <= max_intraday_range_before_trigger
-
-
-def is_intraday_range_within_threshold_by_realtime_prices(
-    reference_low_price: float,
-    high_price: float,
-    low_price: float,
-) -> bool:
-    try:
-        intraday_range = float(high_price) - float(low_price)
-    except (TypeError, ValueError):
-        return False
-
-    max_intraday_range_before_trigger = float(reference_low_price) * (MAX_INTRADAY_RANGE_BEFORE_TRIGGER_PER / 100.0)
-    return intraday_range <= max_intraday_range_before_trigger
-
-
-def adjust_buffer_yesterday_low_for_states(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-):
-    """
-    等待 BUFFER_LOW_CHECK_END_TIME 後，用已完成分K調降有效昨低。
-    調整範圍排除第一根K棒，且只取時間 <= BUFFER_LOW_CHECK_END_TIME 的分K。
-    """
-    target_hour, target_minute = BUFFER_LOW_CHECK_END_TIME
-    target_second = 0
-
-    print(f"正在等待時間到 {target_hour:02d}:{target_minute:02d}:{target_second:02d}，並於緩衝期間調降昨低 ...")
-
-    while True:
-        now_local = now_tpe()
-        if (now_local.hour, now_local.minute, now_local.second) > (target_hour, target_minute, target_second):
-            print(f"⏰ 時間到！目前時間：{now_local.strftime('%H:%M:%S')}")
-            break
-        time.sleep(5)
-
-    for st in states.values():
-        if st.get("traded"):
-            continue
-
-        completed_candles = update_latest_candle_at_second_n(st, realtime_sdk)
-        if len(completed_candles) <= 1:
-            print(f"[{st['symbol_name']}] 緩衝期分K資料不足，昨低不調整")
-            continue
-
-        buffer_lows: list[float] = []
-        for candle in completed_candles[1:]:
-            date_text = str(candle.get("date") or "")
-            if len(date_text) < 16:
-                continue
-            try:
-                candle_hour = int(date_text[11:13])
-                candle_minute = int(date_text[14:16])
-            except ValueError:
-                continue
-
-            if (candle_hour, candle_minute) > BUFFER_LOW_CHECK_END_TIME:
-                continue
-
-            low_value = candle.get("low")
-            try:
-                buffer_lows.append(float(low_value))
-            except (TypeError, ValueError):
-                continue
-
-        if not buffer_lows:
-            print(f"[{st['symbol_name']}] 緩衝期無可用分K，昨低不調整")
-            continue
-
-        buffer_low = min(buffer_lows)
-        yesterday_low_price = st.get("yesterday_low_price")
-        try:
-            yesterday_low = float(yesterday_low_price)
-        except (TypeError, ValueError):
-            continue
-
-        if buffer_low >= yesterday_low:
-            continue
-
-        symbol_key = st.get("symbol_code_with_suf", "")
-        st["yesterday_low_price"] = buffer_low
-        st["entry_time"] = now_tpe().isoformat()
-        limit_down_price = st.get("limit_down_price")
-        entry_price = adjust_price(buffer_low - get_tick_size(buffer_low), "SHORT")
-        if should_skip_entry_by_limit_down_zone(entry_price, buffer_low, limit_down_price):
-            st["traded"] = True
-            st["in_position"] = False
-            atomic_write_json(state_path(symbol_key), st)
-            print(f"[{st['symbol_name']}] 緩衝期調降昨低至 {buffer_low}，進場價低於昨低到跌停三分之一位置，不追蹤。")
-            continue
-
-        atomic_write_json(state_path(symbol_key), st)
-        print(f"[{st['symbol_name']}] 緩衝期調降昨低：{yesterday_low} -> {buffer_low}")
-
-
 def check_open_status(state: Dict[str, Any]) -> bool:
     open_pass = False
     if (not state.get("in_position")) and (not state.get("traded")):  #未持倉, 未交易
@@ -1169,226 +1074,109 @@ def should_skip_entry_by_limit_down_zone(
     return entry_price <= threshold
 
 
+def should_skip_entry_by_limit_up_zone(
+    entry_price: float,
+    yesterday_close: float,
+    limit_up_price: float,
+) -> bool:
+    """進場價若高於昨收到漲停三分之一位置，略過本次進場。"""
+    threshold = yesterday_close + ((limit_up_price - yesterday_close) / 3.0)
+    return entry_price >= threshold
+
+
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
+    if is_follow_mode():
+        return ENTRY_CHECK_END_TIME_FOLLOW
     if is_lower_mode():
         return ENTRY_CHECK_END_TIME_LOWER
-    if is_delay_mode():
-        return ENTRY_CHECK_END_TIME_DELAY
-    return ENTRY_CHECK_END_TIME_CHANCE
+    return STRATEGY_DECISION
 
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if is_follow_mode():
+        return ENTRY_CHECK_START_TIME_FOLLOW
     if is_lower_mode():
         return ENTRY_CHECK_START_TIME_LOWER
-    if is_delay_mode():
-        return ENTRY_CHECK_START_TIME_DELAY
-    return ENTRY_CHECK_START_TIME_CHANCE
+    return STRATEGY_DECISION
 
 
 def get_latest_entry_check_end_time() -> tuple[int, int]:
-    return max(ENTRY_CHECK_END_TIME_CHANCE, ENTRY_CHECK_END_TIME_LOWER, ENTRY_CHECK_END_TIME_DELAY)
+    return max(ENTRY_CHECK_END_TIME_FOLLOW, ENTRY_CHECK_END_TIME_LOWER)
 
 
-def get_entry_trigger_low_price(state: Dict[str, Any]) -> float | None:
-    low_price = (
-        state.get("original_yesterday_low_price")
-        if is_lower_mode()
-        else state.get("yesterday_low_price")
-    )
+def get_entry_trigger_reference_price(state: Dict[str, Any]) -> float | None:
+    if is_follow_mode():
+        reference_price = state.get("yesterday_close_price")
+    else:
+        reference_price = state.get("yesterday_low_price")
     try:
-        return float(low_price)
+        return float(reference_price)
     except (TypeError, ValueError):
         return None
 
 
-def entry_chance_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
-    """
-    chance 模式進場條件判斷（純函式，不修改 state）。
+def get_entry_trigger_price(state: Dict[str, Any]) -> float | None:
+    reference_price = get_entry_trigger_reference_price(state)
+    if reference_price is None:
+        return None
+    if is_follow_mode():
+        return adjust_price(reference_price + get_tick_size(reference_price), TRADE_SIDE_LONG)
+    if is_lower_mode():
+        return adjust_price(reference_price - get_tick_size(reference_price), TRADE_SIDE_SHORT)
+    return None
 
-    回傳值：
-      True      — 條件成立，應進場（side / entry_trigger_price 由呼叫端設定）
-      'BLOCKED' — 驗證失敗，需永久封鎖本日進場（呼叫端負責設 traded=True）
-      False     — 尚未觸發，繼續等待下一輪
+
+def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
+    """
+    follow 模式進場條件判斷（純函式，不修改 state）。
     """
     now_local = now_tpe()
-    if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_CHANCE:
+    if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_FOLLOW:
         return False
-    if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_CHANCE:
+    if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_FOLLOW:
         return False
 
-    if state.get("broken_trigger_low"):
-        print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 檢核時間前已先突破有效昨低，不追蹤")
-        return 'BLOCKED'
-
-    yesterday_low_price = state.get("yesterday_low_price")
-    limit_down_price = state.get("limit_down_price")
-    if yesterday_low_price is None:
+    yesterday_close_price = state.get("yesterday_close_price")
+    limit_up_price = state.get("limit_up_price")
+    if yesterday_close_price is None:
         return False
 
     last_price = state.get("last_price", 0)
-    if last_price is None:
-        return False
-
-    best_bid_price = state.get("best_bid_price")
-    if best_bid_price is None:
+    best_ask_price = state.get("best_ask_price")
+    if last_price is None or best_ask_price is None:
         return False
 
     try:
-        ylow = float(yesterday_low_price)
+        yesterday_close = float(yesterday_close_price)
         last_px = float(last_price)
-        best_bid = float(best_bid_price)
+        best_ask = float(best_ask_price)
     except (TypeError, ValueError):
         return False
 
-    ylow_tick_size = get_tick_size(ylow)
-    trigger_price = adjust_price(ylow - ylow_tick_size, "SHORT")
-    max_slippage_price = adjust_price(ylow - (ylow_tick_size * MAX_ENTRY_SLIPPAGE_TICKS), "SHORT")
+    trigger_price = get_entry_trigger_price(state)
+    if trigger_price is None:
+        return False
 
-    if best_bid <= trigger_price and last_px <= trigger_price:  # 買一與成交價皆跌破昨低下一檔才進場
-        if last_px <= max_slippage_price:
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破昨低達 {MAX_ENTRY_SLIPPAGE_TICKS} 檔，不追蹤")
-            return 'BLOCKED'
-
-        if not market_trend_filter_pass(state):
+    if best_ask >= trigger_price and last_px >= trigger_price:
+        if not follow_industry_market_filter_pass(state):
             return False
 
-        high_price = state.get("high_price")
-        original_yesterday_low_price = state.get("original_yesterday_low_price")
         try:
-            original_ylow = float(original_yesterday_low_price)
-            if float(high_price) <= original_ylow:
-                print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 入場前最高價未大於原始昨低，突破失敗，不追蹤")
-                return 'BLOCKED'
+            limit_up = float(limit_up_price)
         except (TypeError, ValueError):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 無法檢核原始昨低與最高價，突破失敗，不追蹤")
-            return 'BLOCKED'
+            return False
 
-        completed_candles = update_latest_candle_at_second_n(state, realtime_sdk)
-        if not completed_candles:
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} K棒資料不足，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if not is_intraday_range_within_threshold_before_trigger(completed_candles, original_ylow):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破昨低，但觸發前高低價差過大，不追蹤")
-            return 'BLOCKED'
-
-        if not are_recent_lows_above_or_equal_yesterday_low(completed_candles, state):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 之前K棒未能保持在昨低之上，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        latest_average, _latest_volume = get_latest_complete_candle_average_and_volume(completed_candles)
-        if (latest_average is None) or (latest_average <= float(yesterday_low_price)):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 均價小於昨低，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if should_skip_entry_by_limit_down_zone(last_px, ylow, limit_down_price):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於昨低到跌停三分之一位置，不追蹤。")
+        if should_skip_entry_by_limit_up_zone(trigger_price, yesterday_close, limit_up):
+            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價高於昨收到漲停三分之一位置，不追蹤。")
             return 'BLOCKED'
 
         return True
 
-    if last_px <= trigger_price and best_bid > trigger_price:
+    if last_px >= trigger_price and best_ask < trigger_price:
         print(
             f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"現價已跌破但最佳bid未跌破，暫不進場 "
-            f"last_price={last_px} best_bid={best_bid} trigger_price={trigger_price}"
-        )
-
-    # 高頻路徑：entry 條件尚未觸發，繼續等待
-    return False
-
-
-def entry_delay_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
-    """
-    delay 模式進場條件判斷（純函式，不修改 state）。
-
-    回傳值：
-      True      — 條件成立，應進場（side / entry_trigger_price 由呼叫端設定）
-      'BLOCKED' — 驗證失敗，需永久封鎖本日進場（呼叫端負責設 traded=True）
-      False     — 尚未觸發，繼續等待下一輪
-    """
-    now_local = now_tpe()
-    if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_DELAY:
-        return False
-    if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_DELAY:
-        return False
-
-    if state.get("broken_trigger_low"):
-        print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 檢核時間前已先突破有效昨低，不追蹤")
-        return 'BLOCKED'
-
-    yesterday_low_price = state.get("yesterday_low_price")
-    limit_down_price = state.get("limit_down_price")
-    if yesterday_low_price is None:
-        return False
-
-    last_price = state.get("last_price", 0)
-    if last_price is None:
-        return False
-
-    best_bid_price = state.get("best_bid_price")
-    if best_bid_price is None:
-        return False
-
-    try:
-        ylow = float(yesterday_low_price)
-        last_px = float(last_price)
-        best_bid = float(best_bid_price)
-    except (TypeError, ValueError):
-        return False
-
-    ylow_tick_size = get_tick_size(ylow)
-    trigger_price = adjust_price(ylow - ylow_tick_size, "SHORT")
-    max_slippage_price = adjust_price(ylow - (ylow_tick_size * MAX_ENTRY_SLIPPAGE_TICKS), "SHORT")
-
-    if best_bid <= trigger_price and last_px <= trigger_price:  # 買一與成交價皆跌破昨低下一檔才進場
-        if last_px <= max_slippage_price:
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破昨低達 {MAX_ENTRY_SLIPPAGE_TICKS} 檔，不追蹤")
-            return 'BLOCKED'
-
-        if not market_trend_filter_pass(state):
-            return False
-
-        high_price = state.get("high_price")
-        original_yesterday_low_price = state.get("original_yesterday_low_price")
-        try:
-            original_ylow = float(original_yesterday_low_price)
-            if float(high_price) <= original_ylow:
-                print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 入場前最高價未大於原始昨低，突破失敗，不追蹤")
-                return 'BLOCKED'
-        except (TypeError, ValueError):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 無法檢核原始昨低與最高價，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        completed_candles = update_latest_candle_at_second_n(state, realtime_sdk)
-        if not completed_candles:
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} K棒資料不足，delay 突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if not is_intraday_range_within_threshold_before_trigger(completed_candles, original_ylow):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破昨低，但觸發前高低價差過大，不追蹤")
-            return 'BLOCKED'
-
-        if not are_recent_lows_above_or_equal_yesterday_low(completed_candles, state):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 之前K棒未能保持在昨低之上，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        latest_average, _latest_volume = get_latest_complete_candle_average_and_volume(completed_candles)
-        if (latest_average is None) or (latest_average <= float(yesterday_low_price)):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 均價小於昨低，突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if should_skip_entry_by_limit_down_zone(last_px, ylow, limit_down_price):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於昨低到跌停三分之一位置，不追蹤。")
-            return 'BLOCKED'
-
-        return True
-
-    if last_px <= trigger_price and best_bid > trigger_price:
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"現價已跌破但最佳bid未跌破，暫不進場 "
-            f"last_price={last_px} best_bid={best_bid} trigger_price={trigger_price}"
+            f"現價已突破但最佳ask未突破，暫不進場 "
+            f"last_price={last_px} best_ask={best_ask} trigger_price={trigger_price}"
         )
 
     return False
@@ -1409,9 +1197,9 @@ def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
     if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_LOWER:
         return False
 
-    original_yesterday_low_price = state.get("original_yesterday_low_price")
+    yesterday_low_price = state.get("yesterday_low_price")
     limit_down_price = state.get("limit_down_price")
-    if original_yesterday_low_price is None:
+    if yesterday_low_price is None:
         return False
 
     last_price = state.get("last_price", 0)
@@ -1423,29 +1211,21 @@ def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
         return False
 
     try:
-        true_ylow = float(original_yesterday_low_price)
+        true_ylow = float(yesterday_low_price)
         last_px = float(last_price)
         best_bid = float(best_bid_price)
     except (TypeError, ValueError):
         return False
 
-    ylow_tick_size = get_tick_size(true_ylow)
-    trigger_price = adjust_price(true_ylow - ylow_tick_size, "SHORT")
+    trigger_price = get_entry_trigger_price(state)
+    if trigger_price is None:
+        return False
 
     if best_bid <= trigger_price and last_px <= trigger_price:  # 買一與成交價皆跌破真實昨低下一檔才進場
-        if not market_trend_filter_pass(state):
+        if not lower_industry_market_filter_pass(state):
             return False
 
-        completed_candles = update_latest_candle_at_second_n(state, realtime_sdk)
-        if not completed_candles:
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} K棒資料不足，lower 突破失敗，不追蹤")
-            return 'BLOCKED'
-
-        if not is_intraday_range_within_threshold_before_trigger(completed_candles, true_ylow):
-            print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 已跌破真實昨低，但觸發前高低價差過大，不追蹤")
-            return 'BLOCKED'
-
-        if should_skip_entry_by_limit_down_zone(last_px, true_ylow, limit_down_price):
+        if should_skip_entry_by_limit_down_zone(trigger_price, true_ylow, limit_down_price):
             print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} 進場價低於真實昨低到跌停三分之一位置，不追蹤。")
             return 'BLOCKED'
 
@@ -1465,23 +1245,23 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
     """
     依 entry_mode 分派進場條件判斷。
     """
-    if get_current_entry_mode() == ENTRY_MODE_CHANCE and not ENABLE_CHANCE:
+    if get_current_entry_mode() == ENTRY_MODE_NO_TRADE:
         now_local = now_tpe()
         if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
             return False
-        print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} ENABLE_CHANCE=False，chance 模式不追蹤")
+        print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} NO_TRADE 模式不追蹤")
         return 'BLOCKED'
+    if is_follow_mode():
+        return entry_follow_mode_price_check(state, realtime_sdk)
     if is_lower_mode():
         return entry_lower_mode_price_check(state, realtime_sdk)
-    if is_delay_mode():
-        return entry_delay_mode_price_check(state, realtime_sdk)
-    return entry_chance_mode_price_check(state, realtime_sdk)
+    return 'BLOCKED'
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
 
     last_px = state.get("last_price", 0.0) # 現價
-    entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：昨低-1tick
+    entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：trigger price
     qty = state.get("qty", 1)
 
     '''
@@ -1514,14 +1294,15 @@ def try_open_position(state: Dict[str, Any], mysdk):
     open_stop_loss = entry_ref_px * (optimize_loss_per / 100.0)
     open_profit_target = entry_ref_px * (optimize_profit_per / 100.0)
 
-    if state.get("side") != "SHORT":
+    side = state.get("side")
+    if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         state["traded"] = True
         state["entry_time"] = now_tpe().isoformat()
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        print(f"[{state['symbol_name']}] 僅允許 SHORT，不執行")
+        print(f"[{state['symbol_name']}] side 無效，不執行")
         return
 
-    if state.get("side") == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         limit_up_price = state.get("limit_up_price", 0)  # 漲停
         if (entry_ref_px + open_stop_loss) >= limit_up_price:
             state["traded"] = True
@@ -1529,38 +1310,60 @@ def try_open_position(state: Dict[str, Any], mysdk):
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
             print(f"[{state['symbol_name']}] SHORT 停損超過漲停，空間太小，不執行")
             return
+    else:
+        limit_down_price = state.get("limit_down_price", 0)  # 跌停
+        if (entry_ref_px - open_stop_loss) <= limit_down_price:
+            state["traded"] = True
+            state["entry_time"] = now_tpe().isoformat()
+            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+            print(f"[{state['symbol_name']}] LONG 停損低於跌停，空間太小，不執行")
+            return
 
     if check_open_status(state):
-        if state.get("side") == "SHORT": # SHORT 作空
+        if side == TRADE_SIDE_SHORT: # SHORT 作空
 
             place_order_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Sell, Trade.DayTradingSell, quantity=qty, price_flag=PriceFlag.Market, price=entry_ref_px)
-            if place_order_result:  # 下單成功
-                state["in_position"] = True
+        else:
+            place_order_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash, quantity=qty, price_flag=PriceFlag.Market, price=entry_ref_px)
 
-                avg_price, mat_qty = get_order_fill_info(state["symbol_code"], mysdk)
-                if (avg_price != 0) and (mat_qty == state.get("qty", 0)):
-                    state["entry_price"] = avg_price
-                else:
-                    state["entry_price"] = entry_ref_px
+        if place_order_result:  # 下單成功
+            state["in_position"] = True
 
-                candidate_profit = max(state.get("entry_price", 0) - open_profit_target, state.get("limit_down_price", 0))
+            avg_price, mat_qty = get_order_fill_info(state["symbol_code"], mysdk)
+            if (avg_price != 0) and (mat_qty == state.get("qty", 0)):
+                state["entry_price"] = avg_price
+            else:
+                state["entry_price"] = entry_ref_px
 
-                state["profit_price"] = candidate_profit
-                state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
+            if side == TRADE_SIDE_SHORT:
+                state["profit_price"] = max(
+                    state.get("entry_price", 0) - open_profit_target,
+                    state.get("limit_down_price", 0)
+                )
                 state["flat_price"] = min(
                     state.get("entry_price", 0) + open_stop_loss,
                     state.get("limit_up_price", 0)
                 )
-
                 print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功")
-                print_entry_position_prices(state)
-                # type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash, quantity=qty, price_flag=PriceFlag.LimitDown, price=0) # 舊方案註解：目前不預掛，避免增加額度。
-            else:  # 下單失敗
-                state["traded"] = True
+            else:
+                state["profit_price"] = min(
+                    state.get("entry_price", 0) + open_profit_target,
+                    state.get("limit_up_price", 0)
+                )
+                state["flat_price"] = max(
+                    state.get("entry_price", 0) - open_stop_loss,
+                    state.get("limit_down_price", 0)
+                )
+                print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功")
 
-            # 更新狀態
-            state["entry_time"] = now_tpe().isoformat()
-            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+            state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
+            print_entry_position_prices(state)
+        else:  # 下單失敗
+            state["traded"] = True
+
+        # 更新狀態
+        state["entry_time"] = now_tpe().isoformat()
+        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
 
 
 def try_close_position(state: Dict[str, Any], mysdk):
@@ -1591,8 +1394,9 @@ def try_close_position(state: Dict[str, Any], mysdk):
 
 
 def _protect_profit_stop(state: Dict[str, Any]):
-    """SHORT 獲利達標後，將 flat_price 下修到至少保住指定獲利的位置。"""
-    if state.get("side") != "SHORT":
+    """獲利達標後，將 flat_price 推進到至少保住指定獲利的位置。"""
+    side = state.get("side")
+    if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         return
 
     try:
@@ -1606,10 +1410,16 @@ def _protect_profit_stop(state: Dict[str, Any]):
         return
 
     protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
-    protect_trigger_price = entry_price * (1 - protect_profit_per / 100.0)
-    protected_flat_price = entry_price * (1 - protect_loss_per / 100.0)
+    if side == TRADE_SIDE_LONG:
+        protect_trigger_price = entry_price * (1 + protect_profit_per / 100.0)
+        protected_flat_price = entry_price * (1 + protect_loss_per / 100.0)
+        should_update = px >= protect_trigger_price and protected_flat_price > current_flat_price
+    else:
+        protect_trigger_price = entry_price * (1 - protect_profit_per / 100.0)
+        protected_flat_price = entry_price * (1 - protect_loss_per / 100.0)
+        should_update = px <= protect_trigger_price and protected_flat_price < current_flat_price
 
-    if px <= protect_trigger_price and protected_flat_price < current_flat_price:
+    if should_update:
         state["flat_price"] = protected_flat_price
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
         print(f"[{state['symbol_name']}] ✅ 獲利保護啟動 停損調整為：{state['flat_price']}")
@@ -1618,11 +1428,16 @@ def _protect_profit_stop(state: Dict[str, Any]):
 def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
 
     side = state.get("side")
-    px = state.get("last_price")
-    flat_price = state.get("flat_price")
+    try:
+        px = float(state.get("last_price"))
+        flat_price = float(state.get("flat_price"))
+    except (TypeError, ValueError):
+        return False
 
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         return px >= flat_price # 只要價格大於停損點就平倉
+    if side == TRADE_SIDE_LONG:
+        return px <= flat_price
     return False
 
 
@@ -1637,8 +1452,10 @@ def reached_stop_to_profit(state: Dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
 
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         return px >= stop_profit_price
+    if side == TRADE_SIDE_LONG:
+        return px <= stop_profit_price
     return False
 
 
@@ -1651,8 +1468,10 @@ def reached_resize_profit(state: Dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
 
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         return px <= profit_price
+    if side == TRADE_SIDE_LONG:
+        return px >= profit_price
     return False
 
 
@@ -1663,14 +1482,24 @@ def _advance_profit_trail(state: Dict[str, Any]):
     except (TypeError, ValueError):
         return
 
-    if px >= 100:
-        new_profit_price = px - PROFIT_BIG_TARGET_STEP
-        new_stop_profit_price = px + PROFIT_BIG_BACK_STEP
+    side = state.get("side")
+    if side == TRADE_SIDE_LONG:
+        if px >= 100:
+            new_profit_price = px + PROFIT_BIG_TARGET_STEP
+            new_stop_profit_price = px - PROFIT_BIG_BACK_STEP
+        else:
+            new_profit_price = px + PROFIT_SMALL_TARGET_STEP
+            new_stop_profit_price = px - PROFIT_SMALL_BACK_STEP
+        state["profit_price"] = min(new_profit_price, state.get("limit_up_price", 0))
     else:
-        new_profit_price = px - PROFIT_SMALL_TARGET_STEP
-        new_stop_profit_price = px + PROFIT_SMALL_BACK_STEP
+        if px >= 100:
+            new_profit_price = px - PROFIT_BIG_TARGET_STEP
+            new_stop_profit_price = px + PROFIT_BIG_BACK_STEP
+        else:
+            new_profit_price = px - PROFIT_SMALL_TARGET_STEP
+            new_stop_profit_price = px + PROFIT_SMALL_BACK_STEP
+        state["profit_price"] = max(new_profit_price, state.get("limit_down_price", 0))
 
-    state["profit_price"] = max(new_profit_price, state.get("limit_down_price", 0))
     state["stop_profit_price"] = new_stop_profit_price
     state["profit_tracking_active"] = True
     atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -1681,12 +1510,22 @@ def close_profit_position(state: Dict[str, Any], mysdk):
     side = state.get("side")
     exit_place_result = False
 
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         exit_place_result = type_place_order(
             mysdk,
             state["symbol_code_with_suf"],
             Action.Buy,
             Trade.Cash,
+            quantity=state.get("qty", 0),
+            price_flag=PriceFlag.Market,
+            price=last_px
+        )
+    elif side == TRADE_SIDE_LONG:
+        exit_place_result = type_place_order(
+            mysdk,
+            state["symbol_code_with_suf"],
+            Action.Sell,
+            Trade.DayTradingSell,
             quantity=state.get("qty", 0),
             price_flag=PriceFlag.Market,
             price=last_px
@@ -1711,7 +1550,7 @@ def close_flat_position(state: Dict[str, Any], mysdk):
     close_order_sent = False
 
     # SHORT：先嘗試市價買回平倉
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         exit_place_result = type_place_order(
             mysdk,
             state["symbol_code_with_suf"],
@@ -1722,9 +1561,20 @@ def close_flat_position(state: Dict[str, Any], mysdk):
             price=last_px
         )
         close_order_sent = bool(exit_place_result)
+    elif side == TRADE_SIDE_LONG:
+        exit_place_result = type_place_order(
+            mysdk,
+            state["symbol_code_with_suf"],
+            Action.Sell,
+            Trade.DayTradingSell,
+            quantity=state.get("qty", 0),
+            price_flag=PriceFlag.Market,
+            price=last_px
+        )
+        close_order_sent = bool(exit_place_result)
 
     # 集合競價等情境若無法市價，改掛預約單
-    if not exit_place_result and side == "SHORT":
+    if not exit_place_result and side == TRADE_SIDE_SHORT:
         reserve_place_result = type_place_order(
             mysdk,
             state["symbol_code_with_suf"],
@@ -1740,6 +1590,23 @@ def close_flat_position(state: Dict[str, Any], mysdk):
             return
 
         print(f'[{state.get("symbol_name")}] SHORT 市價平倉失敗，已改掛預約平倉單')
+        close_order_sent = True
+    elif not exit_place_result and side == TRADE_SIDE_LONG:
+        reserve_place_result = type_place_order(
+            mysdk,
+            state["symbol_code_with_suf"],
+            Action.Sell,
+            Trade.DayTradingSell,
+            quantity=state.get("qty", 0),
+            price_flag=PriceFlag.LimitDown,
+            price=0
+        )
+
+        if not reserve_place_result:
+            print(f'[{state.get("symbol_name")}] LONG 市價平倉失敗且預約掛單失敗，須手動下單平倉')
+            return
+
+        print(f'[{state.get("symbol_name")}] LONG 市價平倉失敗，已改掛預約平倉單')
         close_order_sent = True
 
     if not close_order_sent:
@@ -1766,8 +1633,12 @@ def endtime_close_position(state: Dict[str, Any], mysdk):
     last_px = state.get("last_price", 0.0)
     side = state.get("side")
 
-    if side == "SHORT":
+    if side == TRADE_SIDE_SHORT:
         exit_place_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash,
+                                             quantity=state.get("qty", 0),
+                                             price_flag=PriceFlag.Market, price=last_px)
+    elif side == TRADE_SIDE_LONG:
+        exit_place_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Sell, Trade.DayTradingSell,
                                              quantity=state.get("qty", 0),
                                              price_flag=PriceFlag.Market, price=last_px)
     if exit_place_result: # 有成功平倉
@@ -1783,9 +1654,12 @@ def endtime_close_position(state: Dict[str, Any], mysdk):
 
     # 市價平倉失敗的話，改用漲停價回補
     if not exit_place_result:
-        if side == "SHORT":
+        if side == TRADE_SIDE_SHORT:
             limit_order_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Buy, Trade.Cash,
                                                   quantity=state.get("qty", 0), price_flag=PriceFlag.LimitUp, price=0)
+        elif side == TRADE_SIDE_LONG:
+            limit_order_result = type_place_order(mysdk, state["symbol_code_with_suf"], Action.Sell, Trade.DayTradingSell,
+                                                  quantity=state.get("qty", 0), price_flag=PriceFlag.LimitDown, price=0)
         if limit_order_result:
             print_close_position_log(state)
             state["traded"] = True
@@ -1924,7 +1798,7 @@ def initialize_states(
             print(f"[{symbolStr}] ⚠️ 高失敗率，排除")
             continue
 
-        quantity = get_entry_order_quantity() # 預設 chance 模式的進場數量
+        quantity = get_entry_order_quantity()
 
         st = load_or_init_state(
             symbolStr,
@@ -2033,35 +1907,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["last_price_time"] = now_tpe().isoformat()
                     # round_has_market_update = True
 
-                    yesterday_low_price = st.get("yesterday_low_price")
-                    original_yesterday_low_price = st.get("original_yesterday_low_price")
-                    if (
-                        ((now_local.hour, now_local.minute) < STRATEGY_DECISION)
-                        and (original_yesterday_low_price is not None)
-                        and (high_price is not None)
-                        and (low_price is not None)
-                        and (not is_intraday_range_within_threshold_by_realtime_prices(float(original_yesterday_low_price), float(high_price), float(low_price)))
-                    ):
-                        st["traded"] = True
-                        st["entry_time"] = now_tpe().isoformat()
-                        atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
-                        print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} 觸發前高低價差過大，不追蹤")
-                        continue
-
-                    if (
-                        ((now_local.hour, now_local.minute) < STRATEGY_DECISION)
-                        and ((now_local.hour, now_local.minute) > BUFFER_LOW_CHECK_END_TIME)
-                        and (yesterday_low_price is not None)
-                        and (low_price is not None)
-                        and (low_price < yesterday_low_price)
-                        and (not st.get("broken_trigger_low"))
-                        ):
-                        st["broken_trigger_low"] = True
-                        st["entry_time"] = now_tpe().isoformat()
-                        atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
-                        print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} 決策時間前已先突破有效昨低，記錄 chance/delay 阻擋")
-                        continue
-
                     entry_check_end_time = get_entry_check_end_time(st)
                     if (
                         ((now_local.hour, now_local.minute) > entry_check_end_time)
@@ -2078,15 +1923,18 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     else:
                         entry_result = entry_price_check(st, realtime_sdk)
                         if entry_result is True:
-                            ylow = get_entry_trigger_low_price(st)
-                            if ylow is None:
+                            trigger_price = get_entry_trigger_price(st)
+                            if trigger_price is None:
                                 st["traded"] = True
                                 st["entry_time"] = now_tpe().isoformat()
                                 atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
                                 print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} 無法取得進場觸發價，不追蹤")
                                 continue
-                            st["side"] = "SHORT"
-                            st["entry_trigger_price"] = adjust_price(ylow - get_tick_size(ylow), "SHORT")
+                            if is_follow_mode():
+                                st["side"] = TRADE_SIDE_LONG
+                            else:
+                                st["side"] = TRADE_SIDE_SHORT
+                            st["entry_trigger_price"] = trigger_price
                             try_open_position(st, mysdk)
                         elif entry_result == 'BLOCKED':
                             st["traded"] = True
@@ -2139,7 +1987,7 @@ if __name__ == "__main__":
 
     try:
         clear_state_dir()
-        persist_entry_mode_to_stock_data(ENTRY_MODE_CHANCE)
+        persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
         # 登入以操作API
         config = ConfigParser()
@@ -2154,8 +2002,6 @@ if __name__ == "__main__":
 
         candidate_symbols = selected_stocks
         states = initialize_states(candidate_symbols, realtime_sdk)
-
-        adjust_buffer_yesterday_low_for_states(states, realtime_sdk)
 
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()

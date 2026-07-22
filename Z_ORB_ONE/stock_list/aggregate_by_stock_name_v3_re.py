@@ -8,7 +8,7 @@ from pathlib import Path
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 TOP_RANK = 30
-MIN_REPEAT_COUNT = 5
+MIN_REPEAT_COUNT = 10
 
 RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result.txt"
 OUTPUT_RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result_re.txt"
