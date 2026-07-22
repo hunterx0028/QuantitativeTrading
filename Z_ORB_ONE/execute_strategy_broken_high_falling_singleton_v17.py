@@ -65,7 +65,7 @@ PROTECT_PROFIT_PER_DELAY = 2.0 # delay 觸發調整停利百分比
 
 BUFFER_LOW_CHECK_END_TIME = (9, 5) # 可以調降昨低的時間
 
-STRATEGY_DECISION = (9, 41)  # 市場模式判斷時間
+STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
 
 ENTRY_CHECK_START_TIME_CHANCE = (9, 41)  # chance 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
@@ -89,10 +89,10 @@ ENTRY_ORDER_QUANTITY_CHANCE = 2 # chance 每次進場下單數量
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
 ENTRY_ORDER_QUANTITY_DELAY = 2 # delay 每次進場下單數量，預設沿用 chance
 
-IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前含當根最後 low 需低於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前含當根最後 low 需低於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.5 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
