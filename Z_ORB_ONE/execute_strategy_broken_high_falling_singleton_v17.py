@@ -44,6 +44,7 @@ TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
+REALTIME_QUOTE_START_TIME = (9, 5)  # 09:05 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 GATE_LOWER_PASSED = 'LOWER_PASSED'
@@ -1045,6 +1046,11 @@ def force_close_time_reached(state: Dict[str, Any] | None = None) -> bool:
     return (t.hour, t.minute) >= force_close_time
 
 
+def realtime_quote_time_reached() -> bool:
+    t = now_tpe()
+    return (t.hour, t.minute) >= REALTIME_QUOTE_START_TIME
+
+
 # ============ 訊號與狀態邏輯 ============
 def check_open_status(state: Dict[str, Any]) -> bool:
     open_pass = False
@@ -1858,6 +1864,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             for st in pending_states
         )
         round_should_update_realtime = update_status
+        if round_should_update_realtime and not realtime_quote_time_reached():
+            round_should_update_realtime = False
 
         for st in states.values():
             if force_close_time_reached(st) and st.get("in_position") and not st.get("traded"):  # 仍有持倉且未交易
