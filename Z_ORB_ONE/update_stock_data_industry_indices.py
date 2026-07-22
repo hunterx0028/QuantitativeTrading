@@ -49,6 +49,7 @@ RESERVE_MARKET_INDICES: Dict[str, Dict[str, Any]] = {
         "source": "historical.candles",
     },
 }
+RESERVE_MARKET_INDEX_KEYS = frozenset(RESERVE_MARKET_INDICES)
 
 
 def now_text() -> str:
@@ -147,8 +148,10 @@ def build_index_targets(
         map_key = f"{exchange}:{industry_code}"
         targets[map_key] = index_entry
 
-    market_indices = industry_map.get("market_indices") or RESERVE_MARKET_INDICES
+    market_indices = {**RESERVE_MARKET_INDICES, **(industry_map.get("market_indices") or {})}
     for map_key, index_entry in market_indices.items():
+        if not index_entry.get("symbol") and map_key in RESERVE_MARKET_INDEX_KEYS:
+            index_entry = RESERVE_MARKET_INDICES[map_key]
         if not index_entry.get("symbol"):
             continue
         targets[map_key] = {
@@ -161,6 +164,23 @@ def build_index_targets(
         }
 
     return targets, missing_stocks
+
+
+def merge_relevant_indices(
+    existing_indices: Dict[str, Dict[str, Any]],
+    refreshed_indices: Dict[str, Dict[str, Any]],
+    target_keys: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    relevant_keys = set(target_keys) | set(RESERVE_MARKET_INDEX_KEYS)
+    result: Dict[str, Dict[str, Any]] = {}
+
+    for map_key in sorted(relevant_keys):
+        if map_key in refreshed_indices:
+            result[map_key] = refreshed_indices[map_key]
+        elif map_key in existing_indices:
+            result[map_key] = existing_indices[map_key]
+
+    return result
 
 
 def parse_api_date(value: str | None) -> date | None:
@@ -463,7 +483,7 @@ def main() -> int:
             if map_key in index_state
         }
         refreshed_indices = build_market_previous_close_indices(received_targets, index_state)
-        updated_indices = {**existing_indices, **refreshed_indices}
+        updated_indices = merge_relevant_indices(existing_indices, refreshed_indices, targets)
 
         log(json.dumps(updated_indices, ensure_ascii=False, indent=2))
         if args.dry_run:
