@@ -35,11 +35,11 @@ TRADE_SIDE_LONG = 'LONG'
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
 
-OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
+OPTIMIZE_LOSS_PER_LOWER = 1.5 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
 OPTIMIZE_LOSS_PER_FOLLOW = 1.5 # follow 停損百分比(%)，預設沿用 chance
-OPTIMIZE_PROFIT_PER_FOLLOW = 5.0 # follow 停利百分比(%)，預設沿用 chance
+OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
 
 STRATEGY_DECISION = (9, 41) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 
@@ -60,11 +60,11 @@ IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.8 # IX0001 反彈失效門檻
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.75 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 2.0 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.5 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.6 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.2 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.75 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -1492,34 +1492,6 @@ def format_optimize_profit_parameter_text(profit_percent: float) -> str:
     return f'停利={profit_percent:.1f}%'
 
 
-def format_industry_market_filter_text() -> str:
-    """格式化產業盤勢過濾設定。"""
-    return (
-        '產業盤勢過濾='
-        f'(entry當下產業指數high < 前一營業日最後close * '
-        f'{1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0:.4f}, '
-        f'FOLLOW entry當下產業指數low > 前一營業日最高high * '
-        f'{1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0:.4f})'
-    )
-
-
-def format_strategy_market_decision_gate_text() -> str:
-    """格式化全體市場決策 gate 設定。"""
-    return (
-        '策略決策gate=IX0001與IX0043於STRATEGY_DECISION前判斷，並以最後一根close決定最終狀態 '
-        f'(IX0001曾low < 前日最後close * {1 - IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER / 100.0:.4f}, '
-        f'IX0043曾low < 前日最後close * {1 - IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER / 100.0:.4f}, '
-        f'LOWER最終IX0001 close < 前日最後close * {1 - IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER / 100.0:.4f}, '
-        f'IX0043 close < 前日最後close * {1 - IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER / 100.0:.4f}; '
-        f'FOLLOW IX0001曾high > 前日最後close * {1 + IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW / 100.0:.4f}, '
-        f'IX0043曾high > 前日最後close * {1 + IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW / 100.0:.4f}, '
-        f'最終IX0001 close > 前日最後close * {1 + IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW / 100.0:.4f}, '
-        f'IX0043 close > 前日最後close * {1 + IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW / 100.0:.4f}; '
-        '偏空模式要求兩指數最終close皆嚴格小於各自昨收，兩者都曾跌破且最終皆維持時為LOWER，'
-        '其餘狀況皆為NO_TRADE)'
-    )
-
-
 def print_daily_optimization_results(
     all_results: list,
     total_pnl: float,
@@ -1531,8 +1503,6 @@ def print_daily_optimization_results(
         f'損益已納入交易成本: 手續費率={BROKERAGE_FEE_RATE:.6f}, '
         f'賣出交易稅率={SELL_TRANSACTION_TAX_RATE:.6f}'
     )
-    print(format_strategy_market_decision_gate_text())
-    print(format_industry_market_filter_text())
     print('')
 
     summary = summarize_results(all_results)
@@ -1636,8 +1606,6 @@ def print_daily_optimization_results(
         f'FOLLOW進場時間窗={STRATEGY_START_FOLLOW[0]:02d}:{STRATEGY_START_FOLLOW[1]:02d}~{STRATEGY_END_FOLLOW[0]:02d}:{STRATEGY_END_FOLLOW[1]:02d}    '
         f'FOLLOW出場時間窗={INTRADAY_COMPARE_END_FOLLOW[0]:02d}:{INTRADAY_COMPARE_END_FOLLOW[1]:02d}'
     )
-    print(format_strategy_market_decision_gate_text())
-    print(format_industry_market_filter_text())
 
 
 # ---------------------------------------------------------------------------
