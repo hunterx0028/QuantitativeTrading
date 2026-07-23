@@ -21,6 +21,9 @@ DOCKER_HELPERS = '''
 # ============ Docker/Fargate 專用工具 ============
 S3_BUCKET = os.getenv("QUANT_S3_BUCKET", "leegueishen-quant-trading-17")
 S3_PREFIX = os.getenv("QUANT_S3_PREFIX", "exchange").strip("/")
+stock_data = None
+selected_stocks = []
+market_previous_close_indices = {}
 
 REQUIRED_RUNTIME_FILES = (
     "config.ini",
@@ -67,12 +70,15 @@ def download_runtime_files_from_s3():
         )
 
 
-def load_selected_stocks_from_runtime_file():
+def load_stock_data_from_runtime_file():
     """
     延後載入 stock_data.py。
-    這樣在 Fargate 啟動時，可以先從 S3 下載 stock_data.py，再 import selected_stocks。
+    這樣在 Fargate 啟動時，可以先從 S3 下載 stock_data.py，再載入策略需要的資料。
     """
+    global stock_data, selected_stocks, market_previous_close_indices
+
     import importlib.util
+    import sys
 
     stock_data_path = os.path.join(BASE_DIR, "stock_data.py")
     if not os.path.exists(stock_data_path):
@@ -84,11 +90,15 @@ def load_selected_stocks_from_runtime_file():
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    sys.modules["stock_data"] = module
 
     if not hasattr(module, "selected_stocks"):
         raise AttributeError("stock_data.py does not define selected_stocks")
 
-    return module.selected_stocks
+    stock_data = module
+    selected_stocks = module.selected_stocks
+    market_previous_close_indices = getattr(module, "market_previous_close_indices", {})
+    return selected_stocks
 
 
 def build_login_stdin() -> io.StringIO:
@@ -182,7 +192,7 @@ DOCKER_MAIN = '''if __name__ == "__main__":
 
         realtime_sdk, sdk = login_sdks(config)
 
-        candidate_symbols = load_selected_stocks_from_runtime_file()
+        candidate_symbols = load_stock_data_from_runtime_file()
         states = initialize_states(candidate_symbols, realtime_sdk)
 
         target_hour = 9 # 9
@@ -256,7 +266,7 @@ def transform_singleton_to_docker(source: str) -> str:
     source = source.replace("\r\n", "\n")
 
     source = re.sub(
-        r"\nfrom stock_data import selected_stocks\n+",
+        r"\nimport stock_data\nfrom stock_data import selected_stocks, market_previous_close_indices\n+",
         "\n",
         source,
         count=1,
