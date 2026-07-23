@@ -42,6 +42,7 @@ OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
 
 STRATEGY_DECISION = (9, 41) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
+MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數位於昨收兩側的 NO_TRADE 檢查起始分K棒，包含此時間
 
 STRATEGY_START_LOWER = (9, 46) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 46) # follow 個股進場開始分K棒的(時, 分)，包含此時間
@@ -852,6 +853,46 @@ def get_strategy_decision_decline_percent(index_key: str) -> float | None:
     return None
 
 
+def has_market_index_crossed_both_sides_of_previous_close(
+    index_key: str,
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """指定起始時間至決策時間前，指數若曾嚴格位於昨收上下兩側即視為反轉。"""
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if previous_close is None:
+        return False
+
+    reversal_start_hm = (
+        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    has_traded_above = False
+    has_traded_below = False
+
+    for bar in today_bars:
+        bar_dt = bar.get('dt')
+        if bar_dt is None:
+            continue
+        bar_hm = bar_dt.hour * 60 + bar_dt.minute
+        if bar_hm < reversal_start_hm or bar_hm >= decision_hm:
+            continue
+
+        high = bar.get('high')
+        low = bar.get('low')
+        if high is not None and float(high) > previous_close:
+            has_traded_above = True
+        if low is not None and float(low) < previous_close:
+            has_traded_below = True
+        if has_traded_above and has_traded_below:
+            return True
+
+    return False
+
+
 def get_market_index_strategy_decision_gate_status(
     index_key: str,
     target_date: date,
@@ -973,6 +1014,16 @@ def get_strategy_market_decision_gate_status(
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> str:
     """依兩指數歷史觸發與 STRATEGY_DECISION 前最後 close 決定最終模式。"""
+    if any(
+        has_market_index_crossed_both_sides_of_previous_close(
+            index_key,
+            target_date,
+            index_minute_bars_by_key,
+        )
+        for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
+    ):
+        return GATE_NO_TRADE
+
     lower_details = [
         get_market_index_strategy_decision_gate_detail(
             index_key,
@@ -1582,7 +1633,12 @@ def print_daily_optimization_results(
         f'FOLLOW_LOSS_PER={OPTIMIZE_LOSS_PER_FOLLOW:.1f}%  '
         f'FOLLOW_PROFIT_PER={OPTIMIZE_PROFIT_PER_FOLLOW:.1f}%'
     )
-    print(f'STRATEGY_DECISION={STRATEGY_DECISION[0]:02d}:{STRATEGY_DECISION[1]:02d}')
+    print(
+        f'MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
+        f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:'
+        f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}  '
+        f'STRATEGY_DECISION={STRATEGY_DECISION[0]:02d}:{STRATEGY_DECISION[1]:02d}'
+    )
     print(
         f'LOWER進場時間窗={STRATEGY_START_LOWER[0]:02d}:{STRATEGY_START_LOWER[1]:02d}~{STRATEGY_END_LOWER[0]:02d}:{STRATEGY_END_LOWER[1]:02d}    '
         f'LOWER出場時間窗={INTRADAY_COMPARE_END_LOWER[0]:02d}:{INTRADAY_COMPARE_END_LOWER[1]:02d}'
@@ -1993,6 +2049,10 @@ def main() -> None:
                 'market_start_gate_cache': market_start_gate_cache,
             }
 
+        market_reversal_start_hm = (
+            MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+            + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+        )
         strategy_decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
         strategy_start_lower_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
         strategy_start_follow_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
@@ -2000,6 +2060,18 @@ def main() -> None:
         strategy_end_follow_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
         if not (0 <= strategy_decision_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_DECISION 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
+            sys.exit(1)
+        if not (0 <= market_reversal_start_hm <= 23 * 60 + 59):
+            print(
+                '[ERROR] MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 設定錯誤，需介於 00:00~23:59',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if market_reversal_start_hm >= strategy_decision_hm:
+            print(
+                '[ERROR] MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 STRATEGY_DECISION',
+                file=sys.stderr,
+            )
             sys.exit(1)
         if not (0 <= strategy_start_lower_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_START_LOWER 設定錯誤，需介於 00:00~23:59', file=sys.stderr)

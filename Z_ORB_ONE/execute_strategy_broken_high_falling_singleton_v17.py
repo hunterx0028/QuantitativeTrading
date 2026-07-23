@@ -6,6 +6,7 @@ import sys
 import math
 import shutil
 import io
+import threading
 from pprint import pformat
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime
@@ -44,7 +45,8 @@ TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
-REALTIME_QUOTE_START_TIME = (9, 5)  # 09:05 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
+MAIN_START_TIME = (8, 55)  # 主程序開始執行時間；提早啟動時等待至此時間
+REALTIME_QUOTE_START_TIME = (9, 10)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 GATE_LOWER_PASSED = 'LOWER_PASSED'
@@ -67,6 +69,7 @@ PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發調整停利百分比
 
 STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
+MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側的 NO_TRADE 檢查起始時間（含）
 
 ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
@@ -110,6 +113,8 @@ MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
+MARKET_REVERSAL_STOP_EVENT = threading.Event()
+MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_FOLLOW = 1
 ENTRY_MODE_LOWER = 2
@@ -225,6 +230,48 @@ def now_tpe() -> datetime:
 
 def hhmm_text(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
+
+
+def wait_until_main_start_time() -> None:
+    main_start_hm = MAIN_START_TIME[0] * 60 + MAIN_START_TIME[1]
+    if not (0 <= main_start_hm <= 23 * 60 + 59):
+        raise ValueError("MAIN_START_TIME 設定錯誤，需介於 00:00~23:59")
+
+    now_local = now_tpe()
+    target_time = now_local.replace(
+        hour=MAIN_START_TIME[0],
+        minute=MAIN_START_TIME[1],
+        second=0,
+        microsecond=0,
+    )
+    if now_local < target_time:
+        print(
+            f"⏳ 主程序預定 {MAIN_START_TIME[0]:02d}:{MAIN_START_TIME[1]:02d} 開始，"
+            f"目前時間：{now_local.strftime('%H:%M:%S')}，等待中"
+        )
+        while True:
+            remaining_seconds = (target_time - now_tpe()).total_seconds()
+            if remaining_seconds <= 0:
+                break
+            time.sleep(min(remaining_seconds, 30.0))
+
+    print(f"⏰ 主程序開始執行！目前時間：{now_tpe().strftime('%H:%M:%S')}")
+
+
+def validate_market_reversal_time_config() -> None:
+    reversal_start_hm = (
+        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
+    strategy_decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    if not (0 <= reversal_start_hm <= 23 * 60 + 59):
+        raise ValueError(
+            "MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 設定錯誤，需介於 00:00~23:59"
+        )
+    if reversal_start_hm >= strategy_decision_hm:
+        raise ValueError(
+            "MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 STRATEGY_DECISION"
+        )
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -344,9 +391,38 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         previous_close_float = float(previous_close)
     except (TypeError, ValueError):
         return
+    if previous_close_float <= 0:
+        return
+
+    market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
+    if (now_local.hour, now_local.minute) >= MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME:
+        if not MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.is_set():
+            MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.set()
+            print(
+                f"⏰ {now_local.strftime('%H:%M:%S')} 已到市場指數上下穿越檢核時間，"
+                "開始檢核上市及上櫃指數是否穿越昨收"
+            )
+
+        if index_value > previous_close_float:
+            market_state["previous_close_traded_above"] = True
+        elif index_value < previous_close_float:
+            market_state["previous_close_traded_below"] = True
+
+        if (
+            market_state.get("previous_close_traded_above")
+            and market_state.get("previous_close_traded_below")
+            and not market_state.get("previous_close_reversal_blocked")
+        ):
+            market_state["previous_close_reversal_blocked"] = True
+            market_state["previous_close_reversal_time"] = event_time or now_local.isoformat()
+            MARKET_REVERSAL_STOP_EVENT.set()
+            print(
+                f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數已檢核到上下穿越昨收，"
+                "今日 NO_TRADE，準備停止取價、關閉 WebSocket 並結束程序"
+            )
+
     if (
-        previous_close_float <= 0
-        or drop_percent is None
+        drop_percent is None
         or rebound_percent is None
         or raise_percent is None
         or decline_percent is None
@@ -357,8 +433,6 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
     rebound_threshold = previous_close_float * (1 - rebound_percent / 100.0)
     raise_threshold = previous_close_float * (1 + raise_percent / 100.0)
     decline_threshold = previous_close_float * (1 + decline_percent / 100.0)
-    market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
-
     if index_value < drop_threshold:
         if (
             (not market_state.get("strategy_decision_broken"))
@@ -423,6 +497,10 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         "rebound_time": market_state.get("strategy_decision_rebound_time"),
         "raise_time": market_state.get("strategy_decision_raise_time"),
         "decline_time": market_state.get("strategy_decision_decline_time"),
+        "previous_close_traded_above": bool(market_state.get("previous_close_traded_above")),
+        "previous_close_traded_below": bool(market_state.get("previous_close_traded_below")),
+        "previous_close_reversal_blocked": bool(market_state.get("previous_close_reversal_blocked")),
+        "previous_close_reversal_time": market_state.get("previous_close_reversal_time"),
         "passed": False,
         "lower_passed": False,
         "follow_passed": False,
@@ -499,6 +577,16 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
         for index_key in MARKET_GATE_INDEX_KEYS
     ]
 
+    reversal_blocked = any(result["previous_close_reversal_blocked"] for result in gate_results)
+    if reversal_blocked:
+        print(
+            "[MODE] 上市或上櫃指數在指定時段曾位於昨收上下兩側，今日 NO_TRADE "
+            f"({MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:"
+            f"{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}~"
+            f"{STRATEGY_DECISION[0]:02d}:{STRATEGY_DECISION[1]:02d})"
+        )
+        return ENTRY_MODE_NO_TRADE, gate_results
+
     follow_mode_passed = all(result["follow_passed"] for result in gate_results)
     lower_mode_passed = all(result["lower_passed"] for result in gate_results)
 
@@ -558,6 +646,10 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
             f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
             f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"previous_close_traded_above={result.get('previous_close_traded_above')} "
+            f"previous_close_traded_below={result.get('previous_close_traded_below')} "
+            f"previous_close_reversal_blocked={result.get('previous_close_reversal_blocked')} "
+            f"previous_close_reversal_time={format_market_gate_time(result.get('previous_close_reversal_time'))} "
             f"drop_threshold={format_market_gate_value(result.get('drop_threshold'))} "
             f"break_time={format_market_gate_time(result.get('break_time'))} "
             f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
@@ -1767,6 +1859,10 @@ def initialize_states(
     states: Dict[str, Dict[str, Any]] = {}
     filtered_stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]] = []
     for symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple in stocks:
+        if MARKET_REVERSAL_STOP_EVENT.is_set():
+            print("[MODE] 已觸發市場指數上下穿越，停止初始化個股資料")
+            break
+
         _, code_with_suf = get_pure_symbol(symbolStr)
         normalized_industry_code = str(industry_code).zfill(2)
         market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
@@ -1838,20 +1934,49 @@ def initialize_states(
 
 def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata):
     update_status = False
+    realtime_quote_start_announced = False
+    strategy_decision_announced = False
     entry_check_start_announced = False
     entry_check_end_announced = False
     entry_mode_decided = False
     while True:
+        if MARKET_REVERSAL_STOP_EVENT.is_set():
+            print("[MODE] 市場指數上下穿越已觸發，維持 NO_TRADE 並結束監控")
+            return
+
         # round_has_market_update = False
         now_local = now_tpe()
-        if (not entry_check_start_announced) and ((now_local.hour, now_local.minute) >= STRATEGY_DECISION):
+        if (
+            not realtime_quote_start_announced
+            and (now_local.hour, now_local.minute) >= REALTIME_QUOTE_START_TIME
+        ):
+            print(
+                f"⏰ 個股即時行情取價開始時間！"
+                f"目前時間：{now_local.strftime('%H:%M:%S')}"
+            )
+            realtime_quote_start_announced = True
+
+        if (not strategy_decision_announced) and ((now_local.hour, now_local.minute) >= STRATEGY_DECISION):
             print(f"⏰ 模式判斷時間！目前時間：{now_local.strftime('%H:%M:%S')}")
-            entry_check_start_announced = True
+            strategy_decision_announced = True
             if not entry_mode_decided:
                 entry_mode, gate_results = decide_entry_mode_by_market_gate()
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results)
                 entry_mode_decided = True
+
+        entry_check_start_time = get_entry_check_start_time()
+        if (
+            entry_mode_decided
+            and get_current_entry_mode() != ENTRY_MODE_NO_TRADE
+            and not entry_check_start_announced
+            and (now_local.hour, now_local.minute) >= entry_check_start_time
+        ):
+            print(
+                f"⏰ {get_entry_mode_text()} 進場檢核開始時間！"
+                f"目前時間：{now_local.strftime('%H:%M:%S')}"
+            )
+            entry_check_start_announced = True
 
         latest_entry_check_end_time = get_latest_entry_check_end_time()
         if (not entry_check_end_announced) and ((now_local.hour, now_local.minute, now_local.second) >= (latest_entry_check_end_time[0], latest_entry_check_end_time[1], 0)):
@@ -1971,7 +2096,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         now = now_tpe()
         nxt = ceil_next_interval(now, 5) # 秒數在5的倍數輪巡
         sleep_sec = max(0.2, (nxt - now).total_seconds())
-        time.sleep(sleep_sec)
+        if MARKET_REVERSAL_STOP_EVENT.wait(timeout=sleep_sec):
+            continue
         # print(f"========= 開始下一輪 {nxt.strftime('%Y-%m-%d %H:%M:%S')} =========")
 
         update_status = False # 依指定秒點更新股票，太頻繁更新會有API call次數過多的問題
@@ -1994,6 +2120,10 @@ if __name__ == "__main__":
     market_index_ws = None
 
     try:
+        validate_market_reversal_time_config()
+        wait_until_main_start_time()
+        MARKET_REVERSAL_STOP_EVENT.clear()
+        MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         clear_state_dir()
         persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
