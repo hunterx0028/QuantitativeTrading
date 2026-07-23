@@ -104,41 +104,67 @@ def load_stock_data_from_runtime_file():
 def build_login_stdin() -> io.StringIO:
     """
     玉山 SDK 在 Linux container 內會互動式詢問密碼。
-    這裡用 Secrets Manager 注入的環境變數，模擬 stdin 輸入。
-
-    已確認本機 Docker 的詢問順序為：
-    1. ESUN_PASSWORD
-    2. KEYRING_PASSWORD
-    3. KEYRING_PASSWORD（再次確認）
-    4. CERT_PASSWORD
-
-    額外再附上一輪相同輸入，避免 SDK 或 keyring 在不同狀態下多問一次。
-    未被讀取的 stdin 內容不會造成影響。
+    主要由 patch_getpass_from_env() 回答密碼 prompt；這裡保留 stdin
+    fallback，避免 SDK 內部使用 input() 時在 ECS/Fargate 卡住。
     """
-    required_envs = ("ESUN_PASSWORD", "KEYRING_PASSWORD", "CERT_PASSWORD")
+    required_envs = ("ESUN_PASSWORD", "CERT_PASSWORD")
     missing = [name for name in required_envs if not os.getenv(name)]
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-    login_lines = [
-        os.environ["ESUN_PASSWORD"],
-        os.environ["KEYRING_PASSWORD"],
-        os.environ["KEYRING_PASSWORD"],
-        os.environ["CERT_PASSWORD"],
-        os.environ["ESUN_PASSWORD"],
-        os.environ["KEYRING_PASSWORD"],
-        os.environ["KEYRING_PASSWORD"],
-        os.environ["CERT_PASSWORD"],
-    ]
+    login_lines = [os.environ["ESUN_PASSWORD"], os.environ["CERT_PASSWORD"]] * 8
     return io.StringIO("\\n".join(login_lines) + "\\n")
+
+
+def configure_noninteractive_keyring() -> None:
+    """
+    ECS/Fargate 沒有可互動的 OS keyring。
+    若使用預設 keyring/keyrings.alt，可能會要求建立 keyring master password。
+    """
+    os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    try:
+        import keyring
+        from keyring.backends.null import Keyring
+
+        keyring.set_keyring(Keyring())
+        print("===== Python keyring backend: null (non-interactive) =====")
+    except Exception as e:
+        print(f"[WARN] Unable to force null keyring backend: {e}")
+
+
+def patch_getpass_from_env():
+    """讓 SDK 的 getpass prompt 改從環境變數取密碼。"""
+    import getpass
+
+    original_getpass = getpass.getpass
+
+    def env_getpass(prompt: str = "Password: ", stream: Any = None) -> str:
+        prompt_lower = str(prompt or "").lower()
+        if "cert" in prompt_lower or "憑證" in prompt_lower:
+            env_name = "CERT_PASSWORD"
+        elif "keyring" in prompt_lower:
+            env_name = "KEYRING_PASSWORD" if os.getenv("KEYRING_PASSWORD") else "ESUN_PASSWORD"
+        else:
+            env_name = "ESUN_PASSWORD"
+
+        value = os.getenv(env_name)
+        if not value:
+            raise RuntimeError(f"Missing required environment variable for prompt {prompt!r}: {env_name}")
+        print(f"[AUTH] Answer getpass prompt from {env_name}: {prompt}")
+        return value
+
+    getpass.getpass = env_getpass
+    return getpass, original_getpass
 
 
 def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
     """建立並登入行情與交易 SDK。"""
+    configure_noninteractive_keyring()
     realtime_sdk = EsunMarketdata(config)
     sdk = SDK(config)
 
     original_stdin = sys.stdin
+    getpass_module, original_getpass = patch_getpass_from_env()
     sys.stdin = build_login_stdin()
     try:
         print("===== Login EsunMarketdata =====")
@@ -150,6 +176,7 @@ def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
         print("===== Esun Trade SDK login success =====")
     finally:
         sys.stdin = original_stdin
+        getpass_module.getpass = original_getpass
 
     return realtime_sdk, sdk
 
