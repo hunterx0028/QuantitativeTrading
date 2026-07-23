@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 
-STRATEGY_FILENAME = "execute_strategy_broken_high_falling_singleton_v20.py"
+STRATEGY_FILENAME = "execute_strategy_broken_high_falling_singleton_v17.py"
 OVERWRITE_OUTPUT = True
 
 
