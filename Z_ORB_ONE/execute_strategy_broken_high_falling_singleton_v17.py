@@ -44,9 +44,9 @@ class TeeStream:
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
-FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 MAIN_START_TIME = (8, 55)  # 主程序開始執行時間；提早啟動時等待至此時間
 REALTIME_QUOTE_START_TIME = (9, 10)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
+FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 GATE_LOWER_PASSED = 'LOWER_PASSED'
@@ -68,8 +68,9 @@ OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
 PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發調整停利百分比
 
-STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側的 NO_TRADE 檢查起始時間（含）
+
+STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
 
 ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
