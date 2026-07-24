@@ -644,30 +644,25 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
     print(f"[MODE] STRATEGY_DECISION 模式判斷：{mode_text}")
     for result in gate_results:
         print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
             f"previous_close={format_market_gate_value(result.get('previous_close'))} "
-            f"last_index={format_market_gate_value(result.get('last_index'))} "
-            f"previous_close_traded_above={result.get('previous_close_traded_above')} "
-            f"previous_close_traded_below={result.get('previous_close_traded_below')} "
-            f"previous_close_reversal_blocked={result.get('previous_close_reversal_blocked')} "
-            f"previous_close_reversal_time={format_market_gate_time(result.get('previous_close_reversal_time'))} "
             f"drop_threshold={format_market_gate_value(result.get('drop_threshold'))} "
-            f"break_time={format_market_gate_time(result.get('break_time'))} "
             f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
-            f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
-            f"lower_passed={result.get('lower_passed')} "
-            f"lower_reason={result.get('lower_reason')}"
-        )
-        print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
-            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"break_time={format_market_gate_time(result.get('break_time'))} "
+            f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
+            f"lower_passed={result.get('lower_passed')}"
+        )
+    for result in gate_results:
+        print(
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
+            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"raise_threshold={format_market_gate_value(result.get('raise_threshold'))} "
-            f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_threshold={format_market_gate_value(result.get('decline_threshold'))} "
+            f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_time={format_market_gate_time(result.get('decline_time'))} "
-            f"follow_passed={result.get('follow_passed')} "
-            f"follow_reason={result.get('follow_reason')}"
+            f"follow_passed={result.get('follow_passed')}"
         )
 
 
