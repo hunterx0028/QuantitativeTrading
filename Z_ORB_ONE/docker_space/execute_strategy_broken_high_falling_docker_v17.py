@@ -68,8 +68,8 @@ MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側�
 
 STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
 
-ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
-ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_LOWER = (9, 44)  # lower 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_FOLLOW = (9, 44)  # follow 進場檢核開始時間（含）
 
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 ENTRY_CHECK_END_TIME_FOLLOW = (10, 1)  # follow 進場檢核截止時間（含）
@@ -238,19 +238,32 @@ def patch_getpass_from_env():
 
     original_getpass = getpass.getpass
 
-    def env_getpass(prompt: str = "Password: ", stream: Any = None) -> str:
-        prompt_lower = str(prompt or "").lower()
-        if "cert" in prompt_lower or "憑證" in prompt_lower:
-            env_name = "CERT_PASSWORD"
-        elif "keyring" in prompt_lower:
-            env_name = "KEYRING_PASSWORD" if os.getenv("KEYRING_PASSWORD") else "ESUN_PASSWORD"
-        else:
-            env_name = "ESUN_PASSWORD"
+    last_password = None
 
-        value = os.getenv(env_name)
+    def env_getpass(prompt: str = "Password: ", stream: Any = None) -> str:
+        nonlocal last_password
+
+        prompt_lower = str(prompt or "").casefold()
+
+        if "cert" in prompt_lower and "password" in prompt_lower:
+            env_name = "CERT_PASSWORD"
+            value = os.getenv(env_name)
+        elif "confirm" in prompt_lower and "password" in prompt_lower:
+            if last_password is None:
+                raise RuntimeError(f"Received confirm prompt before any password prompt: {prompt!r}")
+            env_name = "LAST_PASSWORD"
+            value = last_password
+        elif "password" in prompt_lower:
+            env_name = "ESUN_PASSWORD"
+            value = os.getenv(env_name)
+        else:
+            raise RuntimeError(f"Unknown password prompt: {prompt!r}")
+
         if not value:
             raise RuntimeError(f"Missing required environment variable for prompt {prompt!r}: {env_name}")
-        print(f"[AUTH] Answer getpass prompt from {env_name}: {prompt}")
+
+        last_password = value
+        print(f"[AUTH] {prompt.strip()} -> {env_name}")
         return value
 
     getpass.getpass = env_getpass
@@ -814,30 +827,25 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
     print(f"[MODE] STRATEGY_DECISION 模式判斷：{mode_text}")
     for result in gate_results:
         print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
             f"previous_close={format_market_gate_value(result.get('previous_close'))} "
-            f"last_index={format_market_gate_value(result.get('last_index'))} "
-            f"previous_close_traded_above={result.get('previous_close_traded_above')} "
-            f"previous_close_traded_below={result.get('previous_close_traded_below')} "
-            f"previous_close_reversal_blocked={result.get('previous_close_reversal_blocked')} "
-            f"previous_close_reversal_time={format_market_gate_time(result.get('previous_close_reversal_time'))} "
             f"drop_threshold={format_market_gate_value(result.get('drop_threshold'))} "
-            f"break_time={format_market_gate_time(result.get('break_time'))} "
             f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
-            f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
-            f"lower_passed={result.get('lower_passed')} "
-            f"lower_reason={result.get('lower_reason')}"
-        )
-        print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} {result.get('name') or ''} "
-            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"break_time={format_market_gate_time(result.get('break_time'))} "
+            f"rebound_time={format_market_gate_time(result.get('rebound_time'))} "
+            f"lower_passed={result.get('lower_passed')}"
+        )
+    for result in gate_results:
+        print(
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
+            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
             f"raise_threshold={format_market_gate_value(result.get('raise_threshold'))} "
-            f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_threshold={format_market_gate_value(result.get('decline_threshold'))} "
+            f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_time={format_market_gate_time(result.get('decline_time'))} "
-            f"follow_passed={result.get('follow_passed')} "
-            f"follow_reason={result.get('follow_reason')}"
+            f"follow_passed={result.get('follow_passed')}"
         )
 
 

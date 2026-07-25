@@ -45,8 +45,8 @@ MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數位於昨收兩側的
 
 STRATEGY_DECISION = (9, 41) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 
-STRATEGY_START_LOWER = (9, 46) # lower 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_FOLLOW = (9, 46) # follow 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
 
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 STRATEGY_END_FOLLOW = (10, 1) # follow 策略可進場截止分k棒的(時, 分)，預設沿用 chance

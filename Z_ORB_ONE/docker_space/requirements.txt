@@ -1,0 +1,11 @@
+yfinance
+pandas
+pandas-stubs
+statsmodels
+Pillow
+opencv-python
+easyocr
+schedule
+pyarrow
+fastparquet
+matplotlib

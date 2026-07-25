@@ -329,9 +329,10 @@ def transform_singleton_to_docker(source: str) -> str:
 
 
 def main() -> None:
-    base_dir = Path(__file__).resolve().parent
-    input_path = base_dir / STRATEGY_FILENAME
-    output_path = base_dir / output_name_for(STRATEGY_FILENAME)
+    output_dir = Path(__file__).resolve().parent
+    source_dir = output_dir.parent
+    input_path = source_dir / STRATEGY_FILENAME
+    output_path = output_dir / output_name_for(STRATEGY_FILENAME)
 
     if not input_path.exists():
         raise FileNotFoundError(input_path)
