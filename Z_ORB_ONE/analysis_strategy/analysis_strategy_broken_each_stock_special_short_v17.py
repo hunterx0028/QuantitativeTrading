@@ -43,10 +43,10 @@ OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chan
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數位於昨收兩側的 NO_TRADE 檢查起始分K棒，包含此時間
 
-STRATEGY_DECISION = (9, 41) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
+STRATEGY_DECISION = (9, 43) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 
-STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_LOWER = (9, 46) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_FOLLOW = (9, 46) # follow 個股進場開始分K棒的(時, 分)，包含此時間
 
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 STRATEGY_END_FOLLOW = (10, 1) # follow 策略可進場截止分k棒的(時, 分)，預設沿用 chance
@@ -57,14 +57,14 @@ INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.8 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.2 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 0.8 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.2 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 0.8 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
