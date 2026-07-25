@@ -137,6 +137,7 @@ def patch_getpass_from_env():
     import getpass
 
     original_getpass = getpass.getpass
+    patched_module_getpass = []
 
     last_password = None
 
@@ -167,7 +168,14 @@ def patch_getpass_from_env():
         return value
 
     getpass.getpass = env_getpass
-    return getpass, original_getpass
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith(("esun_trade", "esun_marketdata")):
+            continue
+        if getattr(module, "getpass", None) is original_getpass:
+            setattr(module, "getpass", env_getpass)
+            patched_module_getpass.append(module)
+
+    return getpass, original_getpass, patched_module_getpass
 
 
 def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
@@ -177,7 +185,7 @@ def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
     sdk = SDK(config)
 
     original_stdin = sys.stdin
-    getpass_module, original_getpass = patch_getpass_from_env()
+    getpass_module, original_getpass, patched_module_getpass = patch_getpass_from_env()
     sys.stdin = build_login_stdin()
     try:
         print("===== Login EsunMarketdata =====")
@@ -190,6 +198,8 @@ def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
     finally:
         sys.stdin = original_stdin
         getpass_module.getpass = original_getpass
+        for module in patched_module_getpass:
+            module.getpass = original_getpass
 
     return realtime_sdk, sdk
 

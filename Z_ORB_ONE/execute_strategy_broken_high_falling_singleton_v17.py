@@ -31,6 +31,7 @@ class TeeStream:
     def write(self, data):
         self.original_stream.write(data)
         self.mirror_stream.write(data)
+        self.flush()
         return len(data)
 
     def flush(self):

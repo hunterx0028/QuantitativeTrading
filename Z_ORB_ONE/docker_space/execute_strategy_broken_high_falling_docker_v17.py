@@ -27,6 +27,7 @@ class TeeStream:
     def write(self, data):
         self.original_stream.write(data)
         self.mirror_stream.write(data)
+        self.flush()
         return len(data)
 
     def flush(self):
@@ -66,10 +67,10 @@ PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發調整停利百分比
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側的 NO_TRADE 檢查起始時間（含）
 
-STRATEGY_DECISION = (9, 41)  # 市場模式判斷截止時間，不含此時間
+STRATEGY_DECISION = (9, 43)  # 市場模式判斷截止時間，不含此時間
 
-ENTRY_CHECK_START_TIME_LOWER = (9, 44)  # lower 進場檢核開始時間（含）
-ENTRY_CHECK_START_TIME_FOLLOW = (9, 44)  # follow 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
 
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 ENTRY_CHECK_END_TIME_FOLLOW = (10, 1)  # follow 進場檢核截止時間（含）
@@ -83,14 +84,14 @@ ENTRY_ORDER_QUANTITY_FOLLOW = 1 # follow 每次進場下單數量
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.8 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.75 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 0.8 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.75 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 0.8 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -237,6 +238,7 @@ def patch_getpass_from_env():
     import getpass
 
     original_getpass = getpass.getpass
+    patched_module_getpass = []
 
     last_password = None
 
@@ -267,7 +269,14 @@ def patch_getpass_from_env():
         return value
 
     getpass.getpass = env_getpass
-    return getpass, original_getpass
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith(("esun_trade", "esun_marketdata")):
+            continue
+        if getattr(module, "getpass", None) is original_getpass:
+            setattr(module, "getpass", env_getpass)
+            patched_module_getpass.append(module)
+
+    return getpass, original_getpass, patched_module_getpass
 
 
 def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
@@ -277,7 +286,7 @@ def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
     sdk = SDK(config)
 
     original_stdin = sys.stdin
-    getpass_module, original_getpass = patch_getpass_from_env()
+    getpass_module, original_getpass, patched_module_getpass = patch_getpass_from_env()
     sys.stdin = build_login_stdin()
     try:
         print("===== Login EsunMarketdata =====")
@@ -290,6 +299,8 @@ def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
     finally:
         sys.stdin = original_stdin
         getpass_module.getpass = original_getpass
+        for module in patched_module_getpass:
+            module.getpass = original_getpass
 
     return realtime_sdk, sdk
 
