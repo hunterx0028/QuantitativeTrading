@@ -235,6 +235,7 @@ DOCKER_MAIN = '''if __name__ == "__main__":
         print("===== Prepare runtime files =====")
         download_runtime_files_from_s3()
         candidate_symbols = load_stock_data_from_runtime_file()
+        persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
         validate_market_reversal_time_config()
         wait_until_main_start_time()
@@ -274,6 +275,27 @@ DOCKER_MAIN = '''if __name__ == "__main__":
 '''
 
 
+DOCKER_PERSIST_SELECTED_STOCKS = '''def persist_selected_stocks_to_stock_data(
+    stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]]
+):
+    """
+    Docker/Fargate 版不回寫 /app/stock_data.py。
+    /app 是 task 生命週期內的暫存檔案系統，回寫 stock_data.py 不會持久化到 S3。
+    selected_stocks 本身會在 initialize_states() 透過 stocks[:] 更新為過濾後名單。
+    """
+    return
+'''
+
+
+DOCKER_PERSIST_ENTRY_MODE = '''def persist_entry_mode_to_stock_data(entry_mode: int) -> None:
+    """
+    Docker/Fargate 版只更新 stock_data module 記憶體，不回寫 /app/stock_data.py。
+    後續 get_current_entry_mode() 會讀取這個 module 屬性。
+    """
+    stock_data.entry_mode = entry_mode
+'''
+
+
 def output_name_for(strategy_filename: str) -> str:
     if "_singleton_" not in strategy_filename:
         raise ValueError("Strategy filename must contain '_singleton_'")
@@ -306,6 +328,22 @@ def replace_main_block(source: str, replacement: str) -> str:
     raise ValueError('Cannot find if __name__ == "__main__" block')
 
 
+def replace_top_level_function(source: str, function_name: str, replacement: str) -> str:
+    tree = ast.parse(source)
+    lines = source.splitlines(keepends=True)
+
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ):
+            start = node.lineno - 1
+            end = node.end_lineno
+            return "".join(lines[:start]) + replacement.rstrip() + "\n\n" + "".join(lines[end:])
+
+    raise ValueError(f"Cannot find function: {function_name}")
+
+
 def transform_singleton_to_docker(source: str) -> str:
     source = source.replace("\r\n", "\n")
 
@@ -327,6 +365,17 @@ def transform_singleton_to_docker(source: str) -> str:
         "def now_tpe() -> datetime:\n    return datetime.now(TZ)",
         source,
         count=1,
+    )
+
+    source = replace_top_level_function(
+        source,
+        "persist_selected_stocks_to_stock_data",
+        DOCKER_PERSIST_SELECTED_STOCKS,
+    )
+    source = replace_top_level_function(
+        source,
+        "persist_entry_mode_to_stock_data",
+        DOCKER_PERSIST_ENTRY_MODE,
     )
 
     return replace_main_block(source, DOCKER_MAIN)

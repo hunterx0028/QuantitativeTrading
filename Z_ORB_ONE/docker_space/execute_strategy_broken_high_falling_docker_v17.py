@@ -1133,30 +1133,22 @@ def state_path(symbol: str) -> str:
 def persist_selected_stocks_to_stock_data(
     stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]]
 ):
-    stock_data_path = os.path.join(os.path.dirname(__file__), "stock_data.py")
+    """
+    Docker/Fargate 版不回寫 /app/stock_data.py。
+    /app 是 task 生命週期內的暫存檔案系統，回寫 stock_data.py 不會持久化到 S3。
+    selected_stocks 本身會在 initialize_states() 透過 stocks[:] 更新為過濾後名單。
+    """
+    return
 
-    lines = ["# 股票代碼、購買量、昨天開盤、昨天最高、昨天最低、昨天收盤、產業別代碼、真實平均波動幅度、(連漲天數, 連跌天數)\n"]
-    lines.append(f"entry_mode = {get_current_entry_mode()}  # 0=no_trade, 1=follow, 2=lower\n\n")
-    lines.append("market_previous_close_indices = ")
-    lines.append(pformat(market_previous_close_indices, sort_dicts=False))
-    lines.append("\n\n")
-    lines.append("selected_stocks = [\n")
-
-    for item in stocks:
-        lines.append(f"    {repr(item)},\n")
-
-    lines.append("]\n")
-
-    try:
-        with open(stock_data_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception as e:
-        print(f"[WARN] 回寫 stock_data.py 失敗: {e}")
 
 
 def persist_entry_mode_to_stock_data(entry_mode: int) -> None:
+    """
+    Docker/Fargate 版只更新 stock_data module 記憶體，不回寫 /app/stock_data.py。
+    後續 get_current_entry_mode() 會讀取這個 module 屬性。
+    """
     stock_data.entry_mode = entry_mode
-    persist_selected_stocks_to_stock_data(selected_stocks)
+
 
 
 def atomic_write_json(path: str, data: Dict[str, Any]):
@@ -2353,6 +2345,7 @@ if __name__ == "__main__":
         print("===== Prepare runtime files =====")
         download_runtime_files_from_s3()
         candidate_symbols = load_stock_data_from_runtime_file()
+        persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
         validate_market_reversal_time_config()
         wait_until_main_start_time()

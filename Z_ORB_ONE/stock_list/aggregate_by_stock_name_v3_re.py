@@ -214,12 +214,46 @@ def find_selected_stocks_assignment(source: str) -> tuple[int, int]:
     raise ValueError("找不到 selected_stocks 宣告")
 
 
+def find_assignment(source: str, name: str) -> tuple[int, int] | None:
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if name in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+
+    return None
+
+
+def reset_entry_mode(source: str, selected_stocks_end_line: int) -> str:
+    lines = source.splitlines()
+    entry_mode_assignment = find_assignment(source, "entry_mode")
+    if entry_mode_assignment is None:
+        lines.insert(selected_stocks_end_line, "entry_mode = 0")
+    else:
+        start_line, end_line = entry_mode_assignment
+        lines[start_line:end_line] = ["entry_mode = 0"]
+    return "\n".join(lines) + "\n"
+
+
 def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> None:
     source = stock_data_path.read_text(encoding="utf-8")
     lines = source.splitlines()
     start_line, end_line = find_selected_stocks_assignment(source)
     replacement = format_selected_stocks(records).splitlines()
     updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+    updated_source = reset_entry_mode(updated_source, start_line + len(replacement))
     stock_data_path.write_text(updated_source, encoding="utf-8")
 
 
