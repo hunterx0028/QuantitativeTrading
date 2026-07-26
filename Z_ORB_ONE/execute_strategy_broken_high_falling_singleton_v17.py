@@ -120,6 +120,7 @@ MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_FOLLOW = 1
 ENTRY_MODE_LOWER = 2
+stock_data.entry_mode = ENTRY_MODE_NO_TRADE
 
 # ============ 下單函式 ============
 # symbol: '2330' '0050'

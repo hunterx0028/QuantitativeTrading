@@ -353,6 +353,7 @@ def transform_singleton_to_docker(source: str) -> str:
         source,
         count=1,
     )
+    source = source.replace("\nstock_data.entry_mode = ENTRY_MODE_NO_TRADE\n", "\n")
 
     marker = "# ============ 下單函式 ============"
     if marker not in source:

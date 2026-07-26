@@ -359,12 +359,10 @@ def write_stock_data(
     stock_data_path: Path,
     market_previous_close_indices: Dict[str, Dict[str, Any]],
     selected_stocks: List[StockTuple],
-    entry_mode: int = 1,
 ) -> None:
     lines = [
         "# 股票代碼、購買量、昨天開盤、昨天最高、昨天最低、昨天收盤、產業別代碼、真實平均波動幅度、(連漲天數, 連跌天數)\n"
     ]
-    lines.append(f"entry_mode = {entry_mode}  # 1=chance, 2=lower\n\n")
     lines.append("market_previous_close_indices = ")
     lines.append(pformat(market_previous_close_indices, sort_dicts=False))
     lines.append("\n\n")
@@ -438,7 +436,6 @@ def main() -> int:
 
     stock_module = load_python_module(args.stock_data.resolve(), "stock_data_for_index_update")
     selected_stocks: List[StockTuple] = list(stock_module.selected_stocks)
-    entry_mode = getattr(stock_module, "entry_mode", 1)
     existing_indices = dict(getattr(stock_module, "market_previous_close_indices", {}))
     industry_map = load_json(args.industry_map.resolve())
 
@@ -490,7 +487,7 @@ def main() -> int:
             log("[INFO] dry-run 模式，未寫回 stock_data.py")
             return 0
 
-        write_stock_data(args.stock_data.resolve(), updated_indices, selected_stocks, entry_mode)
+        write_stock_data(args.stock_data.resolve(), updated_indices, selected_stocks)
         log(f"[INFO] 已更新 {args.stock_data.resolve()}")
         return 0
     finally:

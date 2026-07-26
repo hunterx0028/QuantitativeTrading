@@ -324,14 +324,12 @@ def find_assignment(source: str, name: str) -> tuple[int, int] | None:
     return None
 
 
-def reset_entry_mode(source: str, selected_stocks_end_line: int) -> str:
+def remove_entry_mode(source: str) -> str:
     lines = source.splitlines()
     entry_mode_assignment = find_assignment(source, "entry_mode")
-    if entry_mode_assignment is None:
-        lines.insert(selected_stocks_end_line, "entry_mode = 0")
-    else:
+    if entry_mode_assignment is not None:
         start_line, end_line = entry_mode_assignment
-        lines[start_line:end_line] = ["entry_mode = 0"]
+        del lines[start_line:end_line]
     return "\n".join(lines) + "\n"
 
 
@@ -341,7 +339,7 @@ def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> 
     start_line, end_line = find_selected_stocks_assignment(source)
     replacement = format_selected_stocks(records).splitlines()
     updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
-    updated_source = reset_entry_mode(updated_source, start_line + len(replacement))
+    updated_source = remove_entry_mode(updated_source)
     stock_data_path.write_text(updated_source, encoding="utf-8")
 
 
