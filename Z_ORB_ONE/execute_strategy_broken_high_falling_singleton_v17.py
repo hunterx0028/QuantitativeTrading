@@ -770,11 +770,11 @@ def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
         return False
 
     threshold = previous_close_float * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
-    if last_index_float > threshold:
+    if last_index_float >= threshold:
         index_name = index_config.get("name", "")
         print(
             f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
-            f"指數 {last_index_float:.2f} > 門檻 {threshold:.2f}"
+            f"指數 {last_index_float:.2f} >= 門檻 {threshold:.2f}"
         )
         return False
 
@@ -798,23 +798,59 @@ def follow_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
         previous_close_float = float(previous_close)
         last_index_float = float(last_index)
     except (TypeError, ValueError):
-        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網等待 {market_key} 指數資料")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網等待 {market_key} 指數資料")
         return False
 
     if previous_close_float <= 0:
-        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
     threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0)
     if last_index_float <= threshold:
         index_name = index_config.get("name", "")
         print(
-            f"[{state['symbol_name']}] follow 產業別盤勢濾網未通過：{market_key} {index_name} "
+            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
             f"指數 {last_index_float:.2f} <= 門檻 {threshold:.2f}"
         )
         return False
 
     return True
+
+
+def format_industry_market_filter_pass_text(state: Dict[str, Any]) -> str:
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
+    index_config = market_previous_close_indices.get(market_key, {})
+    previous_close = index_config.get("previous_close")
+    market_state = MARKET_INDEX_STATE.get(market_key, {})
+    last_index = market_state.get("last_index")
+
+    try:
+        previous_close_float = float(previous_close)
+        last_index_float = float(last_index)
+    except (TypeError, ValueError):
+        return ""
+
+    if previous_close_float <= 0:
+        return ""
+
+    index_name = index_config.get("name", "")
+    if is_follow_mode():
+        threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0)
+        operator = ">"
+    else:
+        threshold = previous_close_float * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
+        operator = "<"
+
+    return (
+        f"（產業別盤勢濾網：{market_key} {index_name} "
+        f"指數 {last_index_float:.2f} {operator} 門檻 {threshold:.2f}）"
+    )
 
 
 def adjust_price(price: float, trade_strategy: str) -> float:
@@ -1430,6 +1466,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
             else:
                 state["entry_price"] = entry_ref_px
 
+            industry_filter_text = format_industry_market_filter_pass_text(state)
             if side == TRADE_SIDE_SHORT:
                 state["profit_price"] = max(
                     state.get("entry_price", 0) - open_profit_target,
@@ -1439,7 +1476,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
                     state.get("entry_price", 0) + open_stop_loss,
                     state.get("limit_up_price", 0)
                 )
-                print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功")
+                print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功{industry_filter_text}")
             else:
                 state["profit_price"] = min(
                     state.get("entry_price", 0) + open_profit_target,
@@ -1449,7 +1486,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
                     state.get("entry_price", 0) - open_stop_loss,
                     state.get("limit_down_price", 0)
                 )
-                print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功")
+                print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功{industry_filter_text}")
 
             state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
             print_entry_position_prices(state)

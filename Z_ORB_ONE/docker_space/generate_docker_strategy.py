@@ -229,11 +229,17 @@ DOCKER_MAIN = '''if __name__ == "__main__":
 
     realtime_sdk = None
     sdk = None
+    market_index_ws = None
 
     try:
         print("===== Prepare runtime files =====")
         download_runtime_files_from_s3()
+        candidate_symbols = load_stock_data_from_runtime_file()
 
+        validate_market_reversal_time_config()
+        wait_until_main_start_time()
+        MARKET_REVERSAL_STOP_EVENT.clear()
+        MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         clear_state_dir()
 
         # 登入以操作 API
@@ -241,22 +247,9 @@ DOCKER_MAIN = '''if __name__ == "__main__":
         config.read("config.ini")
 
         realtime_sdk, sdk = login_sdks(config)
+        market_index_ws = start_market_index_stream(realtime_sdk)
 
-        candidate_symbols = load_stock_data_from_runtime_file()
         states = initialize_states(candidate_symbols, realtime_sdk)
-
-        target_hour = 9 # 9
-        target_minute = 1  # 0
-        target_second = 0 # 15
-        print(f"正在等待時間到 {target_hour:02d}:{target_minute:02d}:{target_second:02d} ...")
-
-        while True:
-            now = now_tpe()
-            if (now.hour, now.minute, now.second) >= (target_hour, target_minute, target_second):
-                print(f"⏰ 時間到！目前時間：{now.strftime('%H:%M:%S')}")
-                break
-            else:
-                time.sleep(5)  # 每 N 秒
 
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()
@@ -267,6 +260,7 @@ DOCKER_MAIN = '''if __name__ == "__main__":
         # 開始正式作業
         monitor(states, sdk, realtime_sdk)
     finally:
+        close_market_index_stream(market_index_ws)
         safe_logout_sdk("Esun Trade SDK", sdk)
         safe_logout_sdk("EsunMarketdata", realtime_sdk)
 

@@ -75,6 +75,7 @@ INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
+EXCLUDED_INDUSTRY_CODES: list[str] = ["17", "20", "36", "31", "25"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 
 RESERVE_MARKET_INDICES = {
     'TWSE:MARKET': {
@@ -112,17 +113,28 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
         payload = json.loads(cache_path.read_text(encoding='utf-8'))
         cached_names = payload.get('stock_names', [])
         current_names = [item[0] for item in stock_list]
-        if cached_names != current_names:
+        cached_name_set = set(cached_names)
+        if any(stock_name not in cached_name_set for stock_name in current_names):
             return None
         day_candles_by_symbol = payload.get('day_candles_by_symbol', {})
         raw_minute_by_symbol = payload.get('minute_raw_by_symbol', {})
         raw_index_minute_by_key = payload.get('index_minute_raw_by_key', {})
+        if any(
+            stock_name not in day_candles_by_symbol
+            or stock_name not in raw_minute_by_symbol
+            for stock_name in current_names
+        ):
+            return None
         required_index_keys = set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list)
         if any(
             key not in raw_index_minute_by_key
             for key in required_index_keys
         ):
             return None
+        day_candles_by_symbol = {
+            stock_name: day_candles_by_symbol.get(stock_name, [])
+            for stock_name in current_names
+        }
         minute_bars_by_symbol = {
             stock_name: parse_bars(raw_minute_by_symbol.get(stock_name, []))
             for stock_name in current_names
@@ -356,6 +368,16 @@ def get_exchange_for_stock(stock_name: str) -> str | None:
     return None
 
 
+def get_exchange_suffix_for_stock(stock_name: str) -> str:
+    """取得結果輸出用的市場別尾碼。"""
+    symbol_text = stock_name.split(':', 1)[-1].upper()
+    if symbol_text.endswith('.TWO'):
+        return 'TWO'
+    if symbol_text.endswith('.TW'):
+        return 'TW'
+    return ''
+
+
 def get_industry_index_key(stock_item: tuple) -> str | None:
     """回傳 market_previous_close_indices 的 key，例如 TWSE:26。"""
     if len(stock_item) <= 6:
@@ -370,6 +392,40 @@ def get_industry_index_key(stock_item: tuple) -> str | None:
     if not index_meta or not index_meta.get('symbol'):
         return None
     return index_key
+
+
+def get_stock_industry_code(stock_item: tuple) -> str:
+    """取得股票產業別代碼，輸出用。"""
+    if len(stock_item) <= 6 or stock_item[6] is None:
+        return ''
+    return str(stock_item[6]).zfill(2)
+
+
+def normalize_excluded_industry_code(industry_code) -> str:
+    """排除清單比對用；不補零，輸入什麼就比對什麼。"""
+    if industry_code is None:
+        return ''
+    return str(industry_code).strip()
+
+
+def is_stock_in_excluded_industry(stock_item: tuple) -> bool:
+    """判斷股票是否屬於要排除的產業別。"""
+    if len(stock_item) <= 6:
+        return False
+    excluded_codes = {
+        normalize_excluded_industry_code(industry_code)
+        for industry_code in EXCLUDED_INDUSTRY_CODES
+    }
+    return normalize_excluded_industry_code(stock_item[6]) in excluded_codes
+
+
+def filter_stocks_by_excluded_industries(stock_list: list[tuple]) -> list[tuple]:
+    """排除指定產業別的股票。"""
+    return [
+        stock_item
+        for stock_item in stock_list
+        if not is_stock_in_excluded_industry(stock_item)
+    ]
 
 
 def get_required_industry_index_keys(stock_list: list[tuple]) -> set[str]:
@@ -1123,7 +1179,7 @@ def is_industry_market_filter_passed(
         return entry_index_close > threshold
 
     threshold = previous_reference * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
-    return entry_index_close <= threshold
+    return entry_index_close < threshold
 
 
 def compute_yesterday_stats(yesterday_bars: list) -> dict:
@@ -1410,6 +1466,7 @@ def get_day_streaks(
 
 def build_trade_candidate(
     stock_name: str,
+    industry_code: str,
     target_date: date,
     entry_bar: dict,
     entry_price: float,
@@ -1427,6 +1484,7 @@ def build_trade_candidate(
     low_values = np.array([float(bar['low']) for bar in today_bars], dtype=np.float64)
     return {
         'name': stock_name,
+        'industry_code': industry_code,
         'date_str': target_date.strftime('%Y-%m-%d'),
         'entry_dt': entry_bar['dt'],
         'entry_price': entry_price,
@@ -1466,19 +1524,67 @@ def format_result_line(stock_name: str, date_str: str,
     if signal is None or result is None:
         return ''
 
+    stock_label = format_stock_label(stock_name, signal.get('industry_code'))
     outcome = result['outcome']
     exit_reason = result.get('exit_reason')
     signed = result.get('signed_pnl', signed_pnl(result))
     status_label = '成功' if outcome == 'success' else '失敗'
 
     if exit_reason == 'target':
-        return f'{stock_name} / {date_str} / {status_label}(已達獲利, 淨損益: {signed:+.2f})'
+        return f'{stock_label} / {date_str} / {status_label}(已達獲利, 淨損益: {signed:+.2f})'
     if exit_reason == 'stop':
-        return f'{stock_name} / {date_str} / {status_label}(已達停損, 淨損益: {signed:+.2f})'
+        return f'{stock_label} / {date_str} / {status_label}(已達停損, 淨損益: {signed:+.2f})'
     if exit_reason == 'close':
-        return f'{stock_name} / {date_str} / {status_label}(收盤結算, 淨損益: {signed:+.2f})'
+        return f'{stock_label} / {date_str} / {status_label}(收盤結算, 淨損益: {signed:+.2f})'
 
     return ''
+
+
+def format_stock_label(stock_name: str, industry_code: str | None) -> str:
+    """股票名稱後加上產業別代碼。"""
+    if not industry_code:
+        return stock_name
+    return f'{stock_name} {industry_code}'
+
+
+def summarize_industry_results(all_results: list) -> list[tuple[str, str, int, int, float]]:
+    """依市場別與產業別代碼統計成功/失敗與損益。"""
+    grouped: dict[tuple[str, str], dict[str, float | int]] = {}
+    for signal, result in all_results:
+        if not signal or not result:
+            continue
+        exchange_suffix = get_exchange_suffix_for_stock(signal['name'])
+        industry_code = signal.get('industry_code', '')
+        if not exchange_suffix or not industry_code:
+            continue
+        key = (exchange_suffix, industry_code)
+        bucket = grouped.setdefault(
+            key,
+            {'successes': 0, 'failures': 0, 'total_pnl': 0.0},
+        )
+        if result.get('outcome') == 'success':
+            bucket['successes'] += 1
+        elif result.get('outcome') == 'fail':
+            bucket['failures'] += 1
+        bucket['total_pnl'] += signed_pnl(result)
+
+    market_order = {'TWO': 0, 'TW': 1}
+    return [
+        (
+            exchange_suffix,
+            industry_code,
+            int(values['successes']),
+            int(values['failures']),
+            float(values['total_pnl']),
+        )
+        for (exchange_suffix, industry_code), values in sorted(
+            grouped.items(),
+            key=lambda item: (
+                market_order.get(item[0][0], 99),
+                item[0][1],
+            ),
+        )
+    ]
 
 
 def signed_pnl(result: dict | None) -> float:
@@ -1566,13 +1672,14 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    grouped_results: dict[str, list[tuple[str, datetime | None, datetime | None, float, float, float, bool]]] = {}
+    grouped_results: dict[str, list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
     for signal, result in all_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
         grouped_results.setdefault(date_key, []).append((
             signal['name'],
+            signal.get('industry_code', ''),
             signal.get('entry_dt'),
             result.get('exit_dt'),
             signal['entry_price'],
@@ -1584,8 +1691,8 @@ def print_daily_optimization_results(
     daily_date_keys = set(grouped_results) | lower_gate_date_keys | follow_gate_date_keys
     for date_key in sorted(daily_date_keys, reverse=True):
         day_rows = grouped_results.get(date_key, [])
-        day_total = sum(row[5] for row in day_rows)
-        day_successes = sum(1 for row in day_rows if row[6])
+        day_total = sum(row[6] for row in day_rows)
+        day_successes = sum(1 for row in day_rows if row[7])
         day_failures = len(day_rows) - day_successes
         strategy_type = strategy_type_by_gate_status.get(
             gate_status_by_date_key.get(date_key),
@@ -1612,15 +1719,24 @@ def print_daily_optimization_results(
                 index_minute_bars_by_key,
             ):
                 print(index_summary)
-        for stock_name, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
+        for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
             day_rows,
-            key=lambda row: (format_entry_time(row[1]), row[0]),
+            key=lambda row: (format_entry_time(row[2]), row[0]),
         ):
             print(
-                f'{stock_name} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
+                f'{format_stock_label(stock_name, industry_code)} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
                 f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
             )
         print('')
+
+    for exchange_suffix, industry_code, successes, failures, pnl_value in summarize_industry_results(all_results):
+        print(
+            f'{exchange_suffix} {industry_code} '
+            f'成功數={successes}  '
+            f'失敗數={failures} '
+            f'收益統計={pnl_value:+.2f}'
+        )
+    print('')
 
     print(
         f'有結果總筆數={summary["total"]}  '
@@ -1718,6 +1834,7 @@ def find_trade_candidate_on_date(
 
     return build_trade_candidate(
         stock_name,
+        get_stock_industry_code(stock_item),
         target_date,
         entry_bar,
         entry_price,
@@ -1819,6 +1936,7 @@ def evaluate_candidates(
     all_results = []
     for candidate in candidates:
         name = candidate['name']
+        industry_code = candidate.get('industry_code', '')
         date_str = candidate['date_str']
         entry_dt = candidate['entry_dt']
         entry_price = candidate['entry_price']
@@ -1867,6 +1985,7 @@ def evaluate_candidates(
 
         signal = {
             'name': name,
+            'industry_code': industry_code,
             'date_str': date_str,
             'entry_dt': entry_dt,
             'entry_price': entry_price,
@@ -1944,7 +2063,14 @@ def main() -> None:
     try:
         args = parse_args()
         raw_stock_list = STOCK_LIST or selected_stocks
-        stock_list = raw_stock_list
+        stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
+        excluded_stock_count = len(raw_stock_list) - len(stock_list)
+        if EXCLUDED_INDUSTRY_CODES:
+            print(
+                f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
+                f'排除股票數={excluded_stock_count} '
+                f'剩餘股票數={len(stock_list)}'
+            )
 
         # 目標日期
         if args.to:

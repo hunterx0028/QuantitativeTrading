@@ -963,11 +963,11 @@ def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
         return False
 
     threshold = previous_close_float * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
-    if last_index_float > threshold:
+    if last_index_float >= threshold:
         index_name = index_config.get("name", "")
         print(
             f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
-            f"指數 {last_index_float:.2f} > 門檻 {threshold:.2f}"
+            f"指數 {last_index_float:.2f} >= 門檻 {threshold:.2f}"
         )
         return False
 
@@ -991,23 +991,59 @@ def follow_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
         previous_close_float = float(previous_close)
         last_index_float = float(last_index)
     except (TypeError, ValueError):
-        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網等待 {market_key} 指數資料")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網等待 {market_key} 指數資料")
         return False
 
     if previous_close_float <= 0:
-        print(f"[{state['symbol_name']}] follow 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
     threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0)
     if last_index_float <= threshold:
         index_name = index_config.get("name", "")
         print(
-            f"[{state['symbol_name']}] follow 產業別盤勢濾網未通過：{market_key} {index_name} "
+            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
             f"指數 {last_index_float:.2f} <= 門檻 {threshold:.2f}"
         )
         return False
 
     return True
+
+
+def format_industry_market_filter_pass_text(state: Dict[str, Any]) -> str:
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
+    index_config = market_previous_close_indices.get(market_key, {})
+    previous_close = index_config.get("previous_close")
+    market_state = MARKET_INDEX_STATE.get(market_key, {})
+    last_index = market_state.get("last_index")
+
+    try:
+        previous_close_float = float(previous_close)
+        last_index_float = float(last_index)
+    except (TypeError, ValueError):
+        return ""
+
+    if previous_close_float <= 0:
+        return ""
+
+    index_name = index_config.get("name", "")
+    if is_follow_mode():
+        threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT / 100.0)
+        operator = ">"
+    else:
+        threshold = previous_close_float * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
+        operator = "<"
+
+    return (
+        f"（產業別盤勢濾網：{market_key} {index_name} "
+        f"指數 {last_index_float:.2f} {operator} 門檻 {threshold:.2f}）"
+    )
 
 
 def adjust_price(price: float, trade_strategy: str) -> float:
@@ -1623,6 +1659,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
             else:
                 state["entry_price"] = entry_ref_px
 
+            industry_filter_text = format_industry_market_filter_pass_text(state)
             if side == TRADE_SIDE_SHORT:
                 state["profit_price"] = max(
                     state.get("entry_price", 0) - open_profit_target,
@@ -1632,7 +1669,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
                     state.get("entry_price", 0) + open_stop_loss,
                     state.get("limit_up_price", 0)
                 )
-                print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功")
+                print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功{industry_filter_text}")
             else:
                 state["profit_price"] = min(
                     state.get("entry_price", 0) + open_profit_target,
@@ -1642,7 +1679,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
                     state.get("entry_price", 0) - open_stop_loss,
                     state.get("limit_down_price", 0)
                 )
-                print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功")
+                print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功{industry_filter_text}")
 
             state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
             print_entry_position_prices(state)
@@ -2310,11 +2347,17 @@ if __name__ == "__main__":
 
     realtime_sdk = None
     sdk = None
+    market_index_ws = None
 
     try:
         print("===== Prepare runtime files =====")
         download_runtime_files_from_s3()
+        candidate_symbols = load_stock_data_from_runtime_file()
 
+        validate_market_reversal_time_config()
+        wait_until_main_start_time()
+        MARKET_REVERSAL_STOP_EVENT.clear()
+        MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         clear_state_dir()
 
         # 登入以操作 API
@@ -2322,22 +2365,9 @@ if __name__ == "__main__":
         config.read("config.ini")
 
         realtime_sdk, sdk = login_sdks(config)
+        market_index_ws = start_market_index_stream(realtime_sdk)
 
-        candidate_symbols = load_stock_data_from_runtime_file()
         states = initialize_states(candidate_symbols, realtime_sdk)
-
-        target_hour = 9 # 9
-        target_minute = 1  # 0
-        target_second = 0 # 15
-        print(f"正在等待時間到 {target_hour:02d}:{target_minute:02d}:{target_second:02d} ...")
-
-        while True:
-            now = now_tpe()
-            if (now.hour, now.minute, now.second) >= (target_hour, target_minute, target_second):
-                print(f"⏰ 時間到！目前時間：{now.strftime('%H:%M:%S')}")
-                break
-            else:
-                time.sleep(5)  # 每 N 秒
 
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()
@@ -2348,6 +2378,7 @@ if __name__ == "__main__":
         # 開始正式作業
         monitor(states, sdk, realtime_sdk)
     finally:
+        close_market_index_stream(market_index_ws)
         safe_logout_sdk("Esun Trade SDK", sdk)
         safe_logout_sdk("EsunMarketdata", realtime_sdk)
 

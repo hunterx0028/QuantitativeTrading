@@ -11,16 +11,19 @@ from typing import Dict
 
 from esun_marketdata import EsunMarketdata
 
-CONSOLE_RANKING_PREVIEW_COUNT = 100
 REQUEST_INTERVAL_SEC = 1
+
 MIN_ATR = 4.0
 ATR_PERIOD = 14
 
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
-TOP_RANK = 30
-MIN_REPEAT_COUNT = 5
-ST_DB_KEEP_RECENT_FILE_COUNT = 25
+
+TOP_RANK = 100 # 出現次數的排名
+
+MIN_REPEAT_COUNT = 5 # 最少的累計次數
+
+ST_DB_KEEP_RECENT_FILE_COUNT = 25 # 取 25 天的資料
 
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 TOP_REPEAT_RESULT_HEADER_PREFIX = "# FILTER_RESULT"
@@ -448,17 +451,6 @@ def main() -> None:
         for stock_name in sorted(min_repeat_updated_by_stock.keys())
     ]
     update_selected_stocks_file(stock_data_path, selected_stock_records)
-
-    log("# ALL_RESULT_REPEAT_COUNT_SORT")
-    for stock_name, count in all_result_repeat_count_sort[:CONSOLE_RANKING_PREVIEW_COUNT]:
-        log(f"{updated_by_stock[stock_name]},{count},")
-
-    log(f"{TOP_REPEAT_RESULT_HEADER_PREFIX} (TOP_RANK={TOP_RANK})")
-    for stock_name in sorted(top_rank_updated_by_stock.keys()):
-        log(f"{top_rank_updated_by_stock[stock_name]},")
-    log(f"{TOP_REPEAT_RESULT_HEADER_PREFIX} (MIN_REPEAT_COUNT={MIN_REPEAT_COUNT})")
-    for stock_name in sorted(min_repeat_updated_by_stock.keys()):
-        log(f"{min_repeat_updated_by_stock[stock_name]},")
 
     log(f"done: {output_path}")
     log(f"updated selected_stocks: {stock_data_path}")

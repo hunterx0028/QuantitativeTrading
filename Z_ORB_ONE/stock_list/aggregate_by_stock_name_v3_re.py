@@ -7,8 +7,12 @@ from pathlib import Path
 
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
-TOP_RANK = 30
-MIN_REPEAT_COUNT = 10
+
+TOP_RANK = 30 # 出現次數的排名
+
+MIN_REPEAT_COUNT = 14 # 最少的累計次數
+
+EXCLUDED_INDUSTRY_CODES: list[str] = ["17", "20", "36", "31", "25"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 
 RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result.txt"
 OUTPUT_RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result_re.txt"
@@ -119,6 +123,40 @@ def is_record_in_price_range(record: tuple) -> bool:
 
 def filter_records_by_price_range(ranked: list[tuple[tuple, int]]) -> list[tuple[tuple, int]]:
     return [(record, count) for record, count in ranked if is_record_in_price_range(record)]
+
+
+def normalize_industry_code(industry_code) -> str:
+    if industry_code is None:
+        return ""
+    return str(industry_code).strip()
+
+
+def is_record_in_excluded_industry(record: tuple) -> bool:
+    if len(record) <= 6:
+        return False
+
+    excluded_codes = {
+        normalize_industry_code(industry_code)
+        for industry_code in EXCLUDED_INDUSTRY_CODES
+    }
+    return normalize_industry_code(record[6]) in excluded_codes
+
+
+def filter_records_by_excluded_industries(ranked: list[tuple[tuple, int]]) -> list[tuple[tuple, int]]:
+    return [
+        (record, count)
+        for record, count in ranked
+        if not is_record_in_excluded_industry(record)
+    ]
+
+
+def sum_previous_close_prices(records: list[tuple]) -> Decimal:
+    total = Decimal("0")
+    for record in records:
+        if len(record) <= 5:
+            continue
+        total += Decimal(str(record[5]))
+    return total
 
 
 def select_top_with_ties(ranked: list[tuple[tuple, int]], top_count: int) -> list[tuple]:
@@ -257,7 +295,8 @@ def main() -> None:
 
     lines = result_path.read_text(encoding="utf-8").splitlines(keepends=True)
     ranked_records = extract_ranked_records(lines)
-    filtered_ranked_records = filter_records_by_price_range(ranked_records)
+    price_filtered_ranked_records = filter_records_by_price_range(ranked_records)
+    filtered_ranked_records = filter_records_by_excluded_industries(price_filtered_ranked_records)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
     repeat_records, repeat_header = select_records_for_repeat_count(filtered_ranked_records)
     updated_lines = upsert_execution_start_time(lines, execution_start_time)
@@ -276,13 +315,16 @@ def main() -> None:
     log(f"updated selected_stocks: {stock_data_path}")
     log(f"source={result_path}")
     log(f"ranked_count={len(ranked_records)}")
+    log(f"price_filtered_ranked_count={len(price_filtered_ranked_records)}")
     log(f"filtered_ranked_count={len(filtered_ranked_records)}")
+    log(f"excluded_industry_codes={EXCLUDED_INDUSTRY_CODES}")
     log(f"top_rank={TOP_RANK}")
     log(f"min_repeat_count={MIN_REPEAT_COUNT}")
     log(f"max_limit_up_price={MAX_LIMIT_UP_PRICE}")
     log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
     log(f"top_result_count(rank)={len(rank_records)}")
     log(f"top_result_count(repeat_count)={len(repeat_records)}")
+    log(f"selected_stocks_previous_close_total={sum_previous_close_prices(repeat_records)}")
 
 
 if __name__ == "__main__":
