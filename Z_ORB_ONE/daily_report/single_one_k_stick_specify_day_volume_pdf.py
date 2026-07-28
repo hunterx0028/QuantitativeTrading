@@ -26,11 +26,32 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import selected_stocks
+from Z_ORB_ONE.stock_data import market_previous_close_indices
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_DATE = "20260728"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_INDEX_CODE = "IX0001"  # 指定要繪圖的指數代碼，例如 IX0001、IX0043、IX0028；此程式只產出單一指數單日報表
+
+RESERVE_MARKET_INDICES = {
+    "TWSE:MARKET": {
+        "exchange": "TWSE",
+        "industry_code": None,
+        "industry_name": "上市",
+        "symbol": "IX0001",
+        "name": "發行量加權股價指數",
+        "source": "historical.candles",
+    },
+    "TPEX:MARKET": {
+        "exchange": "TPEX",
+        "industry_code": None,
+        "industry_name": "上櫃",
+        "symbol": "IX0043",
+        "name": "櫃買指數",
+        "source": "historical.candles",
+    },
+}
+MARKET_INDEX_METADATA = {**market_previous_close_indices, **RESERVE_MARKET_INDICES}
 
 
 def normalize_config_paths(config: ConfigParser):
@@ -67,6 +88,30 @@ def parse_specified_date(date_str: str) -> date:
         return datetime.strptime(date_str, "%Y%m%d").date()
     except ValueError as exc:
         raise ValueError(f"SPECIFIED_DATE 格式錯誤: {date_str}，需為 YYYYMMDD") from exc
+
+
+def normalize_index_code(index_code: str) -> str:
+    """標準化指數代碼；支援 IX0001 或 TWSE:24 這類 market index key。"""
+    return index_code.strip().upper()
+
+
+def find_specified_index(index_code: str) -> tuple[str, dict]:
+    """依指數代碼或 index key 找出單一產業/大盤指數設定。"""
+    normalized_code = normalize_index_code(index_code)
+    if not normalized_code:
+        raise ValueError("SPECIFIED_INDEX_CODE 不可為空，請指定指數代碼，例如 IX0001、IX0043、IX0028")
+
+    if normalized_code in MARKET_INDEX_METADATA:
+        index_meta = MARKET_INDEX_METADATA[normalized_code]
+        if not index_meta.get("symbol"):
+            raise ValueError(f"SPECIFIED_INDEX_CODE={normalized_code} 沒有對應的 symbol")
+        return normalized_code, index_meta
+
+    for index_key, index_meta in MARKET_INDEX_METADATA.items():
+        if str(index_meta.get("symbol", "")).upper() == normalized_code:
+            return index_key, index_meta
+
+    raise ValueError(f"找不到 SPECIFIED_INDEX_CODE={normalized_code} 對應的產業別或大盤指數")
 
 
 def to_api_date_str(target_date: date) -> str:
@@ -151,6 +196,10 @@ def format_tw_price(price: float) -> str:
     if tick < 1:
         return f"{price:.1f}"
     return f"{price:.0f}"
+
+
+def format_index_value(value: float) -> str:
+    return f"{value:.2f}"
 
 
 def round_to_tick(price: float) -> float:
@@ -293,12 +342,14 @@ def draw_intraday_ohlc(
     prev_high_loc: float | None = None,
     prev_low_loc: float | None = None,
     prev_close_loc: float | None = None,
+    show_limit_prices: bool = True,
+    value_formatter=format_tw_price,
 ):
-    """繪製單一股票的當日分K OHLC 與下方成交量長條圖。"""
+    """繪製單一商品的當日分K OHLC 與下方成交量長條圖。"""
 
     limit_up_loc = None
     limit_down_loc = None
-    if prev_close_loc is not None:
+    if show_limit_prices and prev_close_loc is not None:
         limit_up_loc, limit_down_loc = calculate_limit_prices(prev_close_loc)
 
     # ---- 指定日期分K ----
@@ -333,15 +384,16 @@ def draw_intraday_ohlc(
         dx_base_i = 1 / 1440
     tick_width_min = dx_base_i * 0.35
 
-    open_text = format_tw_price(opens_i[0]) if opens_i else "N/A"
-    atr_text = f"{atr_value:.2f}" if atr_value is not None else "N/A"
-    limit_up_text = format_tw_price(limit_up_loc) if limit_up_loc is not None else "N/A"
-    limit_down_text = format_tw_price(limit_down_loc) if limit_down_loc is not None else "N/A"
-    ax.set_title(
-        f"{fig_title} 漲停:{limit_up_text} 跌停:{limit_down_text} "
-        f"開盤:{open_text} ATR:{atr_text}",
-        pad=2
-    )
+    open_text = value_formatter(opens_i[0]) if opens_i else "N/A"
+    title_parts = [fig_title]
+    if show_limit_prices:
+        limit_up_text = value_formatter(limit_up_loc) if limit_up_loc is not None else "N/A"
+        limit_down_text = value_formatter(limit_down_loc) if limit_down_loc is not None else "N/A"
+        title_parts.extend([f"漲停:{limit_up_text}", f"跌停:{limit_down_text}"])
+    title_parts.append(f"開盤:{open_text}")
+    if atr_value is not None:
+        title_parts.append(f"ATR:{atr_value:.2f}")
+    ax.set_title(" ".join(title_parts), pad=2)
 
     ax.grid(True)
     style_inside_right_y_ticks(ax)
@@ -445,15 +497,16 @@ def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
 def main():
-    # ========= 你提供的陣列 =========
-    candidate_symbols = selected_stocks
+    # ========= 指定單一產業別/大盤指數 =========
+    index_key, index_meta = find_specified_index(SPECIFIED_INDEX_CODE)
     target_date = parse_specified_date(SPECIFIED_DATE)
+    code = str(index_meta["symbol"]).upper()
 
     # ========= 輸出資料夾（以指定日期 YYYYMMDD 命名） =========
     out_dir = target_date.strftime("%Y%m%d")
     os.makedirs(PDF_DIR, exist_ok=True)
-    # ========= PDF 檔名（全部圖合併成一份） =========
-    out_pdf_path = os.path.join(PDF_DIR, f"{out_dir}_one_k_batch.pdf")
+    # ========= PDF 檔名（單一指數單日報表） =========
+    out_pdf_path = os.path.join(PDF_DIR, f"{out_dir}_{code}_index_one_k_single.pdf")
     # ========= SDK login =========
     config = ConfigParser()
     config.read(CONFIG_PATH)
@@ -464,62 +517,63 @@ def main():
     sdk.login()
     rest_stock = realtime_sdk.rest_client.stock
 
-    # ========= 批次產圖：全部寫入同一個 PDF =========
+    # ========= 單一指數產圖：寫入同一個 PDF =========
     with PdfPages(out_pdf_path) as pdf:
-        for item in candidate_symbols:
-            fig, (price_ax, volume_ax) = plt.subplots(
-                2,
-                1,
-                figsize=(20, 10),
-                gridspec_kw={"height_ratios": [4.5, 1.5], "hspace": 0.05},
-            )
+        fig, (price_ax, volume_ax) = plt.subplots(
+            2,
+            1,
+            figsize=(20, 10),
+            gridspec_kw={"height_ratios": [4.5, 1.5], "hspace": 0.05},
+        )
 
-            stock_num = item[0]
-            code = extract_stock_code(item[0])
-            atr_value = item[7]
-            candles_by_day = fetch_recent_candles(rest_stock, code, target_date, lookback_days=10)
-            historical_rows = candles_by_day.get(target_date, [])
-            if not historical_rows:
-                plt.close(fig)
-                print(f"[WARN] Skip {code}: {target_date.strftime('%Y-%m-%d')} 無當日分K資料")
-                continue
-            try:
-                prev_trade_date, prev_open_price, prev_high_price, prev_low_price, prev_close_price = (
-                    calculate_previous_day_ohlc(candles_by_day, code, target_date)
-                )
-            except ValueError as exc:
-                plt.close(fig)
-                print(f"[WARN] Skip {code}: {exc}")
-                continue
-            title = (
-                f"{stock_num} 前日:{prev_trade_date.strftime('%Y-%m-%d')} "
-                f"昨開:{format_tw_price(prev_open_price)} "
-                f"昨高:{format_tw_price(prev_high_price)} "
-                f"昨低:{format_tw_price(prev_low_price)} "
-                f"昨收:{format_tw_price(prev_close_price)}"
-            )
-
-            print(
-                f"[INFO] Add {code} to PDF "
-                f"(target={target_date.strftime('%Y-%m-%d')}, prev={prev_trade_date.strftime('%Y-%m-%d')}) ..."
-            )
-            draw_intraday_ohlc(
-                ax=price_ax,
-                volume_ax=volume_ax,
-                symbol_code=code,
-                target_date=target_date,
-                historical_rows=historical_rows,
-                fig_title=title,
-                atr_value=atr_value,
-                prev_open_loc=prev_open_price,
-                prev_high_loc=prev_high_price,
-                prev_low_loc=prev_low_price,
-                prev_close_loc=prev_close_price,
-            )
-
-            fig.subplots_adjust(left=0.03, right=0.985, top=0.95, bottom=0.08, hspace=0.05)
-            pdf.savefig(fig)
+        index_label = (
+            f"{index_key} {code} {index_meta.get('name', '')} "
+            f"{index_meta.get('industry_name', '')}"
+        ).strip()
+        candles_by_day = fetch_recent_candles(rest_stock, code, target_date, lookback_days=40)
+        historical_rows = candles_by_day.get(target_date, [])
+        if not historical_rows:
             plt.close(fig)
+            raise ValueError(f"{index_label} 在 {target_date.strftime('%Y-%m-%d')} 無當日分K資料")
+
+        try:
+            prev_trade_date, prev_open_price, prev_high_price, prev_low_price, prev_close_price = (
+                calculate_previous_day_ohlc(candles_by_day, code, target_date)
+            )
+        except ValueError:
+            plt.close(fig)
+            raise
+
+        title = (
+            f"{index_label} 前日:{prev_trade_date.strftime('%Y-%m-%d')} "
+            f"昨開:{format_index_value(prev_open_price)} "
+            f"昨高:{format_index_value(prev_high_price)} "
+            f"昨低:{format_index_value(prev_low_price)} "
+            f"昨收:{format_index_value(prev_close_price)}"
+        )
+
+        print(
+            f"[INFO] Add {index_label} to PDF "
+            f"(target={target_date.strftime('%Y-%m-%d')}, prev={prev_trade_date.strftime('%Y-%m-%d')}) ..."
+        )
+        draw_intraday_ohlc(
+            ax=price_ax,
+            volume_ax=volume_ax,
+            symbol_code=code,
+            target_date=target_date,
+            historical_rows=historical_rows,
+            fig_title=title,
+            prev_open_loc=prev_open_price,
+            prev_high_loc=prev_high_price,
+            prev_low_loc=prev_low_price,
+            prev_close_loc=prev_close_price,
+            show_limit_prices=False,
+            value_formatter=format_index_value,
+        )
+
+        fig.subplots_adjust(left=0.03, right=0.985, top=0.95, bottom=0.08, hspace=0.05)
+        pdf.savefig(fig)
+        plt.close(fig)
 
     print(f"[DONE] PDF saved: {out_pdf_path}")
 
