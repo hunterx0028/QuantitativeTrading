@@ -162,41 +162,6 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
     return True
 
 
-def get_order_fill_info(symbol: str, sdk) -> tuple[float, int]:
-    """
-    依股票代號查詢委託結果，回傳 (加權平均成交價, 總成交量)。
-
-    若查無成交資料，回傳 (0.0, 0)。
-    若同一股票有多筆成交（委託被拆單），以加權平均計算成交價。
-    """
-    try:
-        order_results = sdk.get_order_results()
-    except Exception as exc:
-        print(f'[ERROR] 取得委託結果失敗: {exc}', file=sys.stderr)
-        return 0.0, 0
-
-    matched_results = [
-        item for item in order_results
-        if str(item.get('stock_no', '')).strip() == str(symbol).strip()
-    ]
-
-    filled_results = [
-        item for item in matched_results
-        if int(item.get('mat_qty', 0) or 0) > 0
-    ]
-
-    if not filled_results:
-        return 0.0, 0
-
-    total_qty = sum(int(item.get('mat_qty', 0) or 0) for item in filled_results)
-    total_value = sum(
-        float(item.get('avg_price', 0.0) or 0.0) * int(item.get('mat_qty', 0) or 0)
-        for item in filled_results
-    )
-    avg_price = total_value / total_qty if total_qty > 0 else 0.0
-    return avg_price, total_qty
-
-
 # ============ 工具函式 ============
 def get_tick_size(price: float) -> float:
     """依台股價格區間回傳 tick size"""
@@ -1446,11 +1411,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
         if place_order_result:  # 下單成功
             state["in_position"] = True
 
-            avg_price, mat_qty = get_order_fill_info(state["symbol_code"], mysdk)
-            if (avg_price != 0) and (mat_qty == state.get("qty", 0)):
-                state["entry_price"] = avg_price
-            else:
-                state["entry_price"] = entry_ref_px
+            state["entry_price"] = entry_ref_px
 
             industry_filter_text = format_industry_market_filter_pass_text(state)
             if side == TRADE_SIDE_SHORT:
