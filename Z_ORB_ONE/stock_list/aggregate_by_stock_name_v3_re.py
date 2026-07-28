@@ -10,9 +10,10 @@ MIN_LIMIT_DOWN_PRICE = 50.0
 
 TOP_RANK = 30 # 出現次數的排名
 
-MIN_REPEAT_COUNT = 14 # 最少的累計次數
+MIN_REPEAT_COUNT = 5 # 最少的累計次數
 
-EXCLUDED_INDUSTRY_CODES: list[str] = ["17", "20", "36", "31", "25"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
+EXCLUDED_INDUSTRY_CODES: list[str] = [] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
+# "17", "20", "36", "31", "25"
 
 RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result.txt"
 OUTPUT_RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result_re.txt"
