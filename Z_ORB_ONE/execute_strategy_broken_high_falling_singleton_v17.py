@@ -117,6 +117,9 @@ MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
 MARKET_REVERSAL_STOP_EVENT = threading.Event()
 MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
+ORDER_ACK_CONDITION = threading.Condition()
+ORDER_ACK_BY_NO: Dict[str, Dict[str, Any]] = {}
+ORDER_ACK_WAIT_SECONDS = 2.0
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_FOLLOW = 1
 ENTRY_MODE_LOWER = 2
@@ -152,14 +155,120 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
     )
 
     try:
-        mysdk.place_order(order)
+        order_response = mysdk.place_order(order)
         time.sleep(0.1) # 交易 API 限制每秒委託含取消不可超過 20 筆，保守控制在約 10 筆/秒
     except Exception as e:
         print(f"[ERROR] {symbol_code_with_suf} : {priceInfo} {action_type} x {quantity} - {trade_type} - {e}")
         return False
 
-    print(f"[ORDER] {symbol_code_with_suf} : {priceInfo} {action_type} x {quantity} - {trade_type}")
+    if not isinstance(order_response, dict):
+        print(
+            f"[ERROR] {symbol_code_with_suf} 下單回傳格式異常："
+            f"{type(order_response)!r} {order_response!r}"
+        )
+        return False
+
+    ret_code = str(order_response.get("ret_code", "") or "").strip()
+    ret_msg = str(order_response.get("ret_msg", "") or "").strip()
+    order_no = str(order_response.get("ord_no", "") or "").strip()
+    if ret_code != "000000" or not order_no:
+        print(
+            f"[ERROR] {symbol_code_with_suf} 下單未成功："
+            f"ret_code={ret_code!r} ret_msg={ret_msg!r} "
+            f"ord_no={order_no!r} response={order_response!r}"
+        )
+        return False
+
+    print(
+        f"[ORDER] {symbol_code_with_suf} : {priceInfo} {action_type} x {quantity} "
+        f"- {trade_type} - ord_no={order_no} response={order_response!r}"
+    )
+
+    order_ack = wait_for_order_ack(order_no, ORDER_ACK_WAIT_SECONDS)
+    if order_ack is None:
+        # 同步回傳已明確成功時，不因 WebSocket 延遲或斷線而誤判失敗，
+        # 避免策略再次送出相同委託。
+        print(
+            f"[WARN] ord_no={order_no} 在 {ORDER_ACK_WAIT_SECONDS:.1f} 秒內"
+            "未收到 on('order')，保留 place_order() 的成功結果"
+        )
+        return True
+
+    ack_error_code = str(order_ack.get("err_code", "") or "").strip()
+    ack_error_msg = str(order_ack.get("err_msg", "") or "").strip()
+    if ack_error_code not in ("", "000000", "00000000"):
+        print(
+            f"[ERROR] ord_no={order_no} 委託回報失敗："
+            f"err_code={ack_error_code!r} err_msg={ack_error_msg!r} "
+            f"ack={order_ack!r}"
+        )
+        return False
+
+    print(f"[ORDER_ACK] ord_no={order_no} 委託已受理：{order_ack!r}")
     return True
+
+
+def order_report_no(data: Dict[str, Any]) -> str:
+    """盤中單使用 ord_no；預約單回報則以 pre_ord_no 對應 place_order()."""
+    return str(data.get("ord_no") or data.get("pre_ord_no") or "").strip()
+
+
+def wait_for_order_ack(order_no: str, timeout: float) -> Optional[Dict[str, Any]]:
+    """等待指定委託書號的主動委託回報；支援回報早於同步 API 返回的競態。"""
+    with ORDER_ACK_CONDITION:
+        if order_no not in ORDER_ACK_BY_NO:
+            ORDER_ACK_CONDITION.wait_for(
+                lambda: order_no in ORDER_ACK_BY_NO,
+                timeout=timeout,
+            )
+        return ORDER_ACK_BY_NO.pop(order_no, None)
+
+
+def start_trade_report_stream(sdk: SDK) -> threading.Thread:
+    """註冊交易主動回報，並在背景執行阻塞式 connect_websocket()。"""
+
+    @sdk.on("error")
+    def on_trade_error(error):
+        print(f"[TRADE_WS_ERROR] {error!r}", file=sys.stderr)
+
+    @sdk.on("order")
+    def on_order(data):
+        print(f"[ORDER_REPORT] {data!r}")
+        if not isinstance(data, dict):
+            print(
+                f"[WARN] on('order') 回傳格式異常：{type(data)!r}",
+                file=sys.stderr,
+            )
+            return
+
+        report_no = order_report_no(data)
+        if not report_no:
+            print("[WARN] on('order') 缺少 ord_no/pre_ord_no", file=sys.stderr)
+            return
+
+        with ORDER_ACK_CONDITION:
+            ORDER_ACK_BY_NO[report_no] = dict(data)
+            ORDER_ACK_CONDITION.notify_all()
+
+    @sdk.on("dealt")
+    def on_dealt(data):
+        # 目前先保留原始成交回報，尚不以它更新策略狀態。
+        print(f"[DEALT_REPORT] {data!r}")
+
+    def websocket_worker():
+        try:
+            sdk.connect_websocket()
+            print("[WARN] 交易回報 WebSocket 已結束", file=sys.stderr)
+        except Exception as exc:
+            print(f"[TRADE_WS_ERROR] WebSocket 連線失敗：{exc}", file=sys.stderr)
+
+    websocket_thread = threading.Thread(
+        target=websocket_worker,
+        name="esun-trade-report-websocket",
+        daemon=True,
+    )
+    websocket_thread.start()
+    return websocket_thread
 
 
 # ============ 工具函式 ============
@@ -2118,6 +2227,16 @@ if __name__ == "__main__":
 
         sdk = SDK(config)
         sdk.login()
+        trade_report_thread = start_trade_report_stream(sdk)
+        time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線，再進入策略監控
+        if trade_report_thread.is_alive():
+            print("[TRADE_WS] 委託／成交主動回報背景執行緒已啟動")
+        else:
+            print(
+                "[WARN] 交易回報背景執行緒未持續運作；"
+                "下單仍會檢查 place_order() 同步回傳",
+                file=sys.stderr,
+            )
 
         candidate_symbols = selected_stocks
         states = initialize_states(candidate_symbols, realtime_sdk)
