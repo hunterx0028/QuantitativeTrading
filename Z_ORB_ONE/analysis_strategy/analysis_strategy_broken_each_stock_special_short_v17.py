@@ -20,6 +20,7 @@ from Z_ORB_ONE.stock_data import market_previous_close_indices, selected_stocks
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each_stock_special_short_v17_result.txt')
 OUTPUT_BUFFER: list[str] = []
+ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 GATE_LOWER_PASSED = 'LOWER_PASSED'
 GATE_FOLLOW_PASSED = 'FOLLOW_PASSED'
 GATE_NOT_PASSED = 'NOT_PASSED'
@@ -29,24 +30,16 @@ STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
-INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_FOLLOW_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
 
-OPTIMIZE_LOSS_PER_LOWER = 1.5 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
-OPTIMIZE_LOSS_PER_FOLLOW = 1.5 # follow 停損百分比(%)，預設沿用 chance
+OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
-
-LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
-LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-
-FOLLOW_ENTRY_RANGE_START_PERCENT = 10.0 # follow 入場價距昨收到漲停的起始百分比
-FOLLOW_ENTRY_RANGE_END_PERCENT = 60.0 # follow 入場價距昨收到漲停的結束百分比
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數位於昨收兩側的 NO_TRADE 檢查起始分K棒，包含此時間
 
@@ -82,8 +75,7 @@ INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
-EXCLUDED_INDUSTRY_CODES: list[str] = [] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
-# "17", "20", "36", "31", "25"
+EXCLUDED_INDUSTRY_CODES: list[str] = ["17", "20", "36", "31", "25"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 
 RESERVE_MARKET_INDICES = {
     'TWSE:MARKET': {
@@ -272,22 +264,24 @@ def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_perc
     return entry_price * (take_profit_percent / 100.0)
 
 
-def calculate_entry_range_bounds(
+def should_skip_entry_by_limit_down_zone(
+    entry_price: float,
+    true_yesterday_low: float,
+    limit_down_price: float,
+) -> bool:
+    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
+    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
+    return entry_price <= threshold
+
+
+def should_skip_entry_by_limit_up_zone(
+    entry_price: float,
     reference_price: float,
-    limit_price: float,
-    start_percent: float,
-    end_percent: float,
-) -> tuple[float, float]:
-    """依參考價到漲跌停的百分比區間，回傳可入場價格上下界。"""
-    start_price = reference_price + (limit_price - reference_price) * (start_percent / 100.0)
-    end_price = reference_price + (limit_price - reference_price) * (end_percent / 100.0)
-    return min(start_price, end_price), max(start_price, end_price)
-
-
-def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
-    """判斷價格是否落在入場區間內，含上下界。"""
-    return lower_bound <= price <= upper_bound
-
+    limit_up_price: float,
+) -> bool:
+    """進場價若高於參考價到漲停三分之一位置，略過本次進場。"""
+    threshold = reference_price + ((limit_up_price - reference_price) / 3.0)
+    return entry_price >= threshold
 
 # ---------------------------------------------------------------------------
 # 股票清單 (tuple 格式：第一個元素為「名稱:代碼.TW」)
@@ -1283,23 +1277,20 @@ def scan_entry_signal_lower(
 ):
     """
     作空進場訊號：
-    1) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
-    2) 取時間窗內第一根 low 落在入場區間的 K 棒作為進場 K 棒
-    3) 進場價 = 進場分K棒 low
+    1) 取前一營業日最低價作為 trigger_low
+    2) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
+    3) 若任一根K棒 low < trigger_low，則可進場
+    4) 進場價 = trigger_low - 1 tick
+    5) 若進場價 <= 昨低 - (昨低 - 跌停價) / 3，則不進場
     回傳：
     - (entry_bar, entry_price): 條件成立
-    - None: 未出現符合入場區間的 K 棒
+    - ENTRY_BLOCKED: 首次跌破但檢核失敗（當日封單）
+    - None: 未形成 trigger_low 或未出現進場跌破
     """
     start_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
     end_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
-    yesterday_close = float(ystats['close'])
-    _, limit_down_price = calculate_limit_prices(yesterday_close)
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_down_price,
-        LOWER_ENTRY_RANGE_START_PERCENT,
-        LOWER_ENTRY_RANGE_END_PERCENT,
-    )
+    true_yesterday_low = float(ystats['low'])
+    _, limit_down_price = calculate_limit_prices(float(ystats['close']))
 
     indexed_bars = []
     for idx, bar in enumerate(today_bars):
@@ -1313,18 +1304,25 @@ def scan_entry_signal_lower(
     if len(indexed_bars) < 2:
         return None
 
+    trigger_low = true_yesterday_low
+
     for original_idx, bar, hm in indexed_bars:
-        if bar.get('low') is None:
-            continue
+        bar_low = float(bar.get('low', 0) or 0.0)
 
         if not (start_hm <= hm <= end_hm):
             continue
 
-        entry_price = float(bar['low'])
-        if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
-            continue
+        if bar_low < trigger_low:
+            entry_tick = get_tick_size(trigger_low)
+            entry_price = max(trigger_low - entry_tick, 0.0)
+            if should_skip_entry_by_limit_down_zone(
+                entry_price,
+                true_yesterday_low,
+                limit_down_price,
+            ):
+                return ENTRY_BLOCKED
 
-        return bar, entry_price
+            return bar, entry_price
     return None
 
 
@@ -1334,20 +1332,22 @@ def scan_entry_signal_follow(
 ):
     """
     follow 作多進場訊號：
-    1) 進場檢查時間為 STRATEGY_START_FOLLOW 到 STRATEGY_END_FOLLOW（含起訖）
-    2) 取時間窗內第一根 high 落在入場區間的 K 棒作為進場 K 棒
-    3) 進場價 = 進場分K棒 high
+    1) 使用昨收作為突破基準，進場價為昨收加一檔
+    2) 自 STRATEGY_START_FOLLOW ~ STRATEGY_END_FOLLOW 監控分K，任一根 high > 昨收即視為突破訊號
     """
     start_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
     end_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
     yesterday_close = float(ystats['close'])
+
+    entry_tick = get_tick_size(yesterday_close)
+    entry_price = yesterday_close + entry_tick
     limit_up_price, _ = calculate_limit_prices(yesterday_close)
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+    if should_skip_entry_by_limit_up_zone(
+        entry_price,
         yesterday_close,
         limit_up_price,
-        FOLLOW_ENTRY_RANGE_START_PERCENT,
-        FOLLOW_ENTRY_RANGE_END_PERCENT,
-    )
+    ):
+        return ENTRY_BLOCKED
 
     time_indexed = []
     for idx, bar in enumerate(today_bars):
@@ -1360,12 +1360,16 @@ def scan_entry_signal_follow(
         time_indexed.append((idx, bar, hm))
 
     for original_idx, bar, _ in time_indexed:
-        if bar.get('high') is None:
+        bar_high = float(bar['high'])
+        if bar_high <= yesterday_close:
             continue
 
-        entry_price = float(bar['high'])
-        if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
-            continue
+        if should_skip_entry_by_limit_up_zone(
+            entry_price,
+            yesterday_close,
+            limit_up_price,
+        ):
+            return ENTRY_BLOCKED
 
         return bar, entry_price
     return None
@@ -1498,6 +1502,18 @@ def build_trade_candidate(
     }
 
 
+def should_skip_entry_by_limit_up(entry_price: float, stop_loss: float, limit_up_price: float) -> bool:
+    #return False # 先關閉判斷
+
+    # 若進場價 + 停損差價 >= 漲停價，則跳過本次交易。
+    return (entry_price + stop_loss) >= limit_up_price
+
+
+def should_skip_entry_by_limit_down(entry_price: float, stop_loss: float, limit_down_price: float) -> bool:
+    # 若進場價 - 停損差價 <= 跌停價，則跳過本次交易。
+    return (entry_price - stop_loss) <= limit_down_price
+
+
 # ---------------------------------------------------------------------------
 # Phase 4 (US2) — 策略結果評估
 # ---------------------------------------------------------------------------
@@ -1585,26 +1601,6 @@ def signed_pnl(result: dict | None) -> float:
     return result['pnl'] if result.get('outcome') == 'success' else -result['pnl']
 
 
-def should_include_strategy_in_print_stats(strategy_type: str | None) -> bool:
-    """依打印統計開關判斷策略模式是否納入輸出。"""
-    if strategy_type == STRATEGY_LOWER:
-        return INCLUDE_LOWER_IN_PRINT_STATS
-    if strategy_type == STRATEGY_FOLLOW:
-        return INCLUDE_FOLLOW_IN_PRINT_STATS
-    return True
-
-
-def filter_results_for_print_stats(all_results: list) -> list:
-    """回傳納入打印統計的交易結果。"""
-    return [
-        (signal, result)
-        for signal, result in all_results
-        if signal
-        and result
-        and should_include_strategy_in_print_stats(signal.get('strategy_type'))
-    ]
-
-
 def format_entry_datetime(entry_dt: datetime | None) -> str:
     """格式化入場時間，無資料時回傳空字串。"""
     if entry_dt is None:
@@ -1646,14 +1642,13 @@ def print_daily_optimization_results(
     market_start_gate_cache: dict[date, str],
 ) -> None:
     """印出固定參數下依日期彙總的進出場明細。"""
-    print_results = filter_results_for_print_stats(all_results)
     print(
         f'損益已納入交易成本: 手續費率={BROKERAGE_FEE_RATE:.6f}, '
         f'賣出交易稅率={SELL_TRANSACTION_TAX_RATE:.6f}'
     )
     print('')
 
-    summary = summarize_results(print_results)
+    summary = summarize_results(all_results)
     gate_status_by_date_key = {
         current_date.strftime('%Y-%m-%d'): gate_status
         for current_date, gate_status in market_start_gate_cache.items()
@@ -1666,19 +1661,19 @@ def print_daily_optimization_results(
     lower_gate_date_keys = {
         current_date.strftime('%Y-%m-%d')
         for current_date, gate_status in market_start_gate_cache.items()
-        if gate_status == GATE_LOWER_PASSED and INCLUDE_LOWER_IN_PRINT_STATS
+        if gate_status == GATE_LOWER_PASSED
     }
     follow_gate_date_keys = {
         current_date.strftime('%Y-%m-%d')
         for current_date, gate_status in market_start_gate_cache.items()
-        if gate_status == GATE_FOLLOW_PASSED and INCLUDE_FOLLOW_IN_PRINT_STATS
+        if gate_status == GATE_FOLLOW_PASSED
     }
     if summary['total'] == 0 and not lower_gate_date_keys and not follow_gate_date_keys:
         print('固定參數下沒有交易結果。')
         return
 
     grouped_results: dict[str, list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
-    for signal, result in print_results:
+    for signal, result in all_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
@@ -1734,7 +1729,7 @@ def print_daily_optimization_results(
             )
         print('')
 
-    for exchange_suffix, industry_code, successes, failures, pnl_value in summarize_industry_results(print_results):
+    for exchange_suffix, industry_code, successes, failures, pnl_value in summarize_industry_results(all_results):
         print(
             f'{exchange_suffix} {industry_code} '
             f'成功數={successes}  '
@@ -1754,14 +1749,6 @@ def print_daily_optimization_results(
         f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%  '
         f'FOLLOW_LOSS_PER={OPTIMIZE_LOSS_PER_FOLLOW:.1f}%  '
         f'FOLLOW_PROFIT_PER={OPTIMIZE_PROFIT_PER_FOLLOW:.1f}%'
-    )
-    print(
-        f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}  '
-        f'INCLUDE_FOLLOW_IN_PRINT_STATS={INCLUDE_FOLLOW_IN_PRINT_STATS}'
-    )
-    print(
-        f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%  '
-        f'FOLLOW_ENTRY_RANGE={FOLLOW_ENTRY_RANGE_START_PERCENT:.1f}%~{FOLLOW_ENTRY_RANGE_END_PERCENT:.1f}%'
     )
     print(
         f'MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
@@ -1831,6 +1818,8 @@ def find_trade_candidate_on_date(
     else:
         return None
     if pair is None:
+        return None
+    if pair == ENTRY_BLOCKED:
         return None
 
     entry_bar, entry_price = pair
@@ -1977,10 +1966,18 @@ def evaluate_candidates(
             raw_take_profit_price = entry_price + effective_profit
             take_profit_price = min(raw_take_profit_price, limit_up_price)
             stop_loss_price = max(entry_price - effective_stop_loss, limit_down_price)
+            if should_skip_entry_by_limit_down(
+                entry_price, effective_stop_loss, limit_down_price
+            ):
+                continue
         else:
             raw_take_profit_price = entry_price - effective_profit
             take_profit_price = max(raw_take_profit_price, limit_down_price)
             stop_loss_price = calculate_stop_loss_price(entry_price, effective_stop_loss, limit_up_price)
+            if should_skip_entry_by_limit_up(
+                entry_price, effective_stop_loss, limit_up_price
+            ):
+                continue
         try:
             entry_idx = dt_values.index(entry_dt)
         except ValueError:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import math
-import sys
 import time as time_module
 from datetime import datetime, date, time, timedelta
 from configparser import ConfigParser
@@ -22,37 +21,10 @@ from esun_marketdata import EsunMarketdata
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(CURRENT_DIR)
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from Z_ORB_ONE.stock_data import market_previous_close_indices
-
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = "20260728"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 SPECIFIED_INDEX_CODE = "IX0001"  # 指定要繪圖的指數代碼，例如 IX0001、IX0043、IX0028；此程式只產出單一指數單日報表
-
-RESERVE_MARKET_INDICES = {
-    "TWSE:MARKET": {
-        "exchange": "TWSE",
-        "industry_code": None,
-        "industry_name": "上市",
-        "symbol": "IX0001",
-        "name": "發行量加權股價指數",
-        "source": "historical.candles",
-    },
-    "TPEX:MARKET": {
-        "exchange": "TPEX",
-        "industry_code": None,
-        "industry_name": "上櫃",
-        "symbol": "IX0043",
-        "name": "櫃買指數",
-        "source": "historical.candles",
-    },
-}
-MARKET_INDEX_METADATA = {**market_previous_close_indices, **RESERVE_MARKET_INDICES}
-
 
 def normalize_config_paths(config: ConfigParser):
     cert_path = config.get("Cert", "Path", fallback="")
@@ -91,27 +63,14 @@ def parse_specified_date(date_str: str) -> date:
 
 
 def normalize_index_code(index_code: str) -> str:
-    """標準化指數代碼；支援 IX0001 或 TWSE:24 這類 market index key。"""
-    return index_code.strip().upper()
-
-
-def find_specified_index(index_code: str) -> tuple[str, dict]:
-    """依指數代碼或 index key 找出單一產業/大盤指數設定。"""
-    normalized_code = normalize_index_code(index_code)
-    if not normalized_code:
-        raise ValueError("SPECIFIED_INDEX_CODE 不可為空，請指定指數代碼，例如 IX0001、IX0043、IX0028")
-
-    if normalized_code in MARKET_INDEX_METADATA:
-        index_meta = MARKET_INDEX_METADATA[normalized_code]
-        if not index_meta.get("symbol"):
-            raise ValueError(f"SPECIFIED_INDEX_CODE={normalized_code} 沒有對應的 symbol")
-        return normalized_code, index_meta
-
-    for index_key, index_meta in MARKET_INDEX_METADATA.items():
-        if str(index_meta.get("symbol", "")).upper() == normalized_code:
-            return index_key, index_meta
-
-    raise ValueError(f"找不到 SPECIFIED_INDEX_CODE={normalized_code} 對應的產業別或大盤指數")
+    """標準化並驗證指數代碼；只接受 IX 加 4 位數字，例如 IX0001。"""
+    normalized_code = index_code.strip().upper()
+    if not re.fullmatch(r"IX\d{4}", normalized_code):
+        raise ValueError(
+            f"SPECIFIED_INDEX_CODE 格式錯誤: {index_code}，"
+            "只接受 IX 加 4 位數字，例如 IX0001"
+        )
+    return normalized_code
 
 
 def to_api_date_str(target_date: date) -> str:
@@ -497,16 +456,15 @@ def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
 def main():
-    # ========= 指定單一產業別/大盤指數 =========
-    index_key, index_meta = find_specified_index(SPECIFIED_INDEX_CODE)
+    # ========= 指定單一指數 =========
+    code = normalize_index_code(SPECIFIED_INDEX_CODE)
     target_date = parse_specified_date(SPECIFIED_DATE)
-    code = str(index_meta["symbol"]).upper()
 
     # ========= 輸出資料夾（以指定日期 YYYYMMDD 命名） =========
     out_dir = target_date.strftime("%Y%m%d")
     os.makedirs(PDF_DIR, exist_ok=True)
     # ========= PDF 檔名（單一指數單日報表） =========
-    out_pdf_path = os.path.join(PDF_DIR, f"{out_dir}_{code}_index_one_k_single.pdf")
+    out_pdf_path = os.path.join(PDF_DIR, f"{out_dir}_{code}_index_one_k_single_industry.pdf")
     # ========= SDK login =========
     config = ConfigParser()
     config.read(CONFIG_PATH)
@@ -526,10 +484,7 @@ def main():
             gridspec_kw={"height_ratios": [4.5, 1.5], "hspace": 0.05},
         )
 
-        index_label = (
-            f"{index_key} {code} {index_meta.get('name', '')} "
-            f"{index_meta.get('industry_name', '')}"
-        ).strip()
+        index_label = code
         candles_by_day = fetch_recent_candles(rest_stock, code, target_date, lookback_days=40)
         historical_rows = candles_by_day.get(target_date, [])
         if not historical_rows:
