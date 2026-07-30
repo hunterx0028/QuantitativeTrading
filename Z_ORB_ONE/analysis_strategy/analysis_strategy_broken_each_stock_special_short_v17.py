@@ -42,11 +42,8 @@ OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表�
 OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
 
-LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
-LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-
-FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的起始百分比
-FOLLOW_ENTRY_RANGE_END_PERCENT = 30.0 # follow 入場價距昨收到漲停的結束百分比
+MIN_REMAINING_PROFIT_SPACE_PERCENT_LOWER = 5.0 # lower 進場價至跌停至少保留的獲利空間(%)
+MIN_REMAINING_PROFIT_SPACE_PERCENT_FOLLOW = 6.0 # follow 進場價至漲停至少保留的獲利空間(%)
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數位於昨收兩側的 NO_TRADE 檢查起始分K棒，包含此時間
 
@@ -64,16 +61,16 @@ INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(�
 INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(時, 分)，預設沿用 chance
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
+IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.8 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -274,21 +271,23 @@ def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_perc
     return entry_price * (take_profit_percent / 100.0)
 
 
-def calculate_entry_range_bounds(
-    reference_price: float,
-    limit_price: float,
-    start_percent: float,
-    end_percent: float,
-) -> tuple[float, float]:
-    """依參考價到漲跌停的百分比區間，回傳可入場價格上下界。"""
-    start_price = reference_price + (limit_price - reference_price) * (start_percent / 100.0)
-    end_price = reference_price + (limit_price - reference_price) * (end_percent / 100.0)
-    return min(start_price, end_price), max(start_price, end_price)
-
-
-def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
-    """判斷價格是否落在入場區間內，含上下界。"""
-    return lower_bound <= price <= upper_bound
+def calculate_cumulative_vwap_values(bars: list[dict]) -> list[float | None]:
+    """依分钟K的 average 与 volume 计算截至各K棒的累计VWAP。"""
+    total_turnover = 0.0
+    total_volume = 0.0
+    values: list[float | None] = []
+    for bar in bars:
+        try:
+            volume = float(bar.get('volume', 0) or 0)
+            average = float(bar['average'])
+        except (KeyError, TypeError, ValueError):
+            volume = 0.0
+            average = 0.0
+        if volume > 0 and average > 0:
+            total_turnover += average * volume
+            total_volume += volume
+        values.append(total_turnover / total_volume if total_volume > 0 else None)
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -1118,40 +1117,6 @@ def has_ix0001_early_strategy_breakout(
     return False
 
 
-def has_strategy_market_follow_decline_block(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """任一市場指數在決策時間前突破後又於後續分 K 回跌，即永久封鎖當日 FOLLOW。"""
-    for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
-        bars_by_date = index_minute_bars_by_key.get(index_key, {})
-        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-        raise_percent = get_strategy_decision_raise_percent(index_key)
-        decline_percent = get_strategy_decision_decline_percent(index_key)
-        if previous_close is None or raise_percent is None or decline_percent is None:
-            continue
-
-        raise_threshold = previous_close * (1 + raise_percent / 100.0)
-        raise_break = find_strategy_decision_raise_break(
-            bars_by_date,
-            target_date,
-            raise_threshold,
-        )
-        if raise_break is None:
-            continue
-
-        _, raise_dt = raise_break
-        decline_threshold = previous_close * (1 + decline_percent / 100.0)
-        if find_strategy_decision_decline_to_threshold(
-            bars_by_date,
-            target_date,
-            raise_dt,
-            decline_threshold,
-        ) is not None:
-            return True
-    return False
-
-
 def get_strategy_market_decision_gate_status(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1189,11 +1154,6 @@ def get_strategy_market_decision_gate_status(
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ]
-    follow_decline_blocked = has_strategy_market_follow_decline_block(
-        target_date,
-        index_minute_bars_by_key,
-    )
-
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     final_positions_above_previous_close = []
     final_positions_below_previous_close = []
@@ -1220,8 +1180,7 @@ def get_strategy_market_decision_gate_status(
         )
 
     if (
-        not follow_decline_blocked
-        and all(final_positions_above_previous_close)
+        all(final_positions_above_previous_close)
         and all(status == GATE_FOLLOW_PASSED for status, _ in follow_details)
     ):
         return GATE_FOLLOW_PASSED
@@ -1476,49 +1435,73 @@ def scan_entry_signal_lower(
     ystats: dict,
 ):
     """
-    作空進場訊號：
-    1) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
-    2) 取時間窗內第一根 low 落在入場區間的 K 棒作為進場 K 棒
-    3) 進場價 = 進場分K棒 low
+    lower 作空進場訊號：
+    1) 訊號K收盤須低於當日開盤、截至該K的累計VWAP及前一根收盤
+    2) 訊號K須位於進場檢核時間窗，下一根連續分K open 作為進場價
+    3) 進場價須低於或等於訊號K收盤，並仍低於當日開盤與累計VWAP
+    4) 進場價到跌停須保留指定獲利空間
     回傳：
-    - (entry_bar, entry_price): 條件成立
-    - None: 未出現符合入場區間的 K 棒
+    - (entry_bar, entry_price, signal_bar): 條件成立
+    - None: 未出現符合條件的方向K
     """
     start_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
     end_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
     yesterday_close = float(ystats['close'])
     _, limit_down_price = calculate_limit_prices(yesterday_close)
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_down_price,
-        LOWER_ENTRY_RANGE_START_PERCENT,
-        LOWER_ENTRY_RANGE_END_PERCENT,
+
+    sorted_bars = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda item: item['dt'],
     )
 
-    indexed_bars = []
-    for idx, bar in enumerate(today_bars):
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        indexed_bars.append((idx, bar, hm))
-    indexed_bars.sort(key=lambda item: item[1]['dt'])
-
-    if len(indexed_bars) < 2:
+    if len(sorted_bars) < 2:
         return None
+    try:
+        today_open = float(sorted_bars[0]['open'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    cumulative_vwap_values = calculate_cumulative_vwap_values(sorted_bars)
 
-    for original_idx, bar, hm in indexed_bars:
-        if bar.get('low') is None:
+    for idx in range(1, len(sorted_bars)):
+        signal_bar = sorted_bars[idx - 1]
+        entry_bar = sorted_bars[idx]
+        signal_dt = signal_bar['dt']
+        signal_hm = signal_dt.hour * 60 + signal_dt.minute
+        entry_dt = entry_bar['dt']
+        entry_hm = entry_dt.hour * 60 + entry_dt.minute
+        if signal_hm < start_hm or entry_hm > end_hm:
+            continue
+        if entry_dt - signal_dt != timedelta(minutes=1):
             continue
 
-        if not (start_hm <= hm <= end_hm):
+        try:
+            signal_close = float(signal_bar['close'])
+            previous_close = float(sorted_bars[idx - 2]['close']) if idx >= 2 else None
+            entry_price = float(entry_bar['open'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        signal_vwap = cumulative_vwap_values[idx - 1]
+        if previous_close is None or signal_vwap is None:
+            continue
+        if not (
+            signal_close < today_open
+            and signal_close < signal_vwap
+            and signal_close <= previous_close
+        ):
+            continue
+        if not (
+            entry_price <= signal_close
+            and entry_price < today_open
+            and entry_price < signal_vwap
+        ):
+            continue
+        minimum_target_price = entry_price * (
+            1 - MIN_REMAINING_PROFIT_SPACE_PERCENT_LOWER / 100.0
+        )
+        if minimum_target_price < limit_down_price:
             continue
 
-        entry_price = float(bar['low'])
-        if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
-            continue
-
-        return bar, entry_price
+        return entry_bar, entry_price, signal_bar
     return None
 
 
@@ -1528,40 +1511,68 @@ def scan_entry_signal_follow(
 ):
     """
     follow 作多進場訊號：
-    1) 進場檢查時間為 STRATEGY_START_FOLLOW 到 STRATEGY_END_FOLLOW（含起訖）
-    2) 取時間窗內第一根 high 落在入場區間的 K 棒作為進場 K 棒
-    3) 進場價 = 進場分K棒 high
+    1) 訊號K收盤須高於當日開盤、截至該K的累計VWAP及前一根收盤
+    2) 訊號K須位於進場檢核時間窗，下一根連續分K open 作為進場價
+    3) 進場價須高於或等於訊號K收盤，並仍高於當日開盤與累計VWAP
+    4) 進場價到漲停須保留指定獲利空間
     """
     start_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
     end_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
     yesterday_close = float(ystats['close'])
     limit_up_price, _ = calculate_limit_prices(yesterday_close)
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_up_price,
-        FOLLOW_ENTRY_RANGE_START_PERCENT,
-        FOLLOW_ENTRY_RANGE_END_PERCENT,
+
+    sorted_bars = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda item: item['dt'],
     )
+    if len(sorted_bars) < 2:
+        return None
+    try:
+        today_open = float(sorted_bars[0]['open'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    cumulative_vwap_values = calculate_cumulative_vwap_values(sorted_bars)
 
-    time_indexed = []
-    for idx, bar in enumerate(today_bars):
-        dtv = bar.get('dt')
-        if dtv is None:
+    for idx in range(1, len(sorted_bars)):
+        signal_bar = sorted_bars[idx - 1]
+        entry_bar = sorted_bars[idx]
+        signal_dt = signal_bar['dt']
+        signal_hm = signal_dt.hour * 60 + signal_dt.minute
+        entry_dt = entry_bar['dt']
+        entry_hm = entry_dt.hour * 60 + entry_dt.minute
+        if signal_hm < start_hm or entry_hm > end_hm:
             continue
-        hm = dtv.hour * 60 + dtv.minute
-        if hm < start_hm or hm > end_hm:
-            continue
-        time_indexed.append((idx, bar, hm))
-
-    for original_idx, bar, _ in time_indexed:
-        if bar.get('high') is None:
+        if entry_dt - signal_dt != timedelta(minutes=1):
             continue
 
-        entry_price = float(bar['high'])
-        if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
+        try:
+            signal_close = float(signal_bar['close'])
+            previous_close = float(sorted_bars[idx - 2]['close']) if idx >= 2 else None
+            entry_price = float(entry_bar['open'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        signal_vwap = cumulative_vwap_values[idx - 1]
+        if previous_close is None or signal_vwap is None:
+            continue
+        if not (
+            signal_close > today_open
+            and signal_close > signal_vwap
+            and signal_close >= previous_close
+        ):
+            continue
+        if not (
+            entry_price >= signal_close
+            and entry_price > today_open
+            and entry_price > signal_vwap
+        ):
+            continue
+        minimum_target_price = entry_price * (
+            1 + MIN_REMAINING_PROFIT_SPACE_PERCENT_FOLLOW / 100.0
+        )
+        if minimum_target_price > limit_up_price:
             continue
 
-        return bar, entry_price
+        return entry_bar, entry_price, signal_bar
     return None
 
 
@@ -1958,8 +1969,9 @@ def print_daily_optimization_results(
         f'INCLUDE_FOLLOW_IN_PRINT_STATS={INCLUDE_FOLLOW_IN_PRINT_STATS}'
     )
     print(
-        f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%  '
-        f'FOLLOW_ENTRY_RANGE={FOLLOW_ENTRY_RANGE_START_PERCENT:.1f}%~{FOLLOW_ENTRY_RANGE_END_PERCENT:.1f}%'
+        f'LOWER_REMAINING_PROFIT_SPACE={MIN_REMAINING_PROFIT_SPACE_PERCENT_LOWER:.1f}%  '
+        f'FOLLOW_REMAINING_PROFIT_SPACE={MIN_REMAINING_PROFIT_SPACE_PERCENT_FOLLOW:.1f}%  '
+        'ENTRY_TREND_FILTER=DAY_OPEN+CUMULATIVE_VWAP+PREVIOUS_CLOSE+ENTRY_OPEN_CONTINUATION'
     )
     print(
         f'MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
@@ -2035,15 +2047,15 @@ def find_trade_candidate_on_date(
     if pair is None:
         return None
 
-    entry_bar, entry_price = pair
+    entry_bar, entry_price, signal_bar = pair
     if (
         market_reversal_trigger_dt is not None
-        and market_reversal_trigger_dt <= entry_bar['dt']
+        and market_reversal_trigger_dt <= signal_bar['dt']
     ):
         return None
     if is_market_reversal_blocked_at_entry(
         target_date,
-        entry_bar['dt'],
+        signal_bar['dt'],
         index_minute_bars_by_key,
         strategy_type,
     ):
@@ -2051,7 +2063,7 @@ def find_trade_candidate_on_date(
     if not is_industry_market_filter_passed(
         stock_item,
         target_date,
-        entry_bar['dt'],
+        signal_bar['dt'],
         index_minute_bars_by_key,
         strategy_type,
     ):
@@ -2227,7 +2239,8 @@ def evaluate_candidates(
             'stop_loss_price': stop_loss_price,
         }
         result = None
-        for i in range(entry_idx + 1, len(dt_values)):
+        # 以 entry_bar 的 open 進場，因此該根K棒後續的 high/low 已屬持倉期間。
+        for i in range(entry_idx, len(dt_values)):
             bar_time = dt_values[i]
             if (
                 market_reversal_trigger_dt is not None

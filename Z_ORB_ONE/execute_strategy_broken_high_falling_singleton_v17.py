@@ -60,6 +60,9 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
+ENABLE_STRATEGY_LOWER = True # 是否實際執行 lower 模式；False 時決策為 LOWER 將直接結束程式
+ENABLE_STRATEGY_FOLLOW = False # 是否實際執行 follow 模式；False 時決策為 FOLLOW 將直接結束程式
+
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 
@@ -88,11 +91,10 @@ FORCE_CLOSE_TIME_FOLLOW = (13, 0)  # follow 收盤前強制平倉時間
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
 ENTRY_ORDER_QUANTITY_FOLLOW = 1 # follow 每次進場下單數量
 
-LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
-LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-
-FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的起始百分比
-FOLLOW_ENTRY_RANGE_END_PERCENT = 30.0 # follow 入場價距昨收到漲停的結束百分比
+ENTRY_CONFIRMATION_REQUIRED = 2 # 個股即時趨勢須連續成立的取價次數
+ENTRY_CONFIRMATION_MAX_INTERVAL_SECONDS = 20.0 # 兩次確認最大間隔，避免API中斷後沿用過期訊號
+MIN_REMAINING_PROFIT_SPACE_PERCENT_LOWER = 5.0 # lower 進場價至跌停至少保留的獲利空間(%)
+MIN_REMAINING_PROFIT_SPACE_PERCENT_FOLLOW = 5.0 # follow 進場價至漲停至少保留的獲利空間(%)
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
@@ -103,8 +105,8 @@ IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.0 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -113,11 +115,8 @@ SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數即時值不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數即時值必須嚴格大於昨收指數下跌此百分比後的位置
 
-PROFIT_BIG_BACK_STEP = 0.5 # 獲利後允許回撤多少
-PROFIT_BIG_TARGET_STEP = 1.0 # 逐步獲利
-
-PROFIT_SMALL_BACK_STEP = 0.2 # 獲利後允許回撤多少
-PROFIT_SMALL_TARGET_STEP = 0.3 # 逐步獲利
+PROFIT_BACK_STEP_PERCENT = 0.5 # 達到獲利目標後，允許從當下價格回撤的百分比
+PROFIT_TARGET_STEP_PERCENT = 1.0 # 達到獲利目標後，下一階目標距當下價格的百分比
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
@@ -248,6 +247,20 @@ def get_tick_size(price: float) -> float:
         return 5.0
 
 
+def round_to_nearest_tick(price: float) -> float:
+    """將正數價格四捨五入至最接近的台股合法 tick；正好半個 tick 時向上取整。"""
+    if price <= 0:
+        return price
+
+    tick = get_tick_size(price)
+    adjusted = math.floor(price / tick + 0.5) * tick
+    if adjusted < 100:
+        return round(adjusted, 2)
+    if adjusted < 1000:
+        return round(adjusted, 1)
+    return float(round(adjusted))
+
+
 def get_up_down_price(stock_id: str, realtime_sdk):
     code_num = stock_id.split(".")[0]
     stock = realtime_sdk.rest_client.stock
@@ -337,6 +350,14 @@ def get_entry_mode_text(entry_mode: int | None = None) -> str:
     if mode == ENTRY_MODE_LOWER:
         return "LOWER"
     return "UNKNOWN"
+
+
+def is_entry_mode_enabled(entry_mode: int) -> bool:
+    if entry_mode == ENTRY_MODE_FOLLOW:
+        return ENABLE_STRATEGY_FOLLOW
+    if entry_mode == ENTRY_MODE_LOWER:
+        return ENABLE_STRATEGY_LOWER
+    return True
 
 
 def print_close_position_log(state: Dict[str, Any]) -> None:
@@ -682,13 +703,14 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         and (not market_state.get("strategy_decision_decline_blocked"))
         and index_value <= decline_threshold
     ):
+        # 僅記錄曾回跌；決策前若重新走強且最後值高於失效門檻，FOLLOW 仍可通過。
         market_state["strategy_decision_decline_blocked"] = True
         market_state["strategy_decision_decline_time"] = event_time or now_local.isoformat()
-        MARKET_REVERSAL_STOP_EVENT.set()
-        print(
-            f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數 FOLLOW 突破後回跌，"
-            "今日 NO_TRADE，準備停止取價、關閉 WebSocket 並結束程序"
-        )
+        if not MARKET_REVERSAL_STOP_EVENT.is_set():
+            print(
+                f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數 FOLLOW 突破後回跌，"
+                "先記錄回跌；若決策前重新走強，FOLLOW 仍可恢復"
+            )
 
 
 def update_position_market_reversal_state(
@@ -892,11 +914,6 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
         )
         return ENTRY_MODE_NO_TRADE, gate_results
 
-    follow_decline_blocked = any(result["decline_blocked"] for result in gate_results)
-    if follow_decline_blocked:
-        print("[MODE] 上市或上櫃指數 FOLLOW 突破後曾回跌，今日 NO_TRADE")
-        return ENTRY_MODE_NO_TRADE, gate_results
-
     follow_mode_passed = all(result["follow_passed"] for result in gate_results)
     lower_mode_passed = all(result["lower_passed"] for result in gate_results)
 
@@ -1009,6 +1026,8 @@ def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: in
     for st in states.values():
         st["qty"] = get_entry_order_quantity()
         st["entry_time"] = now_tpe().isoformat()
+        st["entry_confirmation_count"] = 0
+        st["entry_confirmation_last_quote_time"] = None
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
 
 
@@ -1081,23 +1100,6 @@ def close_market_index_stream(stock_ws: Any) -> None:
             return
         except Exception as e:
             print(f"[WARN] 關閉盤勢指數 WebSocket {method_name}() 失敗: {e}")
-
-
-def calculate_entry_range_bounds(
-    reference_price: float,
-    limit_price: float,
-    start_percent: float,
-    end_percent: float,
-) -> tuple[float, float]:
-    """依參考價到漲跌停的百分比區間，回傳可入場價格上下界。"""
-    start_price = reference_price + (limit_price - reference_price) * (start_percent / 100.0)
-    end_price = reference_price + (limit_price - reference_price) * (end_percent / 100.0)
-    return min(start_price, end_price), max(start_price, end_price)
-
-
-def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
-    """判斷價格是否落在入場區間內，含上下界。"""
-    return lower_bound <= price <= upper_bound
 
 
 def is_market_reversal_blocked_at_entry(state: Dict[str, Any], strategy_type: str) -> bool:
@@ -1463,6 +1465,8 @@ def build_initial_state(
         "entry_fully_filled": False, # 入場成交張數是否已達原始委託張數
         "entry_fill_confirmed": False, # 是否已用 get_order_results 確認至少一筆成交
         "entry_price_source": "estimated", # estimated / order_results
+        "entry_confirmation_count": 0, # 即時個股趨勢連續成立次數
+        "entry_confirmation_last_quote_time": None, # 最近一次已納入確認的行情時間
         "flat_price": 0, # 強制平倉價格
         "stop_profit_price": limit_down_price, # 追蹤停利點（啟動後才有意義）
         "profit_price": 0, # 下一個獲利目標價
@@ -1647,58 +1651,106 @@ def get_entry_trigger_price(state: Dict[str, Any]) -> float | None:
     return None
 
 
+def reset_entry_confirmation(state: Dict[str, Any]) -> None:
+    state["entry_confirmation_count"] = 0
+
+
+def update_entry_confirmation(state: Dict[str, Any], condition_passed: bool) -> bool:
+    """每筆新行情最多計入一次；方向條件須連續成立指定次數。"""
+    quote_time = state.get("last_price_time")
+    previous_quote_time = state.get("entry_confirmation_last_quote_time")
+    if quote_time and quote_time == previous_quote_time:
+        return False
+
+    if condition_passed and int(state.get("entry_confirmation_count", 0) or 0) > 0:
+        try:
+            current_dt = datetime.fromisoformat(str(quote_time))
+            previous_dt = datetime.fromisoformat(str(previous_quote_time))
+            interval_seconds = (current_dt - previous_dt).total_seconds()
+        except (TypeError, ValueError):
+            interval_seconds = ENTRY_CONFIRMATION_MAX_INTERVAL_SECONDS + 1
+        if interval_seconds <= 0 or interval_seconds > ENTRY_CONFIRMATION_MAX_INTERVAL_SECONDS:
+            reset_entry_confirmation(state)
+
+    state["entry_confirmation_last_quote_time"] = quote_time
+
+    if condition_passed:
+        state["entry_confirmation_count"] = int(state.get("entry_confirmation_count", 0) or 0) + 1
+    else:
+        reset_entry_confirmation(state)
+    return state["entry_confirmation_count"] >= ENTRY_CONFIRMATION_REQUIRED
+
+
 def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
-    follow 模式進場條件判斷；成立時以當下 last_price 寫入 entry_trigger_price。
+    follow 模式：即時價連續高於今日開盤、均價及前次取價，且保留完整獲利空間。
     """
     now_local = now_tpe()
     if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_FOLLOW:
         return False
     if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_FOLLOW:
+        reset_entry_confirmation(state)
         return False
 
-    yesterday_close_price = state.get("yesterday_close_price")
     limit_up_price = state.get("limit_up_price")
-    if yesterday_close_price is None or limit_up_price is None:
-        return False
-
     last_price = state.get("last_price", 0)
+    open_price = state.get("open_price")
+    avg_price = state.get("avg_price")
+    pre_last_price = state.get("pre_last_price")
     best_ask_price = state.get("best_ask_price")
-    if last_price is None or best_ask_price is None:
-        return False
 
     try:
-        yesterday_close = float(yesterday_close_price)
         limit_up = float(limit_up_price)
         last_px = float(last_price)
+        open_px = float(open_price)
+        avg_px = float(avg_price)
+        pre_last_px = float(pre_last_price)
+    except (TypeError, ValueError):
+        update_entry_confirmation(state, False)
+        return False
+
+    if min(limit_up, last_px, open_px, avg_px, pre_last_px) <= 0:
+        update_entry_confirmation(state, False)
+        return False
+
+    minimum_target_price = last_px * (
+        1 + MIN_REMAINING_PROFIT_SPACE_PERCENT_FOLLOW / 100.0
+    )
+    direction_passed = (
+        last_px > open_px
+        and last_px > avg_px
+        and last_px >= pre_last_px
+        and minimum_target_price <= limit_up
+    )
+    if not update_entry_confirmation(state, direction_passed):
+        return False
+
+    print(
+        f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+        f"FOLLOW 即時趨勢連續確認 {state['entry_confirmation_count']}/"
+        f"{ENTRY_CONFIRMATION_REQUIRED}：last={last_px} open={open_px} "
+        f"avg={avg_px} pre_last={pre_last_px}"
+    )
+
+    try:
         best_ask = float(best_ask_price)
     except (TypeError, ValueError):
+        reset_entry_confirmation(state)
         return False
-
-    if last_px <= 0 or best_ask <= 0:
-        return False
-
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_up,
-        FOLLOW_ENTRY_RANGE_START_PERCENT,
-        FOLLOW_ENTRY_RANGE_END_PERCENT,
-    )
-    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        return False
-
-    if best_ask < last_px:
+    if best_ask <= 0 or best_ask < last_px:
         print(
             f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"現價已落入 follow 入場區間但最佳ask未跟上，暫不進場 "
-            f"last_price={last_px} best_ask={best_ask} "
-            f"entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
+            f"FOLLOW 趨勢已確認但最佳ask未跟上，重新累積確認 "
+            f"last_price={last_px} best_ask={best_ask}"
         )
+        reset_entry_confirmation(state)
         return False
 
     if is_market_reversal_blocked_at_entry(state, STRATEGY_FOLLOW):
+        reset_entry_confirmation(state)
         return 'BLOCKED'
     if not follow_industry_market_filter_pass(state):
+        reset_entry_confirmation(state)
         return False
 
     state["entry_trigger_price"] = last_px
@@ -1707,7 +1759,7 @@ def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
 
 def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
-    lower 模式進場條件判斷；成立時以當下 last_price 寫入 entry_trigger_price。
+    lower 模式：即時價連續低於今日開盤、均價及前次取價，且保留完整獲利空間。
 
     回傳值：
       True      — 條件成立，應進場（side 由呼叫端設定）
@@ -1718,53 +1770,68 @@ def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
     if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_LOWER:
         return False
     if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_LOWER:
+        reset_entry_confirmation(state)
         return False
 
-    yesterday_close_price = state.get("yesterday_close_price")
     limit_down_price = state.get("limit_down_price")
-    if yesterday_close_price is None or limit_down_price is None:
-        return False
-
     last_price = state.get("last_price", 0)
-    if last_price is None:
-        return False
-
+    open_price = state.get("open_price")
+    avg_price = state.get("avg_price")
+    pre_last_price = state.get("pre_last_price")
     best_bid_price = state.get("best_bid_price")
-    if best_bid_price is None:
-        return False
 
     try:
-        yesterday_close = float(yesterday_close_price)
         limit_down = float(limit_down_price)
         last_px = float(last_price)
+        open_px = float(open_price)
+        avg_px = float(avg_price)
+        pre_last_px = float(pre_last_price)
+    except (TypeError, ValueError):
+        update_entry_confirmation(state, False)
+        return False
+
+    if min(limit_down, last_px, open_px, avg_px, pre_last_px) <= 0:
+        update_entry_confirmation(state, False)
+        return False
+
+    minimum_target_price = last_px * (
+        1 - MIN_REMAINING_PROFIT_SPACE_PERCENT_LOWER / 100.0
+    )
+    direction_passed = (
+        last_px < open_px
+        and last_px < avg_px
+        and last_px <= pre_last_px
+        and minimum_target_price >= limit_down
+    )
+    if not update_entry_confirmation(state, direction_passed):
+        return False
+
+    print(
+        f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+        f"LOWER 即時趨勢連續確認 {state['entry_confirmation_count']}/"
+        f"{ENTRY_CONFIRMATION_REQUIRED}：last={last_px} open={open_px} "
+        f"avg={avg_px} pre_last={pre_last_px}"
+    )
+
+    try:
         best_bid = float(best_bid_price)
     except (TypeError, ValueError):
+        reset_entry_confirmation(state)
         return False
-
-    if last_px <= 0 or best_bid <= 0:
-        return False
-
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_down,
-        LOWER_ENTRY_RANGE_START_PERCENT,
-        LOWER_ENTRY_RANGE_END_PERCENT,
-    )
-    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        return False
-
-    if best_bid > last_px:
+    if best_bid <= 0 or best_bid > last_px:
         print(
             f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"現價已落入 lower 入場區間但最佳bid未跟上，暫不進場 "
-            f"last_price={last_px} best_bid={best_bid} "
-            f"entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
+            f"LOWER 趨勢已確認但最佳bid未跟上，重新累積確認 "
+            f"last_price={last_px} best_bid={best_bid}"
         )
+        reset_entry_confirmation(state)
         return False
 
     if is_market_reversal_blocked_at_entry(state, STRATEGY_LOWER):
+        reset_entry_confirmation(state)
         return 'BLOCKED'
     if not lower_industry_market_filter_pass(state):
+        reset_entry_confirmation(state)
         return False
 
     state["entry_trigger_price"] = last_px
@@ -1998,31 +2065,43 @@ def reached_resize_profit(state: Dict[str, Any]) -> bool:
 
 
 def _advance_profit_trail(state: Dict[str, Any]):
-    """啟動或推進追蹤停利：更新 profit_price、stop_profit_price，並設定追蹤旗標。"""
+    """以百分比啟動或推進追蹤停利，並將價格取至最接近的合法 tick。"""
     try:
         px = float(state.get("last_price"))
+        limit_up_price = float(state.get("limit_up_price"))
+        limit_down_price = float(state.get("limit_down_price"))
     except (TypeError, ValueError):
         return
 
+    if px <= 0 or limit_up_price <= 0 or limit_down_price <= 0:
+        return
+
+    target_ratio = PROFIT_TARGET_STEP_PERCENT / 100.0
+    back_ratio = PROFIT_BACK_STEP_PERCENT / 100.0
     side = state.get("side")
     if side == TRADE_SIDE_LONG:
-        if px >= 100:
-            new_profit_price = px + PROFIT_BIG_TARGET_STEP
-            new_stop_profit_price = px - PROFIT_BIG_BACK_STEP
-        else:
-            new_profit_price = px + PROFIT_SMALL_TARGET_STEP
-            new_stop_profit_price = px - PROFIT_SMALL_BACK_STEP
-        state["profit_price"] = min(new_profit_price, state.get("limit_up_price", 0))
+        new_profit_price = round_to_nearest_tick(px * (1 + target_ratio))
+        new_stop_profit_price = round_to_nearest_tick(px * (1 - back_ratio))
+        state["profit_price"] = min(new_profit_price, limit_up_price)
+        if state.get("profit_tracking_active"):
+            new_stop_profit_price = max(
+                float(state.get("stop_profit_price", new_stop_profit_price)),
+                new_stop_profit_price,
+            )
+        state["stop_profit_price"] = new_stop_profit_price
+    elif side == TRADE_SIDE_SHORT:
+        new_profit_price = round_to_nearest_tick(px * (1 - target_ratio))
+        new_stop_profit_price = round_to_nearest_tick(px * (1 + back_ratio))
+        state["profit_price"] = max(new_profit_price, limit_down_price)
+        if state.get("profit_tracking_active"):
+            new_stop_profit_price = min(
+                float(state.get("stop_profit_price", new_stop_profit_price)),
+                new_stop_profit_price,
+            )
+        state["stop_profit_price"] = new_stop_profit_price
     else:
-        if px >= 100:
-            new_profit_price = px - PROFIT_BIG_TARGET_STEP
-            new_stop_profit_price = px + PROFIT_BIG_BACK_STEP
-        else:
-            new_profit_price = px - PROFIT_SMALL_TARGET_STEP
-            new_stop_profit_price = px + PROFIT_SMALL_BACK_STEP
-        state["profit_price"] = max(new_profit_price, state.get("limit_down_price", 0))
+        return
 
-    state["stop_profit_price"] = new_stop_profit_price
     state["profit_tracking_active"] = True
     atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
 
@@ -2428,8 +2507,15 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             strategy_decision_announced = True
             if not entry_mode_decided:
                 entry_mode, gate_results = decide_entry_mode_by_market_gate()
-                apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results)
+                if not is_entry_mode_enabled(entry_mode):
+                    print(
+                        f"[MODE] {get_entry_mode_text(entry_mode)} 策略開關為 False，"
+                        "今日不執行此模式，結束程序"
+                    )
+                    persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
+                    return
+                apply_entry_mode_to_states(states, entry_mode)
                 entry_mode_decided = True
 
         entry_check_start_time = get_entry_check_start_time()
