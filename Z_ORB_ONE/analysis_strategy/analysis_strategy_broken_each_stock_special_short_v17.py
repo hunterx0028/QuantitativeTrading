@@ -29,7 +29,7 @@ STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
-INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
@@ -1531,6 +1531,8 @@ def scan_entry_signal_follow(
     1) 進場檢查時間為 STRATEGY_START_FOLLOW 到 STRATEGY_END_FOLLOW（含起訖）
     2) 取時間窗內第一根 high 落在入場區間的 K 棒作為進場 K 棒
     3) 進場價 = 進場分K棒 high
+    4) 取 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME（不含）至 STRATEGY_DECISION（不含）的最低價
+    5) 若進場分K棒 low 小於等於上述最低價，當日封單、不再尋找後續訊號
     """
     start_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
     end_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
@@ -1543,23 +1545,47 @@ def scan_entry_signal_follow(
         FOLLOW_ENTRY_RANGE_END_PERCENT,
     )
 
+    reversal_start_hm = (
+        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     time_indexed = []
     for idx, bar in enumerate(today_bars):
         dtv = bar.get('dt')
         if dtv is None:
             continue
         hm = dtv.hour * 60 + dtv.minute
+        time_indexed.append((idx, bar, hm))
+    time_indexed.sort(key=lambda item: item[1]['dt'])
+
+    decision_period_lows = [
+        float(bar['low'])
+        for _, bar, hm in time_indexed
+        if reversal_start_hm < hm < decision_hm and bar.get('low') is not None
+    ]
+    decision_period_low = min(decision_period_lows) if decision_period_lows else None
+
+    for original_idx, bar, hm in time_indexed:
+        bar_low = bar.get('low')
+        if bar_low is not None:
+            bar_low = float(bar_low)
+
         if hm < start_hm or hm > end_hm:
             continue
-        time_indexed.append((idx, bar, hm))
-
-    for original_idx, bar, _ in time_indexed:
         if bar.get('high') is None:
             continue
 
         entry_price = float(bar['high'])
         if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
             continue
+
+        if (
+            bar_low is not None
+            and decision_period_low is not None
+            and bar_low <= decision_period_low
+        ):
+            return None
 
         return bar, entry_price
     return None
