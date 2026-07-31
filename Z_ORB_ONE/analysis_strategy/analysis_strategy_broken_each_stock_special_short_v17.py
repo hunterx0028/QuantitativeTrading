@@ -1531,7 +1531,7 @@ def scan_entry_signal_follow(
     1) 進場檢查時間為 STRATEGY_START_FOLLOW 到 STRATEGY_END_FOLLOW（含起訖）
     2) 取時間窗內第一根 high 落在入場區間的 K 棒作為進場 K 棒
     3) 進場價 = 進場分K棒 high
-    4) 取 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME（不含）至 STRATEGY_DECISION（不含）的最低價
+    4) 取本日開盤至 STRATEGY_DECISION（不含）的最低價
     5) 若進場分K棒 low 小於等於上述最低價，當日封單、不再尋找後續訊號
     """
     start_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
@@ -1545,10 +1545,6 @@ def scan_entry_signal_follow(
         FOLLOW_ENTRY_RANGE_END_PERCENT,
     )
 
-    reversal_start_hm = (
-        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
-    )
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     time_indexed = []
     for idx, bar in enumerate(today_bars):
@@ -1562,7 +1558,7 @@ def scan_entry_signal_follow(
     decision_period_lows = [
         float(bar['low'])
         for _, bar, hm in time_indexed
-        if reversal_start_hm < hm < decision_hm and bar.get('low') is not None
+        if hm < decision_hm and bar.get('low') is not None
     ]
     decision_period_low = min(decision_period_lows) if decision_period_lows else None
 
