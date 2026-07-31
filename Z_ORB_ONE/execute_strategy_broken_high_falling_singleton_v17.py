@@ -76,6 +76,9 @@ STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 16)  # IX0001 早盤須先突破任一方
 
 STRATEGY_DECISION = (9, 43)  # 市場模式判斷截止時間，不含此時間
 
+ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
+ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
+
 ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
 
@@ -2449,6 +2452,20 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results)
                 entry_mode_decided = True
+                if entry_mode == ENTRY_MODE_FOLLOW and not ENABLE_ENTRY_MODE_FOLLOW:
+                    print(
+                        "[MODE] STRATEGY_DECISION 判定為 FOLLOW，但 "
+                        "ENABLE_ENTRY_MODE_FOLLOW=False，今日不執行此模式，"
+                        "準備停止取價、關閉 WebSocket 並結束程序"
+                    )
+                    return
+                if entry_mode == ENTRY_MODE_LOWER and not ENABLE_ENTRY_MODE_LOWER:
+                    print(
+                        "[MODE] STRATEGY_DECISION 判定為 LOWER，但 "
+                        "ENABLE_ENTRY_MODE_LOWER=False，今日不執行此模式，"
+                        "準備停止取價、關閉 WebSocket 並結束程序"
+                    )
+                    return
 
         entry_check_start_time = get_entry_check_start_time()
         if (
