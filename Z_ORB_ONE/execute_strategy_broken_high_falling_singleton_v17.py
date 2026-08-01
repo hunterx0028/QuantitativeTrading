@@ -1477,6 +1477,8 @@ def build_initial_state(
         "avg_price": None,
         "best_bid_price": None,
         "best_ask_price": None,
+        "follow_decision_low_price": None,
+        "follow_decision_low_time": None,
         "traded": False,
         "in_position": False,
         "side": "",  # 'SHORT' or 'LONG'
@@ -1711,6 +1713,31 @@ def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
     )
     if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
         return False
+
+    follow_decision_low_price = state.get("follow_decision_low_price")
+    try:
+        follow_decision_low = float(follow_decision_low_price)
+    except (TypeError, ValueError):
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"FOLLOW 缺少 STRATEGY_DECISION 前最低價紀錄，今日不進場"
+        )
+        return 'BLOCKED'
+
+    if follow_decision_low <= 0:
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"FOLLOW STRATEGY_DECISION 前最低價紀錄無效：{follow_decision_low_price!r}，今日不進場"
+        )
+        return 'BLOCKED'
+
+    if last_px <= follow_decision_low:
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"FOLLOW 現價小於等於 STRATEGY_DECISION 前最低價，趨勢轉向封鎖進場 "
+            f"last_price={last_px} decision_low={follow_decision_low}"
+        )
+        return 'BLOCKED'
 
     if best_ask < last_px:
         print(
@@ -2545,6 +2572,23 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
+                    if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
+                        try:
+                            low_price_float = float(low_price)
+                        except (TypeError, ValueError):
+                            low_price_float = 0.0
+                        if low_price_float > 0:
+                            previous_follow_decision_low = st.get("follow_decision_low_price")
+                            try:
+                                previous_follow_decision_low_float = float(previous_follow_decision_low)
+                            except (TypeError, ValueError):
+                                previous_follow_decision_low_float = 0.0
+                            if (
+                                previous_follow_decision_low_float <= 0
+                                or low_price_float < previous_follow_decision_low_float
+                            ):
+                                st["follow_decision_low_price"] = low_price_float
+                                st["follow_decision_low_time"] = now_tpe().isoformat()
                     # round_has_market_update = True
 
                     entry_check_end_time = get_entry_check_end_time(st)
