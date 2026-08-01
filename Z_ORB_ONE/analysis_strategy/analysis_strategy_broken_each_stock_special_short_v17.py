@@ -29,7 +29,7 @@ STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
-INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
