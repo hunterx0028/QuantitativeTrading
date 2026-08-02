@@ -1404,6 +1404,8 @@ def get_strategy_market_decision_gate_status(
         target_date,
         index_minute_bars_by_key,
     )
+    if follow_decline_blocked:
+        return GATE_NO_TRADE
 
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     final_positions_above_previous_close = []
@@ -1431,8 +1433,7 @@ def get_strategy_market_decision_gate_status(
         )
 
     if (
-        not follow_decline_blocked
-        and all(final_positions_above_previous_close)
+        all(final_positions_above_previous_close)
         and all(status == GATE_FOLLOW_PASSED for status, _ in follow_details)
     ):
         return GATE_FOLLOW_PASSED
@@ -1735,14 +1736,13 @@ def scan_entry_signal_lower(
 
 def scan_entry_signal_chance(
     today_bars: list,
-    first_bar_idx: int,
     ystats: dict,
 ):
     """
     chance 作空進場訊號：
-    1) 排除第一根K棒，MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 前若跌破昨低，取最低 low 作為有效昨低
+    1) MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 前若跌破昨低，取最低 low 作為有效昨低
     2) 自 STRATEGY_START_CHANCE ~ STRATEGY_END_CHANCE 監控分K（含起訖）
-    3) 任一根分K low < 有效昨低，且該棒 low <= 前一根分K low
+    3) 任一根分K low < 有效昨低
     4) 進場價 = 觸發分K棒 low
     """
     buffer_end_hm = (
@@ -1753,9 +1753,7 @@ def scan_entry_signal_chance(
     end_hm = STRATEGY_END_CHANCE[0] * 60 + STRATEGY_END_CHANCE[1]
     yesterday_low = float(ystats['low'])
 
-    for idx, bar in enumerate(today_bars):
-        if idx == first_bar_idx:
-            continue
+    for bar in today_bars:
         dtv = bar.get('dt')
         if dtv is None:
             continue
@@ -1778,18 +1776,16 @@ def scan_entry_signal_chance(
         return ENTRY_BLOCKED
 
     time_indexed = []
-    for idx, bar in enumerate(today_bars):
+    for bar in today_bars:
         dtv = bar.get('dt')
         if dtv is None:
             continue
         hm = dtv.hour * 60 + dtv.minute
         if hm < start_hm or hm > end_hm:
             continue
-        time_indexed.append((idx, bar, hm))
+        time_indexed.append(bar)
 
-    for original_idx, bar, _ in time_indexed:
-        if original_idx == first_bar_idx:
-            continue
+    for bar in time_indexed:
         bar_low = float(bar['low'])
         if bar_low >= yesterday_low:
             continue
@@ -1802,17 +1798,7 @@ def scan_entry_signal_chance(
         ):
             return ENTRY_BLOCKED
 
-        previous_bar_low = (
-            float(today_bars[original_idx - 1].get('low', 0) or 0.0)
-            if original_idx > 0
-            else None
-        )
-        if (
-            previous_bar_low is not None
-            and bar_low <= previous_bar_low
-        ):
-            return bar, entry_price
-        return ENTRY_BLOCKED
+        return bar, entry_price
     return None
 
 
@@ -2376,7 +2362,6 @@ def find_trade_candidate_on_date(
     elif strategy_type == STRATEGY_CHANCE:
         pair = scan_entry_signal_chance(
             today_bars,
-            first_bar_idx,
             ystats,
         )
         intraday_compare_end = INTRADAY_COMPARE_END_CHANCE

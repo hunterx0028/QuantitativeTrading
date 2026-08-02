@@ -46,19 +46,24 @@ TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 MAIN_START_TIME = (8, 55)  # 主程序開始執行時間；提早啟動時等待至此時間
-REALTIME_QUOTE_START_TIME = (9, 10)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 GATE_LOWER_PASSED = 'LOWER_PASSED'
 GATE_FOLLOW_PASSED = 'FOLLOW_PASSED'
+GATE_CHANCE_PASSED = 'CHANCE_PASSED'
 GATE_NOT_PASSED = 'NOT_PASSED'
 GATE_NO_TRADE = 'NO_TRADE'
 STRATEGY_LOWER = 'LOWER'
 STRATEGY_FOLLOW = 'FOLLOW'
+STRATEGY_CHANCE = 'CHANCE'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
+
+ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
+ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
+ENABLE_ENTRY_MODE_CHANCE = True  # False 時，STRATEGY_DECISION 判定為 CHANCE 後立即結束程序
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -66,30 +71,35 @@ OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表�
 OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
 
+OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
+OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
+
 PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利百分比
 
+REALTIME_QUOTE_START_TIME = (9, 3)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
+
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側的 NO_TRADE 檢查起始時間（含）
-ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 
 STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 16)  # IX0001 早盤須先突破任一方向的截止時間（含）
 
 STRATEGY_DECISION = (9, 43)  # 市場模式判斷截止時間，不含此時間
 
-ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
-ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
-
 ENTRY_CHECK_START_TIME_LOWER = (9, 44)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_START_TIME_FOLLOW = (9, 44)  # follow 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_CHANCE = (9, 44)  # chance 進場檢核開始時間（含）
 
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 ENTRY_CHECK_END_TIME_FOLLOW = (10, 1)  # follow 進場檢核截止時間（含）
+ENTRY_CHECK_END_TIME_CHANCE = (10, 1)  # chance 進場檢核截止時間（含）
 
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
 FORCE_CLOSE_TIME_FOLLOW = (13, 0)  # follow 收盤前強制平倉時間
+FORCE_CLOSE_TIME_CHANCE = (13, 0)  # chance 收盤前強制平倉時間
 
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
 ENTRY_ORDER_QUANTITY_FOLLOW = 1 # follow 每次進場下單數量
+ENTRY_ORDER_QUANTITY_CHANCE = 1 # chance 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
@@ -109,8 +119,7 @@ IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0001 回跌失效門�
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
-BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
-SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
+IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0 # chance 門檻：IX0001 開盤至 STRATEGY_DECISION 前 high-low 價差不可超過昨收此百分比
 
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數即時值不可高於昨收指數上漲此百分比後的位置
@@ -121,6 +130,11 @@ PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
 
 MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
 MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
+
+BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
+SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
+
+ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
@@ -139,6 +153,7 @@ POSITION_MARKET_REVERSAL_STATE: Dict[str, Any] = {
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_FOLLOW = 1
 ENTRY_MODE_LOWER = 2
+ENTRY_MODE_CHANCE = 3
 stock_data.entry_mode = ENTRY_MODE_NO_TRADE
 
 # ============ 下單函式 ============
@@ -305,6 +320,8 @@ def validate_market_reversal_time_config() -> None:
         + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
     )
     strategy_decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    entry_start_chance_hm = ENTRY_CHECK_START_TIME_CHANCE[0] * 60 + ENTRY_CHECK_START_TIME_CHANCE[1]
+    entry_end_chance_hm = ENTRY_CHECK_END_TIME_CHANCE[0] * 60 + ENTRY_CHECK_END_TIME_CHANCE[1]
     if not (0 <= early_breakout_deadline_hm <= 23 * 60 + 59):
         raise ValueError(
             "STRATEGY_EARLY_BREAKOUT_DEADLINE 設定錯誤，需介於 00:00~23:59"
@@ -326,6 +343,16 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 STRATEGY_DECISION"
         )
+    if not (0 <= entry_start_chance_hm <= 23 * 60 + 59):
+        raise ValueError("ENTRY_CHECK_START_TIME_CHANCE 設定錯誤，需介於 00:00~23:59")
+    if not (0 <= entry_end_chance_hm <= 23 * 60 + 59):
+        raise ValueError("ENTRY_CHECK_END_TIME_CHANCE 設定錯誤，需介於 00:00~23:59")
+    if entry_start_chance_hm >= entry_end_chance_hm:
+        raise ValueError("ENTRY_CHECK_START_TIME_CHANCE 必須早於 ENTRY_CHECK_END_TIME_CHANCE")
+    if entry_start_chance_hm < strategy_decision_hm:
+        raise ValueError("ENTRY_CHECK_START_TIME_CHANCE 不可早於 STRATEGY_DECISION")
+    if IX0001_CHANCE_MAX_RANGE_PERCENT < 0:
+        raise ValueError("IX0001_CHANCE_MAX_RANGE_PERCENT 不可小於 0")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -336,6 +363,8 @@ def get_entry_mode_text(entry_mode: int | None = None) -> str:
         return "FOLLOW"
     if mode == ENTRY_MODE_LOWER:
         return "LOWER"
+    if mode == ENTRY_MODE_CHANCE:
+        return "CHANCE"
     return "UNKNOWN"
 
 
@@ -591,6 +620,21 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         return
 
     market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
+    now_hm = now_local.hour * 60 + now_local.minute
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    if (
+        market_key == "TWSE:MARKET"
+        and 9 * 60 <= now_hm < decision_hm
+    ):
+        previous_chance_high = market_state.get("chance_decision_high")
+        previous_chance_low = market_state.get("chance_decision_low")
+        if previous_chance_high is None or index_value > float(previous_chance_high):
+            market_state["chance_decision_high"] = index_value
+            market_state["chance_decision_high_time"] = event_time or now_local.isoformat()
+        if previous_chance_low is None or index_value < float(previous_chance_low):
+            market_state["chance_decision_low"] = index_value
+            market_state["chance_decision_low_time"] = event_time or now_local.isoformat()
+
     if (now_local.hour, now_local.minute) >= MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME:
         if not MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.is_set():
             MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.set()
@@ -611,10 +655,9 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         ):
             market_state["previous_close_reversal_blocked"] = True
             market_state["previous_close_reversal_time"] = event_time or now_local.isoformat()
-            MARKET_REVERSAL_STOP_EVENT.set()
             print(
                 f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數已檢核到上下穿越昨收，"
-                "今日 NO_TRADE，準備停止取價、關閉 WebSocket 並結束程序"
+                "將於 STRATEGY_DECISION fallback 檢查 CHANCE/NO_TRADE"
             )
 
     if (
@@ -638,7 +681,6 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
         MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
         + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
     )
-    now_hm = now_local.hour * 60 + now_local.minute
     if (
         market_key == "TWSE:MARKET"
         and now_hm >= early_breakout_start_hm
@@ -794,13 +836,19 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         "early_breakout_passed": bool(market_state.get("early_breakout_passed")),
         "early_breakout_side": market_state.get("early_breakout_side"),
         "early_breakout_time": market_state.get("early_breakout_time"),
+        "chance_decision_high": market_state.get("chance_decision_high"),
+        "chance_decision_low": market_state.get("chance_decision_low"),
+        "chance_decision_high_time": market_state.get("chance_decision_high_time"),
+        "chance_decision_low_time": market_state.get("chance_decision_low_time"),
         "passed": False,
         "lower_passed": False,
         "follow_passed": False,
+        "chance_passed": False,
         "final_above_previous_close": False,
         "final_below_previous_close": False,
         "lower_reason": "",
         "follow_reason": "",
+        "chance_reason": "",
     }
 
     if not index_config.get("symbol"):
@@ -852,6 +900,8 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
 
     if not result["raised"]:
         result["follow_reason"] = "未突破啟動門檻"
+    elif result["decline_blocked"]:
+        result["follow_reason"] = "突破後曾回跌至失效門檻"
     elif last_index_float <= result["decline_threshold"]:
         result["follow_reason"] = "決策時已回跌至失效門檻"
     elif not result["final_above_previous_close"]:
@@ -864,6 +914,38 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
     return result
 
 
+def get_chance_gate_result(gate_results: list[Dict[str, Any]]) -> tuple[bool, str]:
+    ix0001_result = next(
+        (result for result in gate_results if result["index_key"] == "TWSE:MARKET"),
+        None,
+    )
+    if ix0001_result is None:
+        return False, "缺少 IX0001 gate 結果"
+
+    try:
+        previous_close = float(ix0001_result.get("previous_close"))
+        chance_high = float(ix0001_result.get("chance_decision_high"))
+        chance_low = float(ix0001_result.get("chance_decision_low"))
+    except (TypeError, ValueError):
+        return False, "IX0001 chance 資料不足"
+
+    if previous_close <= 0:
+        return False, "IX0001 昨收無效"
+
+    if chance_high <= previous_close:
+        return False, "IX0001 決策前 high 未高於昨收"
+
+    max_allowed_range = previous_close * (IX0001_CHANCE_MAX_RANGE_PERCENT / 100.0)
+    actual_range = chance_high - chance_low
+    if actual_range > max_allowed_range:
+        return (
+            False,
+            f"IX0001 決策前波動過大 range={actual_range:.2f} > {max_allowed_range:.2f}",
+        )
+
+    return True, "通過"
+
+
 def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
     gate_results = [
         get_market_strategy_decision_gate_result(index_key)
@@ -874,23 +956,34 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
         (result for result in gate_results if result["index_key"] == "TWSE:MARKET"),
         None,
     )
+    def fallback_chance_or_no_trade(reason: str) -> tuple[int, list[Dict[str, Any]]]:
+        chance_passed, chance_reason = get_chance_gate_result(gate_results)
+        if ix0001_result is not None:
+            ix0001_result["chance_passed"] = chance_passed
+            ix0001_result["chance_reason"] = chance_reason
+        if chance_passed:
+            print(f"[MODE] {reason}，fallback 判定為 CHANCE")
+            return ENTRY_MODE_CHANCE, gate_results
+        print(f"[MODE] {reason}，CHANCE 不成立：{chance_reason}")
+        return ENTRY_MODE_NO_TRADE, gate_results
+
     if ix0001_result is None or not ix0001_result.get("early_breakout_passed"):
         print(
-            "[MODE] IX0001 未於早盤截止時間前突破任一方向，今日 NO_TRADE "
+            "[MODE] IX0001 未於早盤截止時間前突破任一方向 "
             f"(截止 {STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:"
             f"{STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d})"
         )
-        return ENTRY_MODE_NO_TRADE, gate_results
+        return fallback_chance_or_no_trade("IX0001 未於早盤截止時間前突破任一方向")
 
     reversal_blocked = any(result["previous_close_reversal_blocked"] for result in gate_results)
     if reversal_blocked:
         print(
-            "[MODE] 上市或上櫃指數在指定時段曾位於昨收上下兩側，今日 NO_TRADE "
+            "[MODE] 上市或上櫃指數在指定時段曾位於昨收上下兩側 "
             f"({MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:"
             f"{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}~"
             f"{STRATEGY_DECISION[0]:02d}:{STRATEGY_DECISION[1]:02d})"
         )
-        return ENTRY_MODE_NO_TRADE, gate_results
+        return fallback_chance_or_no_trade("上市或上櫃指數在指定時段曾位於昨收上下兩側")
 
     follow_decline_blocked = any(result["decline_blocked"] for result in gate_results)
     if follow_decline_blocked:
@@ -907,27 +1000,11 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
         return ENTRY_MODE_FOLLOW, gate_results
     if lower_mode_passed:
         return ENTRY_MODE_LOWER, gate_results
-    return ENTRY_MODE_NO_TRADE, gate_results
+    return fallback_chance_or_no_trade("LOWER/FOLLOW 未成立")
 
 
 def stop_if_ix0001_early_breakout_missing() -> bool:
-    now_local = now_tpe()
-    if (now_local.hour, now_local.minute) <= STRATEGY_EARLY_BREAKOUT_DEADLINE:
-        return False
-
-    ix0001_state = MARKET_INDEX_STATE.get("TWSE:MARKET", {})
-    if ix0001_state.get("early_breakout_passed"):
-        return False
-
-    print(
-        "[MODE] IX0001 未於早盤截止時間前突破任一方向，今日 NO_TRADE，"
-        "準備停止取價、關閉 WebSocket 並結束程序 "
-        f"(截止 {STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:"
-        f"{STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d})"
-    )
-    persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
-    MARKET_REVERSAL_STOP_EVENT.set()
-    return True
+    return False
 
 
 def format_market_gate_value(value: Any) -> str:
@@ -1001,6 +1078,18 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
             f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_time={format_market_gate_time(result.get('decline_time'))} "
             f"follow_passed={result.get('follow_passed')}"
+        )
+    for result in gate_results:
+        if result["index_key"] != "TWSE:MARKET":
+            continue
+        print(
+            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
+            f"chance_high={format_market_gate_value(result.get('chance_decision_high'))} "
+            f"chance_low={format_market_gate_value(result.get('chance_decision_low'))} "
+            f"chance_high_time={format_market_gate_time(result.get('chance_decision_high_time'))} "
+            f"chance_low_time={format_market_gate_time(result.get('chance_decision_low_time'))} "
+            f"chance_passed={result.get('chance_passed')} "
+            f"chance_reason={result.get('chance_reason') or '--'}"
         )
 
 
@@ -1479,6 +1568,8 @@ def build_initial_state(
         "best_ask_price": None,
         "follow_decision_low_price": None,
         "follow_decision_low_time": None,
+        "chance_effective_yesterday_low_price": v3,
+        "chance_effective_yesterday_low_time": None,
         "traded": False,
         "in_position": False,
         "side": "",  # 'SHORT' or 'LONG'
@@ -1541,7 +1632,7 @@ def get_current_entry_mode() -> int:
         entry_mode = int(getattr(stock_data, "entry_mode", ENTRY_MODE_NO_TRADE))
     except (TypeError, ValueError):
         return ENTRY_MODE_NO_TRADE
-    if entry_mode in (ENTRY_MODE_NO_TRADE, ENTRY_MODE_FOLLOW, ENTRY_MODE_LOWER):
+    if entry_mode in (ENTRY_MODE_NO_TRADE, ENTRY_MODE_FOLLOW, ENTRY_MODE_LOWER, ENTRY_MODE_CHANCE):
         return entry_mode
     return ENTRY_MODE_NO_TRADE
 
@@ -1554,9 +1645,15 @@ def is_lower_mode() -> bool:
     return get_current_entry_mode() == ENTRY_MODE_LOWER
 
 
+def is_chance_mode() -> bool:
+    return get_current_entry_mode() == ENTRY_MODE_CHANCE
+
+
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if is_follow_mode():
         return OPTIMIZE_LOSS_PER_FOLLOW, OPTIMIZE_PROFIT_PER_FOLLOW
+    if is_chance_mode():
+        return OPTIMIZE_LOSS_PER_CHANCE, OPTIMIZE_PROFIT_PER_CHANCE
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
     return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
@@ -1569,6 +1666,8 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_follow_mode():
         return FORCE_CLOSE_TIME_FOLLOW
+    if is_chance_mode():
+        return FORCE_CLOSE_TIME_CHANCE
     if is_lower_mode():
         return FORCE_CLOSE_TIME_LOWER
     return FORCE_CLOSE_TIME_LOWER
@@ -1577,6 +1676,8 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
     if is_follow_mode():
         return ENTRY_ORDER_QUANTITY_FOLLOW
+    if is_chance_mode():
+        return ENTRY_ORDER_QUANTITY_CHANCE
     if is_lower_mode():
         return ENTRY_ORDER_QUANTITY_LOWER
     return 0
@@ -1635,6 +1736,8 @@ def should_skip_entry_by_limit_up_zone(
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if is_follow_mode():
         return ENTRY_CHECK_END_TIME_FOLLOW
+    if is_chance_mode():
+        return ENTRY_CHECK_END_TIME_CHANCE
     if is_lower_mode():
         return ENTRY_CHECK_END_TIME_LOWER
     return STRATEGY_DECISION
@@ -1643,13 +1746,15 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_follow_mode():
         return ENTRY_CHECK_START_TIME_FOLLOW
+    if is_chance_mode():
+        return ENTRY_CHECK_START_TIME_CHANCE
     if is_lower_mode():
         return ENTRY_CHECK_START_TIME_LOWER
     return STRATEGY_DECISION
 
 
 def get_latest_entry_check_end_time() -> tuple[int, int]:
-    return max(ENTRY_CHECK_END_TIME_FOLLOW, ENTRY_CHECK_END_TIME_LOWER)
+    return max(ENTRY_CHECK_END_TIME_FOLLOW, ENTRY_CHECK_END_TIME_LOWER, ENTRY_CHECK_END_TIME_CHANCE)
 
 
 def get_entry_trigger_reference_price(state: Dict[str, Any]) -> float | None:
@@ -1823,6 +1928,78 @@ def entry_lower_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
     return True
 
 
+def entry_chance_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
+    """
+    chance 模式進場條件判斷；成立時以當下 last_price 寫入 entry_trigger_price。
+    """
+    now_local = now_tpe()
+    if (now_local.hour, now_local.minute) < ENTRY_CHECK_START_TIME_CHANCE:
+        return False
+    if (now_local.hour, now_local.minute) > ENTRY_CHECK_END_TIME_CHANCE:
+        return False
+
+    effective_low_price = state.get("chance_effective_yesterday_low_price")
+    limit_down_price = state.get("limit_down_price")
+    last_price = state.get("last_price", 0)
+    best_bid_price = state.get("best_bid_price")
+    if effective_low_price is None or limit_down_price is None or last_price is None or best_bid_price is None:
+        return False
+
+    try:
+        effective_low = float(effective_low_price)
+        limit_down = float(limit_down_price)
+        last_px = float(last_price)
+        best_bid = float(best_bid_price)
+    except (TypeError, ValueError):
+        return False
+
+    if effective_low <= 0 or limit_down <= 0 or last_px <= 0 or best_bid <= 0:
+        return False
+
+    entry_tick = get_tick_size(effective_low)
+    entry_probe_price = max(effective_low - entry_tick, 0.0)
+    if should_skip_entry_by_limit_down_zone(
+        entry_probe_price,
+        effective_low,
+        limit_down,
+    ):
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"CHANCE 跌破有效昨低後將過於接近跌停，今日不進場 "
+            f"effective_low={effective_low:.2f} limit_down={limit_down:.2f}"
+        )
+        return 'BLOCKED'
+
+    if last_px >= effective_low:
+        return False
+
+    if should_skip_entry_by_limit_down_zone(
+        last_px,
+        effective_low,
+        limit_down,
+    ):
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"CHANCE 觸發價過於接近跌停，今日不進場 "
+            f"last_price={last_px:.2f} effective_low={effective_low:.2f} limit_down={limit_down:.2f}"
+        )
+        return 'BLOCKED'
+
+    if best_bid > last_px:
+        print(
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"現價已跌破 chance 有效昨低但最佳bid未跟上，暫不進場 "
+            f"last_price={last_px} best_bid={best_bid} effective_low={effective_low}"
+        )
+        return False
+
+    if not lower_industry_market_filter_pass(state):
+        return False
+
+    state["entry_trigger_price"] = last_px
+    return True
+
+
 def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
     依 entry_mode 分派進場條件判斷。
@@ -1835,6 +2012,8 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
         return 'BLOCKED'
     if is_follow_mode():
         return entry_follow_mode_price_check(state, realtime_sdk)
+    if is_chance_mode():
+        return entry_chance_mode_price_check(state, realtime_sdk)
     if is_lower_mode():
         return entry_lower_mode_price_check(state, realtime_sdk)
     return 'BLOCKED'
@@ -2493,6 +2672,13 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         "準備停止取價、關閉 WebSocket 並結束程序"
                     )
                     return
+                if entry_mode == ENTRY_MODE_CHANCE and not ENABLE_ENTRY_MODE_CHANCE:
+                    print(
+                        "[MODE] STRATEGY_DECISION 判定為 CHANCE，但 "
+                        "ENABLE_ENTRY_MODE_CHANCE=False，今日不執行此模式，"
+                        "準備停止取價、關閉 WebSocket 並結束程序"
+                    )
+                    return
 
         entry_check_start_time = get_entry_check_start_time()
         if (
@@ -2572,6 +2758,23 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
+                    if (now_local.hour, now_local.minute) <= MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME:
+                        try:
+                            low_price_float = float(low_price)
+                        except (TypeError, ValueError):
+                            low_price_float = 0.0
+                        if low_price_float > 0:
+                            previous_effective_low = st.get("chance_effective_yesterday_low_price")
+                            try:
+                                previous_effective_low_float = float(previous_effective_low)
+                            except (TypeError, ValueError):
+                                previous_effective_low_float = float(st.get("yesterday_low_price", 0) or 0)
+                            if (
+                                previous_effective_low_float <= 0
+                                or low_price_float < previous_effective_low_float
+                            ):
+                                st["chance_effective_yesterday_low_price"] = low_price_float
+                                st["chance_effective_yesterday_low_time"] = now_tpe().isoformat()
                     if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
                         try:
                             low_price_float = float(low_price)
