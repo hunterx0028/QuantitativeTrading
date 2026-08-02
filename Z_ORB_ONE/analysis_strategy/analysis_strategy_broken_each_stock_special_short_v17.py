@@ -33,8 +33,8 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = False
-INCLUDE_FOLLOW_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_FOLLOW_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
@@ -62,9 +62,9 @@ STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 16) # IX0001 早盤須先突破任一方�
 
 STRATEGY_DECISION = (9, 43) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 
-STRATEGY_START_LOWER = (9, 46) # lower 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_FOLLOW = (9, 46) # follow 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_CHANCE = (9, 46) # chance 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 STRATEGY_END_FOLLOW = (10, 1) # follow 策略可進場截止分k棒的(時, 分)，預設沿用 chance
@@ -88,6 +88,9 @@ IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門�
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
+
+# chance 門檻：IX0001 開盤至 STRATEGY_DECISION 前 high-low 價差不可超過昨收此百分比
+IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0
 
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
@@ -1174,31 +1177,39 @@ def has_ix0001_early_strategy_breakout(
     return False
 
 
-def has_ix0001_low_reached_previous_close_before_decision(
+def has_ix0001_lows_held_above_effective_previous_close_before_decision(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> bool:
-    """IX0001 自開盤至模式判別時間前，low 曾達到或站上昨收即回傳 True。"""
+    """IX0001 自昨收兩側檢查起始時間至模式判別時間前，所有 low 都嚴格高於有效昨收即回傳 True。"""
     index_key = 'TWSE:MARKET'
     bars_by_date = index_minute_bars_by_key.get(index_key, {})
-    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-    if previous_close is None:
+    effective_previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if effective_previous_close is None:
         return False
 
+    start_hm = (
+        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    has_required_low = False
     for bar in today_bars:
         bar_dt = bar.get('dt')
         if bar_dt is None:
             continue
         bar_hm = bar_dt.hour * 60 + bar_dt.minute
-        if bar_hm < 9 * 60 or bar_hm >= decision_hm:
+        if bar_hm < start_hm or bar_hm >= decision_hm:
             continue
 
         low = bar.get('low')
-        if low is not None and float(low) >= previous_close:
-            return True
-    return False
+        if low is None:
+            continue
+        has_required_low = True
+        if float(low) <= effective_previous_close:
+            return False
+    return has_required_low
 
 
 def has_ix0001_dropped_below_lower_threshold_before_decision(
@@ -1230,22 +1241,86 @@ def has_ix0001_dropped_below_lower_threshold_before_decision(
     return False
 
 
+def has_ix0001_high_above_previous_close_before_decision(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """IX0001 自開盤至模式判別時間前，high 曾嚴格高於昨收即回傳 True。"""
+    index_key = 'TWSE:MARKET'
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if previous_close is None:
+        return False
+
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    for bar in today_bars:
+        bar_dt = bar.get('dt')
+        if bar_dt is None:
+            continue
+        bar_hm = bar_dt.hour * 60 + bar_dt.minute
+        if bar_hm < 9 * 60 or bar_hm >= decision_hm:
+            continue
+
+        high = bar.get('high')
+        if high is not None and float(high) > previous_close:
+            return True
+    return False
+
+
+def is_ix0001_chance_range_too_wide_before_decision(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """IX0001 自開盤至模式判別時間前 high-low 價差超過 chance 上限即回傳 True。"""
+    index_key = 'TWSE:MARKET'
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if previous_close is None:
+        return True
+
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    highs = []
+    lows = []
+    for bar in today_bars:
+        bar_dt = bar.get('dt')
+        if bar_dt is None:
+            continue
+        bar_hm = bar_dt.hour * 60 + bar_dt.minute
+        if bar_hm < 9 * 60 or bar_hm >= decision_hm:
+            continue
+
+        high = bar.get('high')
+        low = bar.get('low')
+        if high is None or low is None:
+            continue
+        highs.append(float(high))
+        lows.append(float(low))
+
+    if not highs or not lows:
+        return True
+
+    max_allowed_range = previous_close * (IX0001_CHANCE_MAX_RANGE_PERCENT / 100.0)
+    return (max(highs) - min(lows)) > max_allowed_range
+
+
 def get_chance_or_no_trade_gate_status(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> str:
-    """回傳 CHANCE 是否成立；IX0001 過弱或曾跌破 lower 門檻時不交易。"""
-    if has_ix0001_dropped_below_lower_threshold_before_decision(
+    """回傳 CHANCE gate 狀態。"""
+    if not has_ix0001_high_above_previous_close_before_decision(
         target_date,
         index_minute_bars_by_key,
     ):
         return GATE_NO_TRADE
-    if has_ix0001_low_reached_previous_close_before_decision(
+    if is_ix0001_chance_range_too_wide_before_decision(
         target_date,
         index_minute_bars_by_key,
     ):
-        return GATE_CHANCE_PASSED
-    return GATE_NO_TRADE
+        return GATE_NO_TRADE
+    return GATE_CHANCE_PASSED
 
 
 def has_strategy_market_follow_decline_block(
@@ -2838,6 +2913,9 @@ def main() -> None:
             sys.exit(1)
         if IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW < 0:
             print('[ERROR] IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0001_CHANCE_MAX_RANGE_PERCENT < 0:
+            print('[ERROR] IX0001_CHANCE_MAX_RANGE_PERCENT 不可小於 0', file=sys.stderr)
             sys.exit(1)
 
         best_window_result = evaluate_one_window()

@@ -11,6 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.backends.backend_pdf import PdfPages
@@ -233,6 +234,20 @@ def style_inside_right_y_ticks(ax, labelsize: int = 8, pad: int = -10):
         label.set_horizontalalignment("right")
 
 
+def apply_plain_price_y_axis(ax, value_formatter):
+    ax.yaxis.get_offset_text().set_visible(False)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, _pos: value_formatter(value))
+    )
+
+
+def apply_plain_volume_y_axis(ax):
+    ax.yaxis.get_offset_text().set_visible(False)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, _pos: f"{int(round(value)):,}")
+    )
+
+
 def intraday_touches_level(highs, lows, level: float | None) -> bool:
     if level is None:
         return False
@@ -299,7 +314,9 @@ def draw_intraday_ohlc(
     prev_low_loc: float | None = None,
     prev_close_loc: float | None = None,
     show_limit_prices: bool = True,
+    show_prev_open_line: bool = True,
     show_prev_high_line: bool = True,
+    show_prev_low_line: bool = True,
     value_formatter=format_tw_price,
 ):
     """繪製單一商品的當日分K OHLC 與下方成交量長條圖。"""
@@ -423,7 +440,10 @@ def draw_intraday_ohlc(
             pad = max((merged_max - merged_min) * 0.02, 1.0)
             ax.set_ylim(merged_min - pad, merged_max + pad)
 
-    if level_in_axis_range(ax, prev_open_loc):
+    apply_plain_price_y_axis(ax, value_formatter)
+    apply_plain_volume_y_axis(volume_ax)
+
+    if show_prev_open_line and level_in_axis_range(ax, prev_open_loc):
         ax.axhline(
             y=prev_open_loc,
             color="purple",
@@ -453,7 +473,7 @@ def draw_intraday_ohlc(
             label="昨日最高"
         )
 
-    if level_in_axis_range(ax, prev_low_loc):
+    if show_prev_low_line and level_in_axis_range(ax, prev_low_loc):
         ax.axhline(
             y=prev_low_loc,
             color="green",
@@ -515,7 +535,7 @@ def main():
 
     # ========= 批次產圖：全部寫入同一個 PDF =========
     with PdfPages(out_pdf_path) as pdf:
-        for item in report_items:
+        for item_index, item in enumerate(report_items):
             fig, (price_ax, volume_ax) = plt.subplots(
                 2,
                 1,
@@ -548,18 +568,22 @@ def main():
                 plt.close(fig)
                 print(f"[WARN] Skip {code}: {exc}")
                 continue
+            simplify_reference_lines = item_index < 2
             title_parts = [
                 f"{item_label} 前日:{prev_trade_date.strftime('%Y-%m-%d')}",
-                f"昨開:{value_formatter(prev_open_price)}",
             ]
-            if not is_index:
-                title_parts.append(f"昨高:{value_formatter(prev_high_price)}")
-            title_parts.extend(
-                [
-                    f"昨低:{value_formatter(prev_low_price)}",
-                    f"昨收:{value_formatter(prev_close_price)}",
-                ]
-            )
+            if simplify_reference_lines:
+                title_parts.append(f"昨收:{value_formatter(prev_close_price)}")
+            else:
+                title_parts.append(f"昨開:{value_formatter(prev_open_price)}")
+                if not is_index:
+                    title_parts.append(f"昨高:{value_formatter(prev_high_price)}")
+                title_parts.extend(
+                    [
+                        f"昨低:{value_formatter(prev_low_price)}",
+                        f"昨收:{value_formatter(prev_close_price)}",
+                    ]
+                )
             title = " ".join(title_parts)
 
             print(
@@ -579,7 +603,9 @@ def main():
                 prev_low_loc=prev_low_price,
                 prev_close_loc=prev_close_price,
                 show_limit_prices=not is_index,
-                show_prev_high_line=not is_index,
+                show_prev_open_line=not simplify_reference_lines,
+                show_prev_high_line=(not is_index) and (not simplify_reference_lines),
+                show_prev_low_line=not simplify_reference_lines,
                 value_formatter=value_formatter,
             )
 

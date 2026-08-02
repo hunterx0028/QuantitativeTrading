@@ -79,8 +79,8 @@ STRATEGY_DECISION = (9, 43)  # 市場模式判斷截止時間，不含此時間
 ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 
-ENTRY_CHECK_START_TIME_LOWER = (9, 46)  # lower 進場檢核開始時間（含）
-ENTRY_CHECK_START_TIME_FOLLOW = (9, 46)  # follow 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_LOWER = (9, 44)  # lower 進場檢核開始時間（含）
+ENTRY_CHECK_START_TIME_FOLLOW = (9, 44)  # follow 進場檢核開始時間（含）
 
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 ENTRY_CHECK_END_TIME_FOLLOW = (10, 1)  # follow 進場檢核截止時間（含）
