@@ -279,20 +279,6 @@ def style_inside_right_y_ticks(ax, labelsize: int = 8, pad: int = -10):
         label.set_horizontalalignment("right")
 
 
-def intraday_touches_level(highs, lows, level: float | None) -> bool:
-    if level is None:
-        return False
-    return any(low <= level <= high for low, high in zip(lows, highs))
-
-
-def level_in_axis_range(ax, level: float | None) -> bool:
-    if level is None:
-        return False
-    ymin, ymax = ax.get_ylim()
-    lower, upper = sorted((ymin, ymax))
-    return lower <= level <= upper
-
-
 def add_bracket(ax, x_center, y, x_half_width, y_bump, direction="up", lw=1.6, y_offset=0.0):
     x0 = x_center - x_half_width
     x2 = x_center + x_half_width
@@ -342,7 +328,6 @@ def draw_intraday_ohlc(
     atr_value: float | None = None,
     prev_open_loc: float | None = None,
     prev_high_loc: float | None = None,
-    prev_low_loc: float | None = None,
     prev_close_loc: float | None = None,
     show_limit_prices: bool = True,
     value_formatter=format_tw_price,
@@ -478,16 +463,6 @@ def draw_intraday_ohlc(
             label="昨日收盤"
         )
 
-    if level_in_axis_range(ax, prev_low_loc):
-        ax.axhline(
-            y=prev_low_loc,
-            color="green",
-            linestyle="--",
-            linewidth=1.0, # 昨日最低線的寬度這裡改
-            alpha=0.8,
-            label="昨日最低"
-        )
-
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.legend(
@@ -529,7 +504,6 @@ def build_index_figure(rest_stock, index_code: str, target_date: date) -> tuple[
         f"{index_label} 前日:{prev_trade_date.strftime('%Y-%m-%d')} "
         f"昨開:{format_index_value(prev_open_price)} "
         f"昨高:{format_index_value(prev_high_price)} "
-        f"昨低:{format_index_value(prev_low_price)} "
         f"昨收:{format_index_value(prev_close_price)}"
     )
 
@@ -546,7 +520,6 @@ def build_index_figure(rest_stock, index_code: str, target_date: date) -> tuple[
         fig_title=title,
         prev_open_loc=prev_open_price,
         prev_high_loc=prev_high_price,
-        prev_low_loc=prev_low_price,
         prev_close_loc=prev_close_price,
         show_limit_prices=False,
         value_formatter=format_index_value,
