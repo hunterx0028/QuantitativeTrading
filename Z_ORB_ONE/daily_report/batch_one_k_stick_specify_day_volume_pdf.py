@@ -299,6 +299,7 @@ def draw_intraday_ohlc(
     prev_low_loc: float | None = None,
     prev_close_loc: float | None = None,
     show_limit_prices: bool = True,
+    show_prev_high_line: bool = True,
     value_formatter=format_tw_price,
 ):
     """繪製單一商品的當日分K OHLC 與下方成交量長條圖。"""
@@ -341,12 +342,27 @@ def draw_intraday_ohlc(
     tick_width_min = dx_base_i * 0.35
 
     open_text = value_formatter(opens_i[0]) if opens_i else "N/A"
+    close_text = value_formatter(closes_i[-1]) if closes_i else "N/A"
+    high_text = value_formatter(max(highs_i)) if highs_i else "N/A"
+    low_text = value_formatter(min(lows_i)) if lows_i else "N/A"
+    change_text = "N/A"
+    change_percent_text = "N/A"
+    if closes_i and prev_close_loc:
+        close_change = closes_i[-1] - prev_close_loc
+        close_change_percent = (close_change / prev_close_loc) * 100.0
+        change_text = f"{close_change:+.2f}"
+        change_percent_text = f"{close_change_percent:+.2f}%"
     title_parts = [fig_title]
     if show_limit_prices:
         limit_up_text = value_formatter(limit_up_loc) if limit_up_loc is not None else "N/A"
         limit_down_text = value_formatter(limit_down_loc) if limit_down_loc is not None else "N/A"
         title_parts.extend([f"漲停:{limit_up_text}", f"跌停:{limit_down_text}"])
     title_parts.append(f"開盤:{open_text}")
+    title_parts.append(f"收盤:{close_text}")
+    title_parts.append(f"最高:{high_text}")
+    title_parts.append(f"最低:{low_text}")
+    title_parts.append(change_text)
+    title_parts.append(change_percent_text)
     if atr_value is not None:
         title_parts.append(f"ATR:{atr_value:.2f}")
     ax.set_title(" ".join(title_parts), pad=2)
@@ -399,6 +415,14 @@ def draw_intraday_ohlc(
     apply_limit_ticks(ax, limit_up_loc, limit_down_loc)
     style_inside_right_y_ticks(ax)
 
+    if prev_close_loc is not None:
+        ymin, ymax = ax.get_ylim()
+        merged_min = min(ymin, prev_close_loc)
+        merged_max = max(ymax, prev_close_loc)
+        if merged_min != ymin or merged_max != ymax:
+            pad = max((merged_max - merged_min) * 0.02, 1.0)
+            ax.set_ylim(merged_min - pad, merged_max + pad)
+
     if level_in_axis_range(ax, prev_open_loc):
         ax.axhline(
             y=prev_open_loc,
@@ -409,7 +433,7 @@ def draw_intraday_ohlc(
             label="昨日開盤"
         )
 
-    if level_in_axis_range(ax, prev_close_loc):
+    if prev_close_loc is not None:
         ax.axhline(
             y=prev_close_loc,
             color="blue",
@@ -419,7 +443,7 @@ def draw_intraday_ohlc(
             label="昨日收盤"
         )
 
-    if level_in_axis_range(ax, prev_high_loc):
+    if show_prev_high_line and level_in_axis_range(ax, prev_high_loc):
         ax.axhline(
             y=prev_high_loc,
             color="red",
@@ -524,13 +548,19 @@ def main():
                 plt.close(fig)
                 print(f"[WARN] Skip {code}: {exc}")
                 continue
-            title = (
-                f"{item_label} 前日:{prev_trade_date.strftime('%Y-%m-%d')} "
-                f"昨開:{value_formatter(prev_open_price)} "
-                f"昨高:{value_formatter(prev_high_price)} "
-                f"昨低:{value_formatter(prev_low_price)} "
-                f"昨收:{value_formatter(prev_close_price)}"
+            title_parts = [
+                f"{item_label} 前日:{prev_trade_date.strftime('%Y-%m-%d')}",
+                f"昨開:{value_formatter(prev_open_price)}",
+            ]
+            if not is_index:
+                title_parts.append(f"昨高:{value_formatter(prev_high_price)}")
+            title_parts.extend(
+                [
+                    f"昨低:{value_formatter(prev_low_price)}",
+                    f"昨收:{value_formatter(prev_close_price)}",
+                ]
             )
+            title = " ".join(title_parts)
 
             print(
                 f"[INFO] Add {code} to PDF "
@@ -549,6 +579,7 @@ def main():
                 prev_low_loc=prev_low_price,
                 prev_close_loc=prev_close_price,
                 show_limit_prices=not is_index,
+                show_prev_high_line=not is_index,
                 value_formatter=value_formatter,
             )
 
