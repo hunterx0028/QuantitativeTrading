@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Fetch industry index symbols through E.SUN REST API and update stock_data.py
-market_previous_close_indices.
+Refresh E.SUN index mappings, fetch industry index closes through REST API,
+and update stock_data.py market_previous_close_indices.
 
 Run this after the close to capture today's close as the next trading day's
 reference index value.
@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from configparser import ConfigParser
@@ -18,7 +19,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from pprint import pformat
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from esun_marketdata import EsunMarketdata
 
@@ -27,6 +28,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.ini"
 DEFAULT_STOCK_DATA_PATH = BASE_DIR / "stock_data.py"
 DEFAULT_INDUSTRY_MAP_PATH = BASE_DIR / "industry_index_map.json"
+DEFAULT_TWSE_OUTPUT = BASE_DIR / "twse_indices.json"
+DEFAULT_TPEX_OUTPUT = BASE_DIR / "tpex_indices.json"
 
 StockTuple = Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]
 IndexKey = Tuple[str, str]
@@ -50,6 +53,84 @@ RESERVE_MARKET_INDICES: Dict[str, Dict[str, Any]] = {
     },
 }
 RESERVE_MARKET_INDEX_KEYS = frozenset(RESERVE_MARKET_INDICES)
+
+# Source: E.SUN MarketData Intraday Tickers "產業別代碼".
+# Update this table manually if E.SUN changes the code list.
+INDUSTRY_CODES: Dict[str, str] = {
+    "01": "水泥工業",
+    "02": "食品工業",
+    "03": "塑膠工業",
+    "04": "紡織纖維",
+    "05": "電機機械",
+    "06": "電器電纜",
+    "08": "玻璃陶瓷",
+    "09": "造紙工業",
+    "10": "鋼鐵工業",
+    "11": "橡膠工業",
+    "12": "汽車工業",
+    "14": "建材營造",
+    "15": "航運業",
+    "16": "觀光餐旅",
+    "17": "金融保險",
+    "18": "貿易百貨",
+    "19": "綜合",
+    "20": "其他",
+    "21": "化學工業",
+    "22": "生技醫療業",
+    "23": "油電燃氣業",
+    "24": "半導體業",
+    "25": "電腦及週邊設備業",
+    "26": "光電業",
+    "27": "通信網路業",
+    "28": "電子零組件業",
+    "29": "電子通路業",
+    "30": "資訊服務業",
+    "31": "其他電子業",
+    "32": "文化創意業",
+    "33": "農業科技業",
+    "34": "電子商務",
+    "35": "綠能環保",
+    "36": "數位雲端",
+    "37": "運動休閒",
+    "38": "居家生活",
+    "80": "管理股票",
+}
+
+INDEX_NAME_ALIASES: Dict[str, List[str]] = {
+    "01": ["水泥"],
+    "02": ["食品"],
+    "03": ["塑膠"],
+    "04": ["紡織纖維", "紡纖"],
+    "05": ["電機機械", "機械"],
+    "06": ["電器電纜"],
+    "08": ["玻璃陶瓷"],
+    "09": ["造紙"],
+    "10": ["鋼鐵"],
+    "11": ["橡膠"],
+    "12": ["汽車"],
+    "14": ["建材營造", "營建"],
+    "15": ["航運"],
+    "16": ["觀光餐旅"],
+    "17": ["金融保險"],
+    "18": ["貿易百貨"],
+    "20": ["其他"],
+    "21": ["化學", "化工"],
+    "22": ["生技醫療"],
+    "23": ["油電燃氣"],
+    "24": ["半導體"],
+    "25": ["電腦及週邊設備", "電腦及週邊"],
+    "26": ["光電"],
+    "27": ["通信網路"],
+    "28": ["電子零組件"],
+    "29": ["電子通路"],
+    "30": ["資訊服務"],
+    "31": ["其他電子"],
+    "32": ["文化創意"],
+    "35": ["綠能環保"],
+    "36": ["數位雲端"],
+    "37": ["運動休閒"],
+    "38": ["居家生活"],
+}
 
 
 def now_text() -> str:
@@ -81,6 +162,133 @@ def load_config(path: Path) -> ConfigParser:
     if not read_files:
         raise FileNotFoundError(f"讀取 config.ini 失敗: {path}")
     return config
+
+
+def fetch_index_list(sdk: EsunMarketdata, exchange: str) -> Dict[str, Any]:
+    rest_stock = sdk.rest_client.stock
+    return rest_stock.intraday.tickers(type="INDEX", exchange=exchange)
+
+
+def write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def normalize_name(name: str) -> str:
+    normalized = str(name)
+    normalized = normalized.replace("臺", "台")
+    normalized = normalized.replace("櫃買", "")
+    normalized = normalized.replace("業", "")
+    normalized = normalized.replace("工業", "")
+    normalized = normalized.replace("類", "")
+    normalized = normalized.replace("指數", "")
+    normalized = normalized.replace("及", "")
+    normalized = normalized.replace("週邊", "周邊")
+    return re.sub(r"\s+", "", normalized)
+
+
+def iter_ix_indices(payload: Dict[str, Any]) -> Iterable[Dict[str, str]]:
+    for item in payload.get("data", []):
+        symbol = str(item.get("symbol", ""))
+        name = str(item.get("name", ""))
+        if symbol.startswith("IX") and name:
+            yield {"symbol": symbol, "name": name}
+
+
+def score_index_name(index_name: str, aliases: List[str]) -> int:
+    normalized_index = normalize_name(index_name)
+    best = 0
+    for alias in aliases:
+        normalized_alias = normalize_name(alias)
+        if normalized_alias == normalized_index:
+            best = max(best, 100)
+        elif normalized_alias in normalized_index:
+            best = max(best, 80)
+    return best
+
+
+def find_best_index(
+    indices: Iterable[Dict[str, str]],
+    industry_code: str,
+) -> Optional[Dict[str, str]]:
+    aliases = INDEX_NAME_ALIASES.get(industry_code)
+    if not aliases:
+        return None
+
+    best_match: Optional[Dict[str, str]] = None
+    best_score = 0
+    for item in indices:
+        score = score_index_name(item["name"], aliases)
+        if score > best_score:
+            best_score = score
+            best_match = item
+
+    if best_match is None:
+        return None
+    return {
+        "symbol": best_match["symbol"],
+        "name": best_match["name"],
+        "match_score": best_score,
+    }
+
+
+def build_exchange_mapping(exchange: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    indices = list(iter_ix_indices(payload))
+    industry_map: Dict[str, Any] = {}
+    missing: List[str] = []
+
+    for industry_code, industry_name in INDUSTRY_CODES.items():
+        match = find_best_index(indices, industry_code)
+        if match is None:
+            industry_map[industry_code] = {
+                "industry_name": industry_name,
+                "index": None,
+            }
+            missing.append(industry_code)
+            continue
+
+        industry_map[industry_code] = {
+            "industry_name": industry_name,
+            "index": match,
+        }
+
+    return {
+        "exchange": exchange,
+        "source_date": payload.get("date"),
+        "source_type": payload.get("type"),
+        "industries": industry_map,
+        "missing_industry_codes": missing,
+    }
+
+
+def build_industry_index_map(
+    twse_payload: Dict[str, Any],
+    tpex_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "note": "industry code table is maintained in update_stock_data_industry_indices.py",
+        "industry_codes": INDUSTRY_CODES,
+        "market_indices": RESERVE_MARKET_INDICES,
+        "exchanges": {
+            "TWSE": build_exchange_mapping("TWSE", twse_payload),
+            "TPEX": build_exchange_mapping("TPEX", tpex_payload),
+        },
+    }
+
+
+def print_industry_map_summary(output: Dict[str, Any]) -> None:
+    for exchange, exchange_data in output["exchanges"].items():
+        missing = exchange_data["missing_industry_codes"]
+        mapped_count = len(INDUSTRY_CODES) - len(missing)
+        log(f"{exchange}: 已對應 {mapped_count} 個，未對應 {len(missing)} 個")
+        if missing:
+            missing_text = ", ".join(
+                f"{code}:{INDUSTRY_CODES[code]}" for code in missing
+            )
+            log(f"{exchange} 未對應: {missing_text}")
 
 
 def get_exchange_for_stock(symbol_str: str) -> str:
@@ -398,13 +606,52 @@ def print_missing_stocks(missing_stocks: Dict[IndexKey, List[str]]) -> None:
         log(f"  {exchange}:{industry_code} -> {preview}")
 
 
+def refresh_industry_map_files(
+    sdk: EsunMarketdata,
+    twse_output: Path,
+    tpex_output: Path,
+    industry_map_output: Path,
+    raw_twse: bool,
+) -> Dict[str, Any]:
+    log("[INFO] 正在更新可訂閱指數清單與產業類股指數對應檔")
+    twse_indices = fetch_index_list(sdk, "TWSE")
+    tpex_indices = fetch_index_list(sdk, "TPEx")
+
+    twse_payload = twse_indices if raw_twse else {"index_list": twse_indices}
+    write_json(twse_output.resolve(), twse_payload)
+    write_json(tpex_output.resolve(), tpex_indices)
+
+    industry_map = build_industry_index_map(twse_indices, tpex_indices)
+    write_json(industry_map_output.resolve(), industry_map)
+
+    log(f"[INFO] 已寫入 {twse_output.resolve()}")
+    log(f"[INFO] 已寫入 {tpex_output.resolve()}")
+    log(f"[INFO] 已寫入 {industry_map_output.resolve()}")
+    log(f"[INFO] TWSE 指數數量: {len(twse_indices.get('data', []))}")
+    log(f"[INFO] TPEx 指數數量: {len(tpex_indices.get('data', []))}")
+    print_industry_map_summary(industry_map)
+    return industry_map
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="使用 REST API 更新候選股票產業類股指數 previous_close。"
+        description="先刷新產業類股指數對應檔，再使用 REST API 更新候選股票產業類股指數 previous_close。"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--stock-data", type=Path, default=DEFAULT_STOCK_DATA_PATH)
     parser.add_argument("--industry-map", type=Path, default=DEFAULT_INDUSTRY_MAP_PATH)
+    parser.add_argument("--twse-output", type=Path, default=DEFAULT_TWSE_OUTPUT)
+    parser.add_argument("--tpex-output", type=Path, default=DEFAULT_TPEX_OUTPUT)
+    parser.add_argument(
+        "--skip-refresh-industry-map",
+        action="store_true",
+        help="略過刷新指數清單與對應檔，直接讀取既有 --industry-map 檔案。",
+    )
+    parser.add_argument(
+        "--raw-twse",
+        action="store_true",
+        help="TWSE 直接輸出 API 原始格式；未指定時維持目前 twse_indices.json 的 index_list 包裝格式。",
+    )
     parser.add_argument(
         "--target-date",
         type=lambda value: datetime.strptime(value, "%Y-%m-%d").date(),
@@ -437,15 +684,6 @@ def main() -> int:
     stock_module = load_python_module(args.stock_data.resolve(), "stock_data_for_index_update")
     selected_stocks: List[StockTuple] = list(stock_module.selected_stocks)
     existing_indices = dict(getattr(stock_module, "market_previous_close_indices", {}))
-    industry_map = load_json(args.industry_map.resolve())
-
-    targets, missing_stocks = build_index_targets(selected_stocks, industry_map)
-    if not targets:
-        raise ValueError("候選股票沒有任何可更新的產業類股指數。")
-
-    log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(selected_stocks))} 個交易所/產業組合")
-    log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
-    print_missing_stocks(missing_stocks)
 
     original_cwd = Path.cwd()
     try:
@@ -455,6 +693,26 @@ def main() -> int:
         log(f"[INFO] 正在初始化 EsunMarketdata session: {args.config.resolve()}")
         realtime_sdk.login()
         log("[INFO] EsunMarketdata session 初始化完成")
+
+        if args.skip_refresh_industry_map:
+            log(f"[INFO] 略過刷新，讀取既有產業類股指數對應檔: {args.industry_map.resolve()}")
+            industry_map = load_json(args.industry_map.resolve())
+        else:
+            industry_map = refresh_industry_map_files(
+                realtime_sdk,
+                args.twse_output,
+                args.tpex_output,
+                args.industry_map,
+                args.raw_twse,
+            )
+
+        targets, missing_stocks = build_index_targets(selected_stocks, industry_map)
+        if not targets:
+            raise ValueError("候選股票沒有任何可更新的產業類股指數。")
+
+        log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(selected_stocks))} 個交易所/產業組合")
+        log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
+        print_missing_stocks(missing_stocks)
 
         log(f"[INFO] 使用 REST API 取得 {args.target_date:%Y-%m-%d} 指數收盤價")
         index_state = fetch_indices_by_api(
