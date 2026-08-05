@@ -2,6 +2,7 @@ import builtins
 import argparse
 import configparser
 import json
+import math
 import re
 import sys
 import time
@@ -9,6 +10,7 @@ import numpy as np
 from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -82,6 +84,8 @@ IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻
 
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_FOLLOW_REGRESSION_MIN_GRADIENT = 0 # IX0001 follow 成立門檻：STRATEGY_DECISION 前 close regression EMA 斜率需大於此值
+EMA_SPAN_MULTIPLIER = 2.0 # regression EMA 權重參數，1.5 ~ 3.0 預設 2.0，值越大代表對於較近的價格不敏感
 
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
@@ -90,7 +94,7 @@ BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
 # chance 門檻：IX0001 開盤至 STRATEGY_DECISION 前 high-low 價差不可超過昨收此百分比
-IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0
+IX0001_CHANCE_MAX_RANGE_PERCENT = 0
 
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
@@ -318,6 +322,51 @@ def calculate_entry_range_bounds(
 def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
     """判斷價格是否落在入場區間內，含上下界。"""
     return lower_bound <= price <= upper_bound
+
+
+def round_half_away_from_zero(value: float) -> int:
+    if value >= 0:
+        return math.floor(value + 0.5)
+    return math.ceil(value - 0.5)
+
+
+def _extract_close_value(candle: Any) -> float:
+    if isinstance(candle, dict):
+        return float(candle.get("close", 0.0) or 0.0)
+    return float(getattr(candle, "close"))
+
+
+def calculate_regression_gradient(candles: list[Any]) -> int | None:
+    current_window = len(candles)
+    if current_window < 2:
+        return None
+
+    closes = [_extract_close_value(candle) for candle in candles]
+    base_close = closes[0]
+    if math.isclose(base_close, 0.0, abs_tol=1e-12):
+        return 0
+
+    normalized_closes = [(close / base_close - 1.0) * 100.0 for close in closes]
+    x_values = list(range(current_window))
+    ema_span = current_window * EMA_SPAN_MULTIPLIER
+    alpha = 2.0 / (ema_span + 1.0)
+    decay = 1.0 - alpha
+    weights = [decay ** (current_window - 1 - i) for i in range(current_window)]
+    weight_sum = sum(weights)
+    if math.isclose(weight_sum, 0.0, abs_tol=1e-12):
+        return 0
+
+    x_avg = sum(w * x for w, x in zip(weights, x_values)) / weight_sum
+    y_avg = sum(w * y for w, y in zip(weights, normalized_closes)) / weight_sum
+
+    numerator = sum(w * (x - x_avg) * (y - y_avg) for w, x, y in zip(weights, x_values, normalized_closes))
+    denominator = sum(w * (x - x_avg) ** 2 for w, x in zip(weights, x_values))
+    if math.isclose(denominator, 0.0, abs_tol=1e-12):
+        return 0
+
+    slope = numerator / denominator
+    angle = math.degrees(math.atan(slope))
+    return round_half_away_from_zero(angle)
 
 
 # ---------------------------------------------------------------------------
@@ -1133,6 +1182,31 @@ def get_market_index_strategy_decision_follow_detail(
     return GATE_NOT_PASSED, None
 
 
+def has_ix0001_positive_regression_before_decision(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """IX0001 自開盤至模式判別時間前 close 的 regression EMA 斜率需為正。"""
+    index_key = 'TWSE:MARKET'
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    regression_bars = sorted(
+        (
+            bar for bar in today_bars
+            if bar.get('dt') is not None
+            and bar.get('close') is not None
+            and 9 * 60 <= (bar['dt'].hour * 60 + bar['dt'].minute) < decision_hm
+        ),
+        key=lambda item: item['dt'],
+    )
+    regression_gradient = calculate_regression_gradient(regression_bars)
+    return (
+        regression_gradient is not None
+        and regression_gradient > IX0001_FOLLOW_REGRESSION_MIN_GRADIENT
+    )
+
+
 def has_ix0001_early_strategy_breakout(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1435,6 +1509,10 @@ def get_strategy_market_decision_gate_status(
     if (
         all(final_positions_above_previous_close)
         and all(status == GATE_FOLLOW_PASSED for status, _ in follow_details)
+        and has_ix0001_positive_regression_before_decision(
+            target_date,
+            index_minute_bars_by_key,
+        )
     ):
         return GATE_FOLLOW_PASSED
 
