@@ -23,7 +23,8 @@ TOP_RANK = 100 # 出現次數的排名
 
 MIN_REPEAT_COUNT = 5 # 最少的累計次數
 
-ST_DB_KEEP_RECENT_FILE_COUNT = 25 # 取 25 天的資料
+ST_DB_KEEP_RECENT_FILE_COUNT = 25 # st_db 保留最新 25 個日期檔案
+ST_DB_CALCULATE_RECENT_FILE_COUNT = 14 # 從保留檔案中取最新 14 個進行統計
 
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 TOP_REPEAT_RESULT_HEADER_PREFIX = "# FILTER_RESULT"
@@ -273,6 +274,18 @@ def cleanup_old_stock_db_files(stock_db_dir: Path, keep_count: int) -> None:
         log(f"[INFO] st_db 日期檔案數量未超過 {keep_count}，不需刪除")
 
 
+def validate_stock_db_file_counts(keep_count: int, calculate_count: int) -> None:
+    if keep_count <= 0:
+        raise ValueError("ST_DB_KEEP_RECENT_FILE_COUNT 必須大於 0")
+    if calculate_count <= 0:
+        raise ValueError("ST_DB_CALCULATE_RECENT_FILE_COUNT 必須大於 0")
+    if calculate_count > keep_count:
+        raise ValueError(
+            "ST_DB_CALCULATE_RECENT_FILE_COUNT 不可大於 "
+            "ST_DB_KEEP_RECENT_FILE_COUNT"
+        )
+
+
 def format_selected_stocks(records: list[tuple]) -> str:
     lines = ["selected_stocks = ["]
     lines.extend(f"    {record!r}," for record in records)
@@ -350,8 +363,24 @@ def main() -> None:
     project_dir = base_dir.parent
     stock_db_dir = base_dir / "st_db"
     log("[INFO] 程式啟動")
+    validate_stock_db_file_counts(
+        ST_DB_KEEP_RECENT_FILE_COUNT,
+        ST_DB_CALCULATE_RECENT_FILE_COUNT,
+    )
     cleanup_old_stock_db_files(stock_db_dir, ST_DB_KEEP_RECENT_FILE_COUNT)
-    txt_files = sorted(stock_db_dir.glob("*.txt"))
+    dated_txt_files = sorted(
+        (txt_file for txt_file in stock_db_dir.glob("*.txt") if txt_file.stem.isdigit()),
+        key=lambda txt_file: txt_file.stem,
+        reverse=True,
+    )
+    txt_files = sorted(
+        dated_txt_files[:ST_DB_CALCULATE_RECENT_FILE_COUNT],
+        key=lambda txt_file: txt_file.stem,
+    )
+    log(
+        f"[INFO] 本次使用最新 {len(txt_files)} 個日期檔案統計"
+        f"（設定值={ST_DB_CALCULATE_RECENT_FILE_COUNT}）"
+    )
 
     first_record_by_stock: dict[str, tuple] = {}
     stock_occurrence_counter: Counter[str] = Counter()
@@ -391,7 +420,7 @@ def main() -> None:
     total = len(stock_names)
     success_count = 0
     skipped_count = 0
-    fallback_count = 0
+    api_failed_count = 0
 
     log(f"[INFO] 開始更新，共 {total} 檔")
     for idx, stock_name in enumerate(stock_names, start=1):
@@ -429,18 +458,9 @@ def main() -> None:
             updated_by_stock[stock_name] = updated
             success_count += 1
         except Exception as exc:
-            log(f"[WARN] {stock_name}({symbol}) 更新失敗，保留原值: {exc}")
-            tomorrow_limit_up, tomorrow_limit_down = calculate_limit_prices(original[5])
-            if tomorrow_limit_up > MAX_LIMIT_UP_PRICE:
-                log(f"{stock_name} 漲停價位太高，跳過")
-                skipped_count += 1
-                continue
-            if tomorrow_limit_down < MIN_LIMIT_DOWN_PRICE:
-                log(f"{stock_name} 跌停價位太低，跳過")
-                skipped_count += 1
-                continue
-            updated_by_stock[stock_name] = original
-            fallback_count += 1
+            log(f"[WARN] {stock_name}({symbol}) API 更新失敗，本次排除: {exc}")
+            api_failed_count += 1
+            continue
 
     output_path = base_dir / "aggregate_by_stock_name_v3_result.txt"
     stock_data_path = base_dir.parent.parent / "Z_ORB_ONE" / "stock_data.py"
@@ -489,7 +509,8 @@ def main() -> None:
     log(f"stock_count={len(updated_by_stock)}")
     log(
         f"[SUMMARY] success={success_count}, "
-        f"fallback={fallback_count}, skipped={skipped_count}, total={total}"
+        f"api_failed_excluded={api_failed_count}, "
+        f"skipped={skipped_count}, total={total}"
     )
     log(
         f"[SUMMARY] top_rank={TOP_RANK}, "
