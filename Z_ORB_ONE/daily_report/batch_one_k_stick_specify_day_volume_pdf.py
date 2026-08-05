@@ -31,8 +31,11 @@ from Z_ORB_ONE.stock_data import selected_stocks
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_DATE = "20260722"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
+STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
 
 def normalize_config_paths(config: ConfigParser):
@@ -279,6 +282,25 @@ def add_bracket(ax, x_center, y, x_half_width, y_bump, direction="up", lw=1.6, y
     ax.add_patch(patch)
 
 
+def draw_strategy_start_lines(price_ax, volume_ax, target_date: date):
+    start_times = {
+        STRATEGY_START_LOWER,
+        STRATEGY_START_FOLLOW,
+        STRATEGY_START_CHANCE,
+    }
+    for hour, minute in sorted(start_times):
+        x_value = mdates.date2num(datetime.combine(target_date, time(hour, minute)))
+        for ax in (price_ax, volume_ax):
+            ax.axvline(
+                x=x_value,
+                color="#64748b",
+                linestyle="-",
+                linewidth=0.9,
+                alpha=0.22,
+                zorder=1,
+            )
+
+
 def make_format_coord(x_vals, dt_vals, o, h, l, c, v=None, dt_fmt="%Y-%m-%d"):
     """右下角顯示：用滑鼠 x 找最近一根 K，顯示日期/時間 + OHLC(+V)。"""
     n = len(x_vals)
@@ -413,6 +435,7 @@ def draw_intraday_ohlc(
         x1 = mdates.date2num(datetime.combine(target_date, time(13, 31)))
         ax.set_xlim(x0, x1)
         volume_ax.set_xlim(x0, x1)
+        draw_strategy_start_lines(ax, volume_ax, target_date)
         volume_ax.bar(x_i, volumes_i, width=tick_width_min * 1.6, color=bar_colors, edgecolor=bar_colors, alpha=0.85)
         volume_ax.set_ylim(0, max(max(volumes_i), 1) * 1.25)
         volume_ax.set_ylabel("Volume", fontsize=9)
