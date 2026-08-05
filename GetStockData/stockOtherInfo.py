@@ -16,7 +16,7 @@ from typing import Dict, Any, Deque, List
 
 from pandas.core.dtypes.inference import is_float
 
-from globals import start_min_number
+start_min_number = 3  # 4 代表取5根的資料 (09:00~09:04)，要在 09:03:50 按啟動 / 3 代表取4根的資料 (09:00~09:03)，要在 09:02:50 按啟動
 
 MIS_ENDPOINT = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 HEADERS = {

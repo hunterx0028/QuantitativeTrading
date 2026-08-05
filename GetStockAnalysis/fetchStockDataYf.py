@@ -8,8 +8,10 @@ import yfinance as yf
 import time
 import os
 import pandas as pd
-from globals import during_start_data, during_end_data
 from GetStockData.stockOtherInfo import get_stock_codes
+
+during_start_data = '2024-06-03' # 2025-10-20
+during_end_data = '2025-12-28' # 2025-11-16
 
 
 def fetch_stock_data(stock_code, start_date, end_date):

@@ -1,10 +1,15 @@
 import schedule
 import time
 from datetime import datetime
-from globals import RED, GREEN, BLUE, RESET, YELLOW
 from GetStockData.stockOtherInfo import units_from_beta_prices, get_pairs_datas
 from esun_marketdata import EsunMarketdata
 from configparser import ConfigParser
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+BLUE  = "\033[34m"
+RESET = "\033[0m"
+YELLOW = "\033[33m"
 
 # ============================
 # 即時抓價（TW/TWO）

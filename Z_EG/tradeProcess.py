@@ -6,14 +6,25 @@ from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 
 from GetStockData.stockOtherInfo import has_volume, get_pairs_datas
 from toStockZscore import calculate_zscore_quantity  # Route B：支援 alpha 參數
-from datetime import datetime
+from datetime import datetime, timedelta, time as datetime_time
+from zoneinfo import ZoneInfo
 
 import schedule, time, logging
 from threading import Lock
 
-from globals import get_trade_date, RED, GREEN, RESET
-
 from esun_marketdata import EsunMarketdata
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
+
+
+def get_trade_date():
+    tz = ZoneInfo("Asia/Taipei")
+    now = datetime.now(tz)
+    cutoff = datetime_time(13, 30)
+    return (now + timedelta(days=1) if now.time() > cutoff else now).strftime('%Y-%m-%d')
+
 
 # 讀取設定檔
 config = ConfigParser()

@@ -28,10 +28,15 @@ import pandas as pd
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 from zscoreSingleGraphSharpKelly_EngleGranger import find_max_abs_z, find_longest_z_episode
-import globals
 
 # ======== 你的專案依賴 ========
 from GetStockData.stockOtherInfo import lookup_name_by_code, get_stock_codes
+
+# 資料區間設定
+train_start_data = '2025-07-28'
+train_end_data = '2025-11-30'
+test_start_data = '2025-12-01'
+test_end_data = '2025-12-28'
 
 # ========= 參數 =========
 # EG 與訓練/測試長度約束
@@ -414,12 +419,12 @@ def _pair_worker(args, worker_train_start, worker_train_end, worker_test_start, 
 
 def print_many():
     # 四個月
-    local_train_start_data = globals.train_start_data
-    local_train_end_data = globals.train_end_data
+    local_train_start_data = train_start_data
+    local_train_end_data = train_end_data
 
     # 一個月
-    local_test_start_data = globals.test_start_data
-    local_test_end_data = globals.test_end_data
+    local_test_start_data = test_start_data
+    local_test_end_data = test_end_data
 
     # 轉成 datetime
     train_start = datetime.strptime(local_train_start_data, '%Y-%m-%d')
@@ -490,7 +495,7 @@ def print_once(worker_train_start, worker_train_end, worker_test_start, worker_t
 
 
 def print_once_with_json():
-    results = print_once(globals.train_start_data, globals.train_end_data, globals.test_start_data, globals.test_end_data)
+    results = print_once(train_start_data, train_end_data, test_start_data, test_end_data)
 
     pairSharpKellyResultsPath = "../papers/pairs_data_0.json"
     with open(pairSharpKellyResultsPath, 'w', encoding='utf-8') as f:

@@ -109,15 +109,15 @@ FOLLOW_ENTRY_RANGE_END_PERCENT = 30.0 # follow 入場價距昨收到漲停的結
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
-
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
-
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.6 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_FOLLOW_REGRESSION_MIN_GRADIENT = 0 # IX0001 follow 成立門檻：STRATEGY_DECISION 前 close regression EMA 斜率需大於此值
+EMA_SPAN_MULTIPLIER = 2.0 # regression EMA 權重參數，1.5 ~ 3.0 預設 2.0，值越大代表對於較近的價格不敏感
 
 IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0 # chance 門檻：IX0001 開盤至 STRATEGY_DECISION 前 high-low 價差不可超過昨收此百分比
 
@@ -280,6 +280,35 @@ def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
 
+def parse_event_time_or_now(event_time: Any, fallback_dt: datetime | None = None) -> datetime:
+    fallback_dt = fallback_dt or now_tpe()
+    if event_time in (None, ""):
+        return fallback_dt
+
+    try:
+        if isinstance(event_time, (int, float)):
+            timestamp = float(event_time)
+        else:
+            text = str(event_time).strip()
+            if not text:
+                return fallback_dt
+            if text.replace(".", "", 1).isdigit():
+                timestamp = float(text)
+            else:
+                event_dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if event_dt.tzinfo is None:
+                    return TZ.localize(event_dt)
+                return event_dt.astimezone(TZ)
+
+        if timestamp > 10_000_000_000_000:
+            timestamp /= 1_000_000
+        elif timestamp > 10_000_000_000:
+            timestamp /= 1_000
+        return datetime.fromtimestamp(timestamp, TZ)
+    except (TypeError, ValueError, OSError):
+        return fallback_dt
+
+
 def hhmm_text(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
 
@@ -353,6 +382,8 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError("ENTRY_CHECK_START_TIME_CHANCE 不可早於 STRATEGY_DECISION")
     if IX0001_CHANCE_MAX_RANGE_PERCENT < 0:
         raise ValueError("IX0001_CHANCE_MAX_RANGE_PERCENT 不可小於 0")
+    if EMA_SPAN_MULTIPLIER <= 0:
+        raise ValueError("EMA_SPAN_MULTIPLIER 必須大於 0")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -622,6 +653,17 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
     market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
     now_hm = now_local.hour * 60 + now_local.minute
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    event_dt = parse_event_time_or_now(event_time, now_local)
+    event_hm = event_dt.hour * 60 + event_dt.minute
+    if (
+        market_key == "TWSE:MARKET"
+        and 9 * 60 <= event_hm < decision_hm
+    ):
+        market_state.setdefault("follow_regression_minute_closes", {})[event_hm] = {
+            "dt": event_dt,
+            "close": index_value,
+        }
+
     if (
         market_key == "TWSE:MARKET"
         and 9 * 60 <= now_hm < decision_hm
@@ -840,6 +882,13 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         "chance_decision_low": market_state.get("chance_decision_low"),
         "chance_decision_high_time": market_state.get("chance_decision_high_time"),
         "chance_decision_low_time": market_state.get("chance_decision_low_time"),
+        "follow_regression_gradient": None,
+        "follow_regression_min_gradient": (
+            IX0001_FOLLOW_REGRESSION_MIN_GRADIENT
+            if index_key == "TWSE:MARKET"
+            else None
+        ),
+        "follow_regression_count": 0,
         "passed": False,
         "lower_passed": False,
         "follow_passed": False,
@@ -887,6 +936,15 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
     last_index_float = float(result["last_index"])
     result["final_above_previous_close"] = last_index_float > previous_close_float
     result["final_below_previous_close"] = last_index_float < previous_close_float
+    if index_key == "TWSE:MARKET":
+        minute_close_map = market_state.get("follow_regression_minute_closes", {})
+        regression_bars = [
+            row
+            for _minute_hm, row in sorted(minute_close_map.items())
+            if row.get("close") is not None
+        ]
+        result["follow_regression_count"] = len(regression_bars)
+        result["follow_regression_gradient"] = calculate_regression_gradient(regression_bars)
 
     if not result["broken"]:
         result["lower_reason"] = "未跌破啟動門檻"
@@ -906,6 +964,18 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         result["follow_reason"] = "決策時已回跌至失效門檻"
     elif not result["final_above_previous_close"]:
         result["follow_reason"] = "決策時未在昨收上方"
+    elif (
+        index_key == "TWSE:MARKET"
+        and (
+            result["follow_regression_gradient"] is None
+            or result["follow_regression_gradient"] <= IX0001_FOLLOW_REGRESSION_MIN_GRADIENT
+        )
+    ):
+        result["follow_reason"] = (
+            "IX0001 regression EMA 斜率未達門檻 "
+            f"gradient={result['follow_regression_gradient']} "
+            f"> {IX0001_FOLLOW_REGRESSION_MIN_GRADIENT}"
+        )
     else:
         result["follow_passed"] = True
         result["follow_reason"] = "通過"
@@ -1077,7 +1147,11 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
             f"last_index={format_market_gate_value(result.get('last_index'))} "
             f"raise_time={format_market_gate_time(result.get('raise_time'))} "
             f"decline_time={format_market_gate_time(result.get('decline_time'))} "
-            f"follow_passed={result.get('follow_passed')}"
+            f"follow_regression_gradient={result.get('follow_regression_gradient') if result['index_key'] == 'TWSE:MARKET' else '--'} "
+            f"follow_regression_min={result.get('follow_regression_min_gradient') if result['index_key'] == 'TWSE:MARKET' else '--'} "
+            f"follow_regression_count={result.get('follow_regression_count') if result['index_key'] == 'TWSE:MARKET' else '--'} "
+            f"follow_passed={result.get('follow_passed')} "
+            f"follow_reason={result.get('follow_reason') or '--'}"
         )
     for result in gate_results:
         if result["index_key"] != "TWSE:MARKET":
@@ -1187,6 +1261,51 @@ def calculate_entry_range_bounds(
 def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
     """判斷價格是否落在入場區間內，含上下界。"""
     return lower_bound <= price <= upper_bound
+
+
+def round_half_away_from_zero(value: float) -> int:
+    if value >= 0:
+        return math.floor(value + 0.5)
+    return math.ceil(value - 0.5)
+
+
+def _extract_close_value(candle: Any) -> float:
+    if isinstance(candle, dict):
+        return float(candle.get("close", 0.0) or 0.0)
+    return float(getattr(candle, "close"))
+
+
+def calculate_regression_gradient(candles: list[Any]) -> int | None:
+    current_window = len(candles)
+    if current_window < 2:
+        return None
+
+    closes = [_extract_close_value(candle) for candle in candles]
+    base_close = closes[0]
+    if math.isclose(base_close, 0.0, abs_tol=1e-12):
+        return 0
+
+    normalized_closes = [(close / base_close - 1.0) * 100.0 for close in closes]
+    x_values = list(range(current_window))
+    ema_span = current_window * EMA_SPAN_MULTIPLIER
+    alpha = 2.0 / (ema_span + 1.0)
+    decay = 1.0 - alpha
+    weights = [decay ** (current_window - 1 - i) for i in range(current_window)]
+    weight_sum = sum(weights)
+    if math.isclose(weight_sum, 0.0, abs_tol=1e-12):
+        return 0
+
+    x_avg = sum(w * x for w, x in zip(weights, x_values)) / weight_sum
+    y_avg = sum(w * y for w, y in zip(weights, normalized_closes)) / weight_sum
+
+    numerator = sum(w * (x - x_avg) * (y - y_avg) for w, x, y in zip(weights, x_values, normalized_closes))
+    denominator = sum(w * (x - x_avg) ** 2 for w, x in zip(weights, x_values))
+    if math.isclose(denominator, 0.0, abs_tol=1e-12):
+        return 0
+
+    slope = numerator / denominator
+    angle = math.degrees(math.atan(slope))
+    return round_half_away_from_zero(angle)
 
 
 def is_market_reversal_blocked_at_entry(state: Dict[str, Any], strategy_type: str) -> bool:

@@ -25,10 +25,11 @@ matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Un
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ====== 你的專案設定 ======
-from globals import (
-    train_start_data, train_end_data,
-    test_start_data,  test_end_data,
-)
+train_start_data = '2025-07-28'
+train_end_data = '2025-11-30'
+test_start_data = '2025-12-01'
+test_end_data = '2025-12-28'
+
 from GetStockData.stockOtherInfo import lookup_name_by_code
 
 PAIRS_JSON_PATH = "../papers/pairs_data.json"
