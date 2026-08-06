@@ -274,7 +274,7 @@ def check_orb_filters_for_symbols(realtime_sdk: EsunMarketdata, symbols) -> List
 
             tomorrow_limit_up, tomorrow_limit_down = calculate_limit_prices(v4) # v4 是收盤價
 
-            if tomorrow_limit_up > 200: # 價位太高
+            if tomorrow_limit_up > 300: # 價位太高
                 print(f'symbol:{symbol} 漲停價位太高，跳過')
                 continue
 

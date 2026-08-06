@@ -1002,9 +1002,6 @@ def get_chance_gate_result(gate_results: list[Dict[str, Any]]) -> tuple[bool, st
     if previous_close <= 0:
         return False, "IX0001 昨收無效"
 
-    if chance_high <= previous_close:
-        return False, "IX0001 決策前 high 未高於昨收"
-
     max_allowed_range = previous_close * (IX0001_CHANCE_MAX_RANGE_PERCENT / 100.0)
     actual_range = chance_high - chance_low
     if actual_range > max_allowed_range:
@@ -1057,8 +1054,7 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
 
     follow_decline_blocked = any(result["decline_blocked"] for result in gate_results)
     if follow_decline_blocked:
-        print("[MODE] 上市或上櫃指數 FOLLOW 突破後曾回跌，今日 NO_TRADE")
-        return ENTRY_MODE_NO_TRADE, gate_results
+        return fallback_chance_or_no_trade("上市或上櫃指數 FOLLOW 突破後曾回跌")
 
     follow_mode_passed = all(result["follow_passed"] for result in gate_results)
     lower_mode_passed = all(result["lower_passed"] for result in gate_results)
