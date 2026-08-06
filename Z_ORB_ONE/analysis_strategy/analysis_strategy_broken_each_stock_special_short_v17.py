@@ -35,8 +35,8 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_FOLLOW_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_FOLLOW_IN_PRINT_STATS = False
 INCLUDE_CHANCE_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
@@ -1313,33 +1313,6 @@ def has_ix0001_dropped_below_lower_threshold_before_decision(
     return False
 
 
-def has_ix0001_high_above_previous_close_before_decision(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """IX0001 自開盤至模式判別時間前，high 曾嚴格高於昨收即回傳 True。"""
-    index_key = 'TWSE:MARKET'
-    bars_by_date = index_minute_bars_by_key.get(index_key, {})
-    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-    if previous_close is None:
-        return False
-
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
-    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    for bar in today_bars:
-        bar_dt = bar.get('dt')
-        if bar_dt is None:
-            continue
-        bar_hm = bar_dt.hour * 60 + bar_dt.minute
-        if bar_hm < 9 * 60 or bar_hm >= decision_hm:
-            continue
-
-        high = bar.get('high')
-        if high is not None and float(high) > previous_close:
-            return True
-    return False
-
-
 def is_ix0001_chance_range_too_wide_before_decision(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1382,11 +1355,6 @@ def get_chance_or_no_trade_gate_status(
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> str:
     """回傳 CHANCE gate 狀態。"""
-    if not has_ix0001_high_above_previous_close_before_decision(
-        target_date,
-        index_minute_bars_by_key,
-    ):
-        return GATE_NO_TRADE
     if is_ix0001_chance_range_too_wide_before_decision(
         target_date,
         index_minute_bars_by_key,
@@ -1477,7 +1445,7 @@ def get_strategy_market_decision_gate_status(
         index_minute_bars_by_key,
     )
     if follow_decline_blocked:
-        return GATE_NO_TRADE
+        return get_chance_or_no_trade_gate_status(target_date, index_minute_bars_by_key)
 
     decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
     final_positions_above_previous_close = []
