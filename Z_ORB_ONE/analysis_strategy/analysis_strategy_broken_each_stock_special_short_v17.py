@@ -35,9 +35,9 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
-INCLUDE_CHANCE_IN_PRINT_STATS = False
+INCLUDE_CHANCE_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -92,7 +92,7 @@ BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
 # chance 門檻：IX0001 開盤至 STRATEGY_DECISION 前 high-low 價差不可超過昨收此百分比
-IX0001_CHANCE_MAX_RANGE_PERCENT = 0
+IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0
 
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
