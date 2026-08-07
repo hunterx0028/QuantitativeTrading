@@ -11,6 +11,9 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 
 ATR_PERIOD = 14
 
+PRICE_RANGE_UP = 300
+PRICE_RANGE_DOWN = 50
+
 ETF_CODE = ["24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "37", "38", "39", "40", "41", "45", "46", "47"]
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = CURRENT_DIR.parent
@@ -213,55 +216,48 @@ def symbol_historical_candles_continue_14(stock_id: str, realtime_sdk):
     #print(f'symbol:{codeNum} from:{from_day.strftime("%Y-%m-%d")} to:{today.strftime("%Y-%m-%d")} responseData:{responseData}')
     time.sleep(0.5)  # 避免短時間過量 request
 
-    up_continue, down_continue, is_limit_up, is_limit_down, is_flat = analyze_strict_streak(responseData)
+    up_continue, down_continue, is_limit_up, is_limit_down, is_flat = analyze_limit_streak(responseData)
     atr = calculate_atr(responseData)
     return up_continue, down_continue, is_limit_up, is_limit_down, is_flat, atr
 
-def analyze_strict_streak(responseData: Dict) -> tuple[int, int, bool, bool, bool]:
-
+def analyze_limit_streak(responseData: Dict) -> tuple[int, int, bool, bool, bool]:
+    """計算從最新交易日起，連續收漲停／跌停的交易日數。"""
     bars = responseData.get("data", [])
-    if not bars:
+    if len(bars) < 2:
         return 0, 0, False, False, False
 
     curr = bars[0]
-
-    curr_h = float(curr["high"])
-    curr_l = float(curr["low"])
-
     curr_c = float(curr["close"])
     curr_o = float(curr["open"])
+    curr_limit_up, curr_limit_down = calculate_limit_prices(float(bars[1]["close"]))
+    is_limit_up = abs(curr_c - curr_limit_up) < 1e-8
+    is_limit_down = abs(curr_c - curr_limit_down) < 1e-8
 
     up_continue = 0
-    if curr_c > curr_o:
-        for bar in bars:
+    if is_limit_up:
+        for index in range(len(bars) - 1):
+            bar = bars[index]
+            previous_bar = bars[index + 1]
             bar_c = float(bar["close"])
-            bar_o = float(bar["open"])
-            if bar_c > bar_o:
+            limit_up, _limit_down = calculate_limit_prices(float(previous_bar["close"]))
+            if abs(bar_c - limit_up) < 1e-8:
                 up_continue += 1
             else:
                 break
 
     down_continue = 0
-    if curr_c < curr_o:
-        for bar in bars:
+    if is_limit_down:
+        for index in range(len(bars) - 1):
+            bar = bars[index]
+            previous_bar = bars[index + 1]
             bar_c = float(bar["close"])
-            bar_o = float(bar["open"])
-            if bar_c < bar_o:
+            _limit_up, limit_down = calculate_limit_prices(float(previous_bar["close"]))
+            if abs(bar_c - limit_down) < 1e-8:
                 down_continue += 1
             else:
                 break
 
-    #漲停或跌停
-    is_limit_up = False
-    is_limit_down = False
-    if curr_c == curr_h:
-        is_limit_up = True
-    if curr_c == curr_l:
-        is_limit_down = True
-
-    is_flat = False
-    if curr_o == curr_c:
-        is_flat = True
+    is_flat = curr_o == curr_c
 
     return up_continue, down_continue, is_limit_up, is_limit_down, is_flat
 
@@ -274,11 +270,11 @@ def check_orb_filters_for_symbols(realtime_sdk: EsunMarketdata, symbols) -> List
 
             tomorrow_limit_up, tomorrow_limit_down = calculate_limit_prices(v4) # v4 是收盤價
 
-            if tomorrow_limit_up > 300: # 價位太高
+            if tomorrow_limit_up > PRICE_RANGE_UP: # 價位太高
                 print(f'symbol:{symbol} 漲停價位太高，跳過')
                 continue
 
-            if tomorrow_limit_down < 50: # 價位太低
+            if tomorrow_limit_down < PRICE_RANGE_DOWN: # 價位太低
                 print(f'symbol:{symbol} 跌停價位太低，跳過')
                 continue
 

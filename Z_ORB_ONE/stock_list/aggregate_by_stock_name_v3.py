@@ -16,7 +16,7 @@ REQUEST_INTERVAL_SEC = 1
 MIN_ATR = 4.0
 ATR_PERIOD = 14
 
-MAX_LIMIT_UP_PRICE = 200.0
+MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 
 TOP_RANK = 100 # 出現次數的排名
@@ -129,39 +129,43 @@ def calculate_atr(response_data: Dict, period: int = ATR_PERIOD) -> float:
     return round(sum(tr_values) / len(tr_values), 4) if tr_values else 0.0
 
 
-def analyze_strict_streak(response_data: Dict) -> tuple[int, int, bool, bool, bool]:
+def analyze_limit_streak(response_data: Dict) -> tuple[int, int, bool, bool, bool]:
+    """計算從最新交易日起，連續收漲停／跌停的交易日數。"""
     bars = response_data.get("data", [])
-    if not bars:
+    if len(bars) < 2:
         return 0, 0, False, False, False
 
     curr = bars[0]
-    curr_h = float(curr["high"])
-    curr_l = float(curr["low"])
     curr_c = float(curr["close"])
     curr_o = float(curr["open"])
+    curr_limit_up, curr_limit_down = calculate_limit_prices(float(bars[1]["close"]))
+    is_limit_up = abs(curr_c - curr_limit_up) < 1e-8
+    is_limit_down = abs(curr_c - curr_limit_down) < 1e-8
 
     up_continue = 0
-    if curr_c > curr_o:
-        for bar in bars:
+    if is_limit_up:
+        for index in range(len(bars) - 1):
+            bar = bars[index]
+            previous_bar = bars[index + 1]
             bar_c = float(bar["close"])
-            bar_o = float(bar["open"])
-            if bar_c > bar_o:
+            limit_up, _limit_down = calculate_limit_prices(float(previous_bar["close"]))
+            if abs(bar_c - limit_up) < 1e-8:
                 up_continue += 1
             else:
                 break
 
     down_continue = 0
-    if curr_c < curr_o:
-        for bar in bars:
+    if is_limit_down:
+        for index in range(len(bars) - 1):
+            bar = bars[index]
+            previous_bar = bars[index + 1]
             bar_c = float(bar["close"])
-            bar_o = float(bar["open"])
-            if bar_c < bar_o:
+            _limit_up, limit_down = calculate_limit_prices(float(previous_bar["close"]))
+            if abs(bar_c - limit_down) < 1e-8:
                 down_continue += 1
             else:
                 break
 
-    is_limit_up = curr_c == curr_h
-    is_limit_down = curr_c == curr_l
     is_flat = curr_o == curr_c
 
     return up_continue, down_continue, is_limit_up, is_limit_down, is_flat
@@ -183,7 +187,7 @@ def symbol_historical_candles_continue_14(stock_id: str, sdk):
     )
     time.sleep(REQUEST_INTERVAL_SEC)
 
-    up_continue, down_continue, is_limit_up, is_limit_down, is_flat = analyze_strict_streak(response_data)
+    up_continue, down_continue, is_limit_up, is_limit_down, is_flat = analyze_limit_streak(response_data)
     atr = calculate_atr(response_data)
     return up_continue, down_continue, is_limit_up, is_limit_down, is_flat, atr
 

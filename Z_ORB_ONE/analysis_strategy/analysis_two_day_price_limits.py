@@ -18,17 +18,20 @@ from Z_ORB_ONE.stock_data import selected_stocks
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
+OUTPUT_FILE = Path(__file__).with_name('analysis_two_day_price_limits_result.txt')
 API_REQUEST_DELAY_SEC = 1
 FETCH_BUFFER_DAYS = 14
 DEFAULT_SCAN_DAYS = 40
-SIGNAL_BAR_TIME = datetime_time(9, 9)
-ENTRY_BAR_TIME = datetime_time(9, 10)
-EXIT_BAR_TIME = datetime_time(13, 25)
 BROKERAGE_FEE_RATE = 0.001425
 DAY_TRADE_TAX_RATE = 0.0015
-STOP_LOSS_PERCENT = 8.0
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
+SHOW_LIMIT_UP_ON_CONSOLE = True
+SHOW_LIMIT_DOWN_ON_CONSOLE = True
+
+SIGNAL_BAR_TIME = datetime_time(9, 4)
+ENTRY_BAR_TIME = datetime_time(9, 5)
+EXIT_BAR_TIME = datetime_time(13, 0)
 
 def get_api_cache_path(scan_from: date, scan_to: date) -> Path:
     cache_dir = Path(__file__).resolve().parent / 'analysis_json_cache'
@@ -326,7 +329,19 @@ def analyze_intraday_event(
     signal_bar = bars_by_time.get(SIGNAL_BAR_TIME)
     entry_bar = bars_by_time.get(ENTRY_BAR_TIME)
     if signal_bar is None or entry_bar is None:
-        return {'status': 'data_incomplete', 'direction': direction}
+        missing_items = []
+        if not bars_by_time:
+            missing_items.append(f"{next_day['date'].isoformat()} 整日分K")
+        else:
+            if signal_bar is None:
+                missing_items.append(SIGNAL_BAR_TIME.strftime('%H:%M') + '分K')
+            if entry_bar is None:
+                missing_items.append(ENTRY_BAR_TIME.strftime('%H:%M') + '分K')
+        return {
+            'status': 'data_incomplete',
+            'direction': direction,
+            'reason': '缺少' + '、'.join(missing_items),
+        }
 
     signal_confirmed = (
         signal_bar['close'] > second['close']
@@ -346,42 +361,36 @@ def analyze_intraday_event(
         if ENTRY_BAR_TIME <= bar_time <= EXIT_BAR_TIME
     )
     if not eligible_times:
-        return {'status': 'data_incomplete', 'direction': direction}
+        return {
+            'status': 'data_incomplete',
+            'direction': direction,
+            'reason': (
+                f'找不到 {ENTRY_BAR_TIME.strftime("%H:%M")}～'
+                f'{EXIT_BAR_TIME.strftime("%H:%M")} 的交易分K'
+            ),
+        }
 
     trade_bars = [bars_by_time[bar_time] for bar_time in eligible_times]
     entry_price = entry_bar['open']
     if entry_price <= 0:
-        return {'status': 'data_incomplete', 'direction': direction}
+        return {
+            'status': 'data_incomplete',
+            'direction': direction,
+            'reason': f'09:05進場開盤價無效: {entry_price:.2f}',
+        }
 
     exit_bar = trade_bars[-1]
     exit_price = exit_bar['close']
     exit_reason = '收盤'
-    analyzed_bars = trade_bars
-    if direction == '跌停':
-        stop_loss_price = entry_price * (1 + STOP_LOSS_PERCENT / 100)
-        for bar_index, bar in enumerate(trade_bars):
-            if bar['high'] >= stop_loss_price:
-                exit_bar = bar
-                exit_price = stop_loss_price
-                exit_reason = '停損'
-                # 分K無法得知同一根內 high/low 的先後；停損棒不計入 MFE，採保守估計。
-                analyzed_bars = trade_bars[:bar_index]
-                break
 
     if direction == '漲停':
         gross_return = (exit_price - entry_price) / entry_price * 100
-        mfe = (max(bar['high'] for bar in analyzed_bars) - entry_price) / entry_price * 100
-        mae = (entry_price - min(bar['low'] for bar in analyzed_bars)) / entry_price * 100
+        mfe = (max(bar['high'] for bar in trade_bars) - entry_price) / entry_price * 100
+        mae = (entry_price - min(bar['low'] for bar in trade_bars)) / entry_price * 100
     else:
         gross_return = (entry_price - exit_price) / entry_price * 100
-        if analyzed_bars:
-            mfe = (entry_price - min(bar['low'] for bar in analyzed_bars)) / entry_price * 100
-            mae = (max(bar['high'] for bar in analyzed_bars) - entry_price) / entry_price * 100
-        else:
-            mfe = 0.0
-            mae = 0.0
-        if exit_reason == '停損':
-            mae = STOP_LOSS_PERCENT
+        mfe = (entry_price - min(bar['low'] for bar in trade_bars)) / entry_price * 100
+        mae = (max(bar['high'] for bar in trade_bars) - entry_price) / entry_price * 100
 
     return {
         'status': 'entered',
@@ -400,7 +409,7 @@ def analyze_intraday_event(
 
 def format_intraday_result(result: dict) -> str:
     if result['status'] == 'data_incomplete':
-        return '  分K資料不足，未納入當沖統計'
+        return f"  分K資料不足：{result['reason']}，未納入當沖統計"
     if result['status'] == 'rejected':
         return f"  09:04 close={result['signal_close']:.2f}，方向未延續，不進場"
     side = '做多' if result['direction'] == '漲停' else '放空'
@@ -413,19 +422,20 @@ def format_intraday_result(result: dict) -> str:
     )
 
 
-def print_intraday_summary(results: list[dict]) -> None:
-    print(
-        f'當沖作空統計（09:04確認、09:05進場、停損{STOP_LOSS_PERCENT:g}%、最晚13:25出場）'
-    )
+def build_intraday_summary(direction: str, results: list[dict]) -> list[str]:
+    side = '做多' if direction == '漲停' else '放空'
+    direction_label = '連漲二天' if direction == '漲停' else '連跌二天'
+    lines = [
+        f'當沖{side}統計（09:04確認、09:05進場、最晚13:25出場）'
+    ]
     entered = [result for result in results if result['status'] == 'entered']
     rejected = sum(result['status'] == 'rejected' for result in results)
     incomplete = sum(result['status'] == 'data_incomplete' for result in results)
     wins = sum(result['net_return'] > 0 for result in entered)
     losses = len(entered) - wins
-    stopped = sum(result['exit_reason'] == '停損' for result in entered)
-    print(
-        f'連跌二天放空: 候選={len(results)} 訊號成立={len(entered)} '
-        f'未成立={rejected} 資料不足={incomplete} 停損={stopped} '
+    lines.append(
+        f'{direction_label}{side}: 候選={len(results)} 訊號成立={len(entered)} '
+        f'未成立={rejected} 資料不足={incomplete} '
         f'淨利成功={wins} 淨利失敗={losses}'
     )
     if entered:
@@ -433,11 +443,18 @@ def print_intraday_summary(results: list[dict]) -> None:
         average_net = sum(result['net_return'] for result in entered) / len(entered)
         average_mfe = sum(result['mfe'] for result in entered) / len(entered)
         average_mae = sum(result['mae'] for result in entered) / len(entered)
-        print(
+        lines.append(
             f'淨勝率={wins / len(entered) * 100:.2f}% '
             f'平均毛報酬={average_gross:.2f}% 平均淨報酬={average_net:.2f}% '
             f'平均MFE={average_mfe:.2f}% 平均MAE={average_mae:.2f}%'
         )
+    return lines
+
+
+def should_show_on_console(direction: str) -> bool:
+    if direction == '漲停':
+        return SHOW_LIMIT_UP_ON_CONSOLE
+    return SHOW_LIMIT_DOWN_ON_CONSOLE
 
 
 def main() -> None:
@@ -474,7 +491,11 @@ def main() -> None:
             print(f'[ERROR] SDK 初始化失敗: {exc}', file=sys.stderr)
             sys.exit(1)
 
-    intraday_results: list[dict] = []
+    intraday_results_by_direction: dict[str, list[dict]] = {'漲停': [], '跌停': []}
+    report_lines = [
+        f'掃描期間: {scan_from.isoformat()} ~ {scan_to.isoformat()}',
+        '',
+    ]
     total = len(selected_stocks)
     for index, stock_item in enumerate(selected_stocks, start=1):
         stock_name = stock_item[0]
@@ -492,11 +513,7 @@ def main() -> None:
                 )
                 daily_raw_by_symbol[stock_name] = raw_candles
             candles = normalize_daily_candles(raw_candles)
-            events = [
-                event
-                for event in find_two_day_limit_events(candles, scan_from, scan_to)
-                if event[3] == '跌停'
-            ]
+            events = find_two_day_limit_events(candles, scan_from, scan_to)
             minute_candles_by_date: dict[date, dict[datetime_time, dict]] = {}
             if events:
                 if cached is not None:
@@ -520,8 +537,11 @@ def main() -> None:
 
             for event in events:
                 intraday_result = analyze_intraday_event(event, minute_candles_by_date)
-                intraday_results.append(intraday_result)
-                if intraday_result['status'] == 'entered':
+                direction = event[3]
+                intraday_results_by_direction[direction].append(intraday_result)
+                report_lines.append(f'[{direction}] {format_event(stock_item, event)}')
+                report_lines.append(format_intraday_result(intraday_result))
+                if should_show_on_console(direction):
                     print(f'\r{format_event(stock_item, event)}')
                     print(format_intraday_result(intraday_result))
         except Exception as exc:
@@ -542,7 +562,20 @@ def main() -> None:
             minute_raw_by_symbol,
         )
         print(f'已儲存API快取: {cache_path.name}')
-    print_intraday_summary(intraday_results)
+    report_lines.append('')
+    for direction in ('漲停', '跌停'):
+        summary_lines = build_intraday_summary(
+            direction,
+            intraday_results_by_direction[direction],
+        )
+        report_lines.extend(summary_lines)
+        report_lines.append('')
+        if should_show_on_console(direction):
+            for line in summary_lines:
+                print(line)
+
+    OUTPUT_FILE.write_text('\n'.join(report_lines).rstrip() + '\n', encoding='utf-8')
+    print(f'已產出分析結果: {OUTPUT_FILE.name}')
 
 
 if __name__ == '__main__':
