@@ -32,8 +32,9 @@ if PROJECT_ROOT not in sys.path:
 from Z_ORB_ONE.stock_data import market_previous_close_indices
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_DATE = "20260708"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 DISPLAY_INDEX_CODES = ("IX0001", "IX0043")  # 依序以分頁顯示上市、上櫃指數
+DISPLAY_STOCK_CODES = ["8042"]  # 要額外顯示的 4 位數股票代碼，例如 ["2330", "2317"]
 
 RESERVE_MARKET_INDICES = {
     "TWSE:MARKET": {
@@ -95,6 +96,16 @@ def parse_specified_date(date_str: str) -> date:
 def normalize_index_code(index_code: str) -> str:
     """標準化指數代碼；支援 IX0001 或 TWSE:24 這類 market index key。"""
     return index_code.strip().upper()
+
+
+def normalize_stock_code(stock_code: str) -> str:
+    """驗證並標準化股票代碼，僅接受 4 位數字。"""
+    normalized_code = str(stock_code).strip()
+    if not re.fullmatch(r"\d{4}", normalized_code):
+        raise ValueError(
+            f"DISPLAY_STOCK_CODES 內的股票代碼必須是 4 位數字: {stock_code!r}"
+        )
+    return normalized_code
 
 
 def find_specified_index(index_code: str) -> tuple[str, dict]:
@@ -530,6 +541,52 @@ def build_index_figure(rest_stock, index_code: str, target_date: date) -> tuple[
     return fig, tab_title
 
 
+def build_stock_figure(rest_stock, stock_code: str, target_date: date) -> tuple[Figure, str]:
+    """抓取單一股票資料並回傳可嵌入視窗的 matplotlib Figure。"""
+    code = normalize_stock_code(stock_code)
+    fig = Figure(figsize=(20, 10))
+    grid = fig.add_gridspec(2, 1, height_ratios=[4.5, 1.5], hspace=0.05)
+    price_ax = fig.add_subplot(grid[0])
+    volume_ax = fig.add_subplot(grid[1], sharex=price_ax)
+
+    candles_by_day = fetch_recent_candles(rest_stock, code, target_date, lookback_days=40)
+    historical_rows = candles_by_day.get(target_date, [])
+    if not historical_rows:
+        raise ValueError(f"股票 {code} 在 {target_date.strftime('%Y-%m-%d')} 無當日分K資料")
+
+    prev_trade_date, prev_open_price, prev_high_price, prev_low_price, prev_close_price = (
+        calculate_previous_day_ohlc(candles_by_day, code, target_date)
+    )
+    title = (
+        f"股票 {code} 前日:{prev_trade_date.strftime('%Y-%m-%d')} "
+        f"昨開:{format_tw_price(prev_open_price)} "
+        f"昨高:{format_tw_price(prev_high_price)} "
+        f"昨低:{format_tw_price(prev_low_price)} "
+        f"昨收:{format_tw_price(prev_close_price)}"
+    )
+
+    print(
+        f"[INFO] Draw stock {code} "
+        f"(target={target_date.strftime('%Y-%m-%d')}, prev={prev_trade_date.strftime('%Y-%m-%d')}) ..."
+    )
+    draw_intraday_ohlc(
+        ax=price_ax,
+        volume_ax=volume_ax,
+        symbol_code=code,
+        target_date=target_date,
+        historical_rows=historical_rows,
+        fig_title=title,
+        prev_open_loc=prev_open_price,
+        prev_high_loc=prev_high_price,
+        prev_close_loc=prev_close_price,
+        show_limit_prices=True,
+        value_formatter=format_tw_price,
+    )
+
+    fig.subplots_adjust(left=0.03, right=0.985, top=0.95, bottom=0.08, hspace=0.05)
+    return fig, f"股票 {code}"
+
+
 def add_figure_tab(notebook: ttk.Notebook, fig: Figure, tab_title: str) -> None:
     frame = ttk.Frame(notebook)
     notebook.add(frame, text=tab_title)
@@ -566,6 +623,10 @@ def main():
 
     for index_code in DISPLAY_INDEX_CODES:
         fig, tab_title = build_index_figure(rest_stock, index_code, target_date)
+        add_figure_tab(notebook, fig, tab_title)
+
+    for stock_code in DISPLAY_STOCK_CODES:
+        fig, tab_title = build_stock_figure(rest_stock, stock_code, target_date)
         add_figure_tab(notebook, fig, tab_title)
 
     print("[DONE] Charts opened on screen.")
