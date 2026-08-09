@@ -8,8 +8,8 @@ from pathlib import Path
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 
-LIMIT_UP_REPEAT_COUNT = 1 # 連漲停多少次，才分開列於 stock_data.py
-LIMIT_DOWN_REPEAT_COUNT = 1 # 連跌停多少次，才分開列於 stock_data.py
+LIMIT_UP_REPEAT_COUNT = 2 # 連漲停多少次，才分開列於 stock_data.py
+LIMIT_DOWN_REPEAT_COUNT = 2 # 連跌停多少次，才分開列於 stock_data.py
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 

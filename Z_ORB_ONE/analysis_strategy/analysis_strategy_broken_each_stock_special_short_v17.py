@@ -1716,7 +1716,7 @@ def find_first_bar(today_bars: list):
 
 
 def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
-    """09:30 前分K少於 15 根者視為處分股票，排除。"""
+    """09:30 前分K少於 25 根者視為處分股票，排除。"""
     before_0930_count = 0
     for bar in today_bars:
         dtv = bar.get('dt')
@@ -1724,7 +1724,7 @@ def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
             continue
         if (dtv.hour, dtv.minute) < (9, 30):
             before_0930_count += 1
-    return before_0930_count >= 15
+    return before_0930_count >= 25
 
 
 def scan_entry_signal_lower(

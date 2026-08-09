@@ -21,7 +21,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from esun_marketdata import EsunMarketdata
-from Z_ORB_ONE.stock_data import selected_stocks
+from Z_ORB_ONE.stock_data import (
+    selected_limit_down_stocks,
+    selected_limit_up_stocks,
+    selected_stocks,
+)
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
@@ -34,14 +38,17 @@ BROKERAGE_FEE_RATE = 0.001425
 DAY_TRADE_TAX_RATE = 0.0015
 CACHE_VERSION = 2
 
-SHOW_LIMIT_UP_ON_CONSOLE = True
-SHOW_LIMIT_DOWN_ON_CONSOLE = False
+SHOW_LIMIT_UP_ON_CONSOLE = False
+SHOW_LIMIT_DOWN_ON_CONSOLE = True
+
+SCAN_STOCKS = selected_stocks + selected_limit_up_stocks + selected_limit_down_stocks
 
 LONG_LIMIT_UP_DAYS = 2
 SHORT_LIMIT_DOWN_DAYS = 2
 
 LONG_STOP_LOSS_PERCENT = 2.0
 LONG_TAKE_PROFIT_PERCENT = 10.0
+LONG_ENTRY_AVG_BELOW_PREVIOUS_CLOSE_PERCENT = 0.3
 
 SHORT_STOP_LOSS_PERCENT = 2.0
 SHORT_TAKE_PROFIT_PERCENT = 10.0
@@ -49,6 +56,7 @@ SHORT_TAKE_PROFIT_PERCENT = 10.0
 ENTRY_BAR_TIME = datetime_time(9, 40)
 ENTRY_BAR_TIME_END = datetime_time(10, 1)
 EXIT_BAR_TIME = datetime_time(13, 0)
+MIN_MINUTE_BARS_BEFORE_0930 = 25
 
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -343,6 +351,14 @@ def normalize_minute_candles(raw_candles: list[dict]) -> dict[date, dict[datetim
             continue
         candles_by_date.setdefault(bar_dt.date(), {})[bar_dt.time()] = bar
     return candles_by_date
+
+
+def has_enough_minute_bars_before_0930(bars_by_time: dict[datetime_time, dict]) -> bool:
+    before_0930_count = sum(
+        1 for bar_time in bars_by_time
+        if bar_time < datetime_time(9, 30)
+    )
+    return before_0930_count >= MIN_MINUTE_BARS_BEFORE_0930
 
 
 def get_stock_atr_value(stock_item: tuple) -> float | None:
@@ -743,7 +759,12 @@ def find_long_entry_from_two_bars(
         second_bar = bars_by_time[second_time]
         if second_bar['dt'] - first_bar['dt'] != timedelta(minutes=1):
             continue
-        if first_bar['low'] >= previous_close and second_bar['low'] < previous_close:
+        if (
+            first_bar['high'] <= previous_close
+            and second_bar['high'] > previous_close
+            and previous_close - second_bar['average']
+            > previous_close * (LONG_ENTRY_AVG_BELOW_PREVIOUS_CLOSE_PERCENT / 100)
+        ):
             return second_bar, None
 
     return None, None
@@ -818,6 +839,15 @@ def analyze_intraday_event(
             'status': 'data_incomplete',
             'direction': direction,
             'reason': f"缺少{next_day['date'].isoformat()} 整日分K",
+        }
+    if not has_enough_minute_bars_before_0930(bars_by_time):
+        return {
+            'status': 'data_incomplete',
+            'direction': direction,
+            'reason': (
+                f'09:30前分K少於{MIN_MINUTE_BARS_BEFORE_0930}根，'
+                '疑似受管制股票'
+            ),
         }
 
     entry_price_label = f'{format_bar_time(ENTRY_BAR_TIME)}進場開盤價'
@@ -1057,7 +1087,7 @@ def main() -> None:
     cache_path = get_api_cache_path(scan_from, scan_to)
     cached = load_api_cache(
         cache_path,
-        selected_stocks,
+        SCAN_STOCKS,
         fetch_from,
         fetch_to,
     )
@@ -1081,8 +1111,8 @@ def main() -> None:
         f'掃描期間: {scan_from.isoformat()} ~ {scan_to.isoformat()}',
         '',
     ]
-    total = len(selected_stocks)
-    for index, stock_item in enumerate(selected_stocks, start=1):
+    total = len(SCAN_STOCKS)
+    for index, stock_item in enumerate(SCAN_STOCKS, start=1):
         stock_name = stock_item[0]
         progress_label = '快取分析進度' if cached is not None else 'API抓取進度'
         print(f'\r{progress_label}: {index}/{total} - {stock_name}', end='', flush=True)
@@ -1155,7 +1185,7 @@ def main() -> None:
     if cached is None:
         save_api_cache(
             cache_path,
-            selected_stocks,
+            SCAN_STOCKS,
             fetch_from,
             fetch_to,
             daily_raw_by_symbol,
