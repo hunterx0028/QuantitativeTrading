@@ -8,6 +8,7 @@ reference index value.
 """
 
 import argparse
+import ast
 import importlib.util
 import json
 import os
@@ -563,30 +564,55 @@ def build_market_previous_close_indices(
     return result
 
 
+def find_assignment(source: str, name: str) -> Tuple[int, int]:
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if name in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+
+    raise ValueError(f"找不到 {name} 宣告")
+
+
+def format_market_previous_close_indices(
+    market_previous_close_indices: Dict[str, Dict[str, Any]],
+) -> str:
+    return (
+        "market_previous_close_indices = "
+        + pformat(market_previous_close_indices, sort_dicts=False)
+    )
+
+
 def write_stock_data(
     stock_data_path: Path,
     market_previous_close_indices: Dict[str, Dict[str, Any]],
-    selected_stocks: List[StockTuple],
 ) -> None:
-    lines = [
-        "# 股票代碼、購買量、昨天開盤、昨天最高、昨天最低、昨天收盤、產業別代碼、真實平均波動幅度、(連漲天數, 連跌天數)\n"
-    ]
-    lines.append("market_previous_close_indices = ")
-    lines.append(pformat(market_previous_close_indices, sort_dicts=False))
-    lines.append("\n\n")
-    lines.append("selected_stocks = [\n")
-    for item in selected_stocks:
-        lines.append(f"    {repr(item)},\n")
-    lines.append("]\n")
-
     stock_data_path = stock_data_path.resolve()
+    source = stock_data_path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    start_line, end_line = find_assignment(source, "market_previous_close_indices")
+    replacement = format_market_previous_close_indices(market_previous_close_indices).splitlines()
+    updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+
     with NamedTemporaryFile(
         "w",
         encoding="utf-8",
         dir=str(stock_data_path.parent),
         delete=False,
     ) as tmp_file:
-        tmp_file.writelines(lines)
+        tmp_file.write(updated_source)
         tmp_file.flush()
         os.fsync(tmp_file.fileno())
         tmp_path = Path(tmp_file.name)
@@ -682,7 +708,14 @@ def main() -> int:
     args = parser.parse_args()
 
     stock_module = load_python_module(args.stock_data.resolve(), "stock_data_for_index_update")
-    selected_stocks: List[StockTuple] = list(stock_module.selected_stocks)
+    selected_stocks: List[StockTuple] = list(getattr(stock_module, "selected_stocks", []))
+    selected_limit_up_stocks: List[StockTuple] = list(
+        getattr(stock_module, "selected_limit_up_stocks", [])
+    )
+    selected_limit_down_stocks: List[StockTuple] = list(
+        getattr(stock_module, "selected_limit_down_stocks", [])
+    )
+    target_stocks = selected_stocks + selected_limit_up_stocks + selected_limit_down_stocks
     existing_indices = dict(getattr(stock_module, "market_previous_close_indices", {}))
 
     original_cwd = Path.cwd()
@@ -706,11 +739,15 @@ def main() -> int:
                 args.raw_twse,
             )
 
-        targets, missing_stocks = build_index_targets(selected_stocks, industry_map)
+        targets, missing_stocks = build_index_targets(target_stocks, industry_map)
         if not targets:
             raise ValueError("候選股票沒有任何可更新的產業類股指數。")
 
-        log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(selected_stocks))} 個交易所/產業組合")
+        log(f"[INFO] selected_stocks_count={len(selected_stocks)}")
+        log(f"[INFO] selected_limit_up_stocks_count={len(selected_limit_up_stocks)}")
+        log(f"[INFO] selected_limit_down_stocks_count={len(selected_limit_down_stocks)}")
+        log(f"[INFO] index_target_stocks_count={len(target_stocks)}")
+        log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(target_stocks))} 個交易所/產業組合")
         log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
         print_missing_stocks(missing_stocks)
 
@@ -745,7 +782,7 @@ def main() -> int:
             log("[INFO] dry-run 模式，未寫回 stock_data.py")
             return 0
 
-        write_stock_data(args.stock_data.resolve(), updated_indices, selected_stocks)
+        write_stock_data(args.stock_data.resolve(), updated_indices)
         log(f"[INFO] 已更新 {args.stock_data.resolve()}")
         return 0
     finally:

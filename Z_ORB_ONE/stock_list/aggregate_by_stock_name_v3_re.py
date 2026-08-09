@@ -8,9 +8,12 @@ from pathlib import Path
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 
-TOP_RANK = 30 # 出現次數的排名
+LIMIT_UP_REPEAT_COUNT = 1 # 連漲停多少次，才分開列於 stock_data.py
+LIMIT_DOWN_REPEAT_COUNT = 1 # 連跌停多少次，才分開列於 stock_data.py
 
-MIN_REPEAT_COUNT = 11 # 最少的累計次數
+TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
+
+MIN_REPEAT_COUNT = 11 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 EXCLUDED_INDUSTRY_CODES: list[str] = [] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"
@@ -186,8 +189,8 @@ def select_records_for_repeat_count(ranked: list[tuple[tuple, int]]) -> tuple[li
     return records, header_suffix
 
 
-def format_selected_stocks(records: list[tuple]) -> str:
-    lines = ["selected_stocks = ["]
+def format_stock_records_assignment(name: str, records: list[tuple]) -> str:
+    lines = [f"{name} = ["]
     lines.extend(f"    {record!r}," for record in records)
     lines.append("]")
     return "\n".join(lines)
@@ -237,23 +240,72 @@ def find_assignment(source: str, name: str) -> tuple[int, int] | None:
     return None
 
 
-def remove_entry_mode(source: str) -> str:
+def ensure_selected_limit_stock_lists(source: str) -> str:
     lines = source.splitlines()
-    entry_mode_assignment = find_assignment(source, "entry_mode")
-    if entry_mode_assignment is not None:
-        start_line, end_line = entry_mode_assignment
-        del lines[start_line:end_line]
+    missing_names = [
+        name
+        for name in ("selected_limit_up_stocks", "selected_limit_down_stocks")
+        if find_assignment(source, name) is None
+    ]
+    if not missing_names:
+        return source
+
+    _start_line, end_line = find_selected_stocks_assignment(source)
+    insert_lines = [""]
+    insert_lines.extend(f"{name} = []" for name in missing_names)
+    lines[end_line:end_line] = insert_lines
     return "\n".join(lines) + "\n"
 
 
-def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> None:
-    source = stock_data_path.read_text(encoding="utf-8")
+def replace_stock_records_assignment(source: str, name: str, records: list[tuple]) -> str:
     lines = source.splitlines()
-    start_line, end_line = find_selected_stocks_assignment(source)
-    replacement = format_selected_stocks(records).splitlines()
-    updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
-    updated_source = remove_entry_mode(updated_source)
-    stock_data_path.write_text(updated_source, encoding="utf-8")
+    assignment = find_assignment(source, name)
+    if assignment is None:
+        raise ValueError(f"找不到 {name} 宣告")
+
+    start_line, end_line = assignment
+    replacement = format_stock_records_assignment(name, records).splitlines()
+    return "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+
+
+def get_limit_repeat_counts(record: tuple) -> tuple[int, int]:
+    repeat_counts = record[-1] if record else None
+    if not isinstance(repeat_counts, tuple) or len(repeat_counts) < 2:
+        return 0, 0
+
+    return int(repeat_counts[0]), int(repeat_counts[1])
+
+
+def split_records_by_limit_repeat(
+    records: list[tuple],
+) -> tuple[list[tuple], list[tuple], list[tuple]]:
+    selected_records = []
+    limit_up_records = []
+    limit_down_records = []
+    for record in records:
+        up_repeat_count, down_repeat_count = get_limit_repeat_counts(record)
+        if up_repeat_count >= LIMIT_UP_REPEAT_COUNT:
+            limit_up_records.append(record)
+        elif down_repeat_count >= LIMIT_DOWN_REPEAT_COUNT:
+            limit_down_records.append(record)
+        else:
+            selected_records.append(record)
+
+    return selected_records, limit_up_records, limit_down_records
+
+
+def update_selected_stocks_file(
+    stock_data_path: Path,
+    selected_records: list[tuple],
+    limit_up_records: list[tuple],
+    limit_down_records: list[tuple],
+) -> None:
+    source = stock_data_path.read_text(encoding="utf-8")
+    source = ensure_selected_limit_stock_lists(source)
+    source = replace_stock_records_assignment(source, "selected_stocks", selected_records)
+    source = replace_stock_records_assignment(source, "selected_limit_up_stocks", limit_up_records)
+    source = replace_stock_records_assignment(source, "selected_limit_down_stocks", limit_down_records)
+    stock_data_path.write_text(source, encoding="utf-8")
 
 
 def replace_top_repeat_section(lines: list[str], blocks: list[tuple[list[tuple], str]]) -> list[str]:
@@ -342,7 +394,15 @@ def main() -> None:
         ],
     )
     output_result_path.write_text("".join(updated_lines), encoding="utf-8")
-    update_selected_stocks_file(stock_data_path, repeat_records)
+    selected_stock_records, selected_limit_up_stock_records, selected_limit_down_stock_records = (
+        split_records_by_limit_repeat(repeat_records)
+    )
+    update_selected_stocks_file(
+        stock_data_path,
+        selected_stock_records,
+        selected_limit_up_stock_records,
+        selected_limit_down_stock_records,
+    )
 
     log(f"done: {output_result_path}")
     log(f"updated selected_stocks: {stock_data_path}")
@@ -357,7 +417,18 @@ def main() -> None:
     log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
     log(f"top_result_count(rank)={len(rank_records)}")
     log(f"top_result_count(repeat_count)={len(repeat_records)}")
-    log(f"selected_stocks_previous_close_total={sum_previous_close_prices(repeat_records)}")
+    log(f"selected_stocks_count={len(selected_stock_records)}")
+    log(f"selected_limit_up_stocks_count={len(selected_limit_up_stock_records)}")
+    log(f"selected_limit_down_stocks_count={len(selected_limit_down_stock_records)}")
+    log(f"selected_stocks_previous_close_total={sum_previous_close_prices(selected_stock_records)}")
+    log(
+        "selected_limit_up_stocks_previous_close_total="
+        f"{sum_previous_close_prices(selected_limit_up_stock_records)}"
+    )
+    log(
+        "selected_limit_down_stocks_previous_close_total="
+        f"{sum_previous_close_prices(selected_limit_down_stock_records)}"
+    )
 
 
 if __name__ == "__main__":

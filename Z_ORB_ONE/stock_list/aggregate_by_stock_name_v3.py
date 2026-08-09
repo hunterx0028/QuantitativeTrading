@@ -19,9 +19,12 @@ ATR_PERIOD = 14
 MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 
-TOP_RANK = 100 # 出現次數的排名
+LIMIT_UP_REPEAT_COUNT = 1 # 連漲停多少次，才分開列於 stock_data.py
+LIMIT_DOWN_REPEAT_COUNT = 1 # 連跌停多少次，才分開列於 stock_data.py
 
-MIN_REPEAT_COUNT = 5 # 最少的累計次數
+TOP_RANK = 100 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
+
+MIN_REPEAT_COUNT = 3 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 ST_DB_KEEP_RECENT_FILE_COUNT = 25 # st_db 保留最新 25 個日期檔案
 ST_DB_CALCULATE_RECENT_FILE_COUNT = 14 # 從保留檔案中取最新 14 個進行統計
@@ -290,8 +293,8 @@ def validate_stock_db_file_counts(keep_count: int, calculate_count: int) -> None
         )
 
 
-def format_selected_stocks(records: list[tuple]) -> str:
-    lines = ["selected_stocks = ["]
+def format_stock_records_assignment(name: str, records: list[tuple]) -> str:
+    lines = [f"{name} = ["]
     lines.extend(f"    {record!r}," for record in records)
     lines.append("]")
     return "\n".join(lines)
@@ -341,23 +344,54 @@ def find_assignment(source: str, name: str) -> tuple[int, int] | None:
     return None
 
 
-def remove_entry_mode(source: str) -> str:
+def ensure_selected_limit_stock_lists(source: str) -> str:
     lines = source.splitlines()
-    entry_mode_assignment = find_assignment(source, "entry_mode")
-    if entry_mode_assignment is not None:
-        start_line, end_line = entry_mode_assignment
-        del lines[start_line:end_line]
+    missing_names = [
+        name
+        for name in ("selected_limit_up_stocks", "selected_limit_down_stocks")
+        if find_assignment(source, name) is None
+    ]
+    if not missing_names:
+        return source
+
+    _start_line, end_line = find_selected_stocks_assignment(source)
+    insert_lines = [""]
+    insert_lines.extend(f"{name} = []" for name in missing_names)
+    lines[end_line:end_line] = insert_lines
     return "\n".join(lines) + "\n"
 
 
-def update_selected_stocks_file(stock_data_path: Path, records: list[tuple]) -> None:
-    source = stock_data_path.read_text(encoding="utf-8")
+def replace_stock_records_assignment(source: str, name: str, records: list[tuple]) -> str:
     lines = source.splitlines()
-    start_line, end_line = find_selected_stocks_assignment(source)
-    replacement = format_selected_stocks(records).splitlines()
-    updated_source = "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
-    updated_source = remove_entry_mode(updated_source)
-    stock_data_path.write_text(updated_source, encoding="utf-8")
+    assignment = find_assignment(source, name)
+    if assignment is None:
+        raise ValueError(f"找不到 {name} 宣告")
+
+    start_line, end_line = assignment
+    replacement = format_stock_records_assignment(name, records).splitlines()
+    return "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+
+
+def get_limit_repeat_counts(record: tuple) -> tuple[int, int]:
+    repeat_counts = record[-1] if record else None
+    if not isinstance(repeat_counts, tuple) or len(repeat_counts) < 2:
+        return 0, 0
+
+    return int(repeat_counts[0]), int(repeat_counts[1])
+
+
+def update_selected_stocks_file(
+    stock_data_path: Path,
+    selected_records: list[tuple],
+    limit_up_records: list[tuple],
+    limit_down_records: list[tuple],
+) -> None:
+    source = stock_data_path.read_text(encoding="utf-8")
+    source = ensure_selected_limit_stock_lists(source)
+    source = replace_stock_records_assignment(source, "selected_stocks", selected_records)
+    source = replace_stock_records_assignment(source, "selected_limit_up_stocks", limit_up_records)
+    source = replace_stock_records_assignment(source, "selected_limit_down_stocks", limit_down_records)
+    stock_data_path.write_text(source, encoding="utf-8")
 
 
 def main() -> None:
@@ -502,11 +536,28 @@ def main() -> None:
         for stock_name in sorted(min_repeat_updated_by_stock.keys()):
             f.write(f"{min_repeat_updated_by_stock[stock_name]},\n")
 
-    selected_stock_records = [
+    min_repeat_stock_records = [
         min_repeat_updated_by_stock[stock_name]
         for stock_name in sorted(min_repeat_updated_by_stock.keys())
     ]
-    update_selected_stocks_file(stock_data_path, selected_stock_records)
+    selected_stock_records = []
+    selected_limit_up_stock_records = []
+    selected_limit_down_stock_records = []
+    for record in min_repeat_stock_records:
+        up_repeat_count, down_repeat_count = get_limit_repeat_counts(record)
+        if up_repeat_count >= LIMIT_UP_REPEAT_COUNT:
+            selected_limit_up_stock_records.append(record)
+        elif down_repeat_count >= LIMIT_DOWN_REPEAT_COUNT:
+            selected_limit_down_stock_records.append(record)
+        else:
+            selected_stock_records.append(record)
+
+    update_selected_stocks_file(
+        stock_data_path,
+        selected_stock_records,
+        selected_limit_up_stock_records,
+        selected_limit_down_stock_records,
+    )
 
     log(f"done: {output_path}")
     log(f"updated selected_stocks: {stock_data_path}")

@@ -20,3 +20,5 @@ Z_ORB_ONE/tpex_indices.json
 Z_ORB_ONE/twse_indices.json
 Z_ORB_ONE/industry_index_map.json
 execute_strategy_broken_high_falling_docker_v17.py
+*.pdf
+/pdf_folder/
