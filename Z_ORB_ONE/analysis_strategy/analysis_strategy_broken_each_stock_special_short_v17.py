@@ -1853,10 +1853,10 @@ def scan_entry_signal_follow(
     """
     follow 作多進場訊號：
     1) 進場檢查時間為 STRATEGY_START_FOLLOW 到 STRATEGY_END_FOLLOW（含起訖）
-    2) 取時間窗內第一根 high 落在入場區間的 K 棒作為進場 K 棒
+    2) 取時間窗內第一根 high 落在入場區間，且 low 高於決策前最低價的 K 棒作為進場 K 棒
     3) 進場價 = 進場分K棒 high
     4) 取本日開盤至 STRATEGY_DECISION（不含）的最低價
-    5) 若進場分K棒 low 小於等於上述最低價，當日封單、不再尋找後續訊號
+    5) 若候選分K棒 low 小於等於上述最低價，略過並繼續尋找後續訊號
     """
     start_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
     end_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
@@ -1900,12 +1900,10 @@ def scan_entry_signal_follow(
         if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
             continue
 
-        if (
-            bar_low is not None
-            and decision_period_low is not None
-            and bar_low <= decision_period_low
-        ):
-            return None
+        if bar_low is None or decision_period_low is None:
+            continue
+        if bar_low <= decision_period_low:
+            continue
 
         return bar, entry_price
     return None

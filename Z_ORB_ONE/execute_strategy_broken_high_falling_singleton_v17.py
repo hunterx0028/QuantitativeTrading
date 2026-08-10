@@ -1973,20 +1973,28 @@ def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
     if yesterday_close_price is None or limit_up_price is None:
         return False
 
+    pre_last_price = state.get("pre_last_price")
+    pre_last_price_time = state.get("pre_last_price_time")
     last_price = state.get("last_price", 0)
     best_ask_price = state.get("best_ask_price")
-    if last_price is None or best_ask_price is None:
+    if (
+        pre_last_price is None
+        or pre_last_price_time is None
+        or last_price is None
+        or best_ask_price is None
+    ):
         return False
 
     try:
         yesterday_close = float(yesterday_close_price)
         limit_up = float(limit_up_price)
+        pre_last_px = float(pre_last_price)
         last_px = float(last_price)
         best_ask = float(best_ask_price)
     except (TypeError, ValueError):
         return False
 
-    if last_px <= 0 or best_ask <= 0:
+    if pre_last_px <= 0 or last_px <= 0 or best_ask <= 0:
         return False
 
     entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
@@ -2015,13 +2023,13 @@ def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
         )
         return 'BLOCKED'
 
-    if last_px <= follow_decision_low:
+    if pre_last_px <= follow_decision_low:
         print(
             f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"FOLLOW 現價小於等於 STRATEGY_DECISION 前最低價，趨勢轉向封鎖進場 "
-            f"last_price={last_px} decision_low={follow_decision_low}"
+            f"FOLLOW 前一筆即時價小於等於 STRATEGY_DECISION 前最低價，暫不進場 "
+            f"pre_last_price={pre_last_px} decision_low={follow_decision_low}"
         )
-        return 'BLOCKED'
+        return False
 
     if best_ask < last_px:
         print(
