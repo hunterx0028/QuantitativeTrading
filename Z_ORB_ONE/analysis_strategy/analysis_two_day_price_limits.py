@@ -38,7 +38,7 @@ BROKERAGE_FEE_RATE = 0.001425
 DAY_TRADE_TAX_RATE = 0.0015
 CACHE_VERSION = 2
 
-SHOW_LIMIT_UP_ON_CONSOLE = False
+SHOW_LIMIT_UP_ON_CONSOLE = True
 SHOW_LIMIT_DOWN_ON_CONSOLE = True
 
 SCAN_STOCKS = selected_stocks + selected_limit_up_stocks + selected_limit_down_stocks
