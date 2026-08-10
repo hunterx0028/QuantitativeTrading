@@ -95,14 +95,28 @@ def load_stock_data_from_runtime_file():
     spec.loader.exec_module(module)
     sys.modules["stock_data"] = module
 
-    if not hasattr(module, "selected_stocks"):
-        raise AttributeError("stock_data.py does not define selected_stocks")
+    required_stock_data_fields = (
+        "selected_stocks",
+        "selected_limit_up_stocks",
+        "selected_limit_down_stocks",
+        "market_previous_close_indices",
+    )
+    missing_fields = [
+        field_name
+        for field_name in required_stock_data_fields
+        if not hasattr(module, field_name)
+    ]
+    if missing_fields:
+        raise AttributeError(
+            "stock_data.py does not define required field(s): "
+            + ", ".join(missing_fields)
+        )
 
     stock_data = module
     selected_stocks = module.selected_stocks
-    selected_limit_up_stocks = getattr(module, "selected_limit_up_stocks", [])
-    selected_limit_down_stocks = getattr(module, "selected_limit_down_stocks", [])
-    market_previous_close_indices = getattr(module, "market_previous_close_indices", {})
+    selected_limit_up_stocks = module.selected_limit_up_stocks
+    selected_limit_down_stocks = module.selected_limit_down_stocks
+    market_previous_close_indices = module.market_previous_close_indices
     return selected_stocks
 
 
@@ -220,66 +234,6 @@ def safe_logout_sdk(name: str, sdk_obj: Any):
 '''
 
 
-DOCKER_MAIN = '''if __name__ == "__main__":
-    #print(calculate_range_fraction_prices(74.3, 72.1, "SHORT"))
-    #print(10*get_tick_size(74.3))
-
-    base_dir = os.path.dirname(__file__)
-    execute_result_path = os.path.join(base_dir, "execute_strategy_result.txt")
-    capture_buffer = io.StringIO()
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    sys.stdout = TeeStream(original_stdout, capture_buffer)
-    sys.stderr = TeeStream(original_stderr, capture_buffer)
-
-    realtime_sdk = None
-    sdk = None
-    market_index_ws = None
-
-    try:
-        print("===== Prepare runtime files =====")
-        download_runtime_files_from_s3()
-        candidate_symbols = load_stock_data_from_runtime_file()
-        persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
-
-        validate_market_reversal_time_config()
-        wait_until_main_start_time()
-        MARKET_REVERSAL_STOP_EVENT.clear()
-        MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
-        clear_state_dir()
-
-        # 登入以操作 API
-        config = ConfigParser()
-        config.read("config.ini")
-
-        realtime_sdk, sdk = login_sdks(config)
-        market_index_ws = start_market_index_stream(realtime_sdk)
-
-        states = initialize_states(candidate_symbols, realtime_sdk)
-
-        # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
-        align_now = now_tpe()
-        align_next = ceil_next_interval(align_now, 5)
-        align_sleep_sec = max(0.2, (align_next - align_now).total_seconds())
-        time.sleep(align_sleep_sec)
-
-        # 開始正式作業
-        monitor(states, sdk, realtime_sdk)
-    finally:
-        close_market_index_stream(market_index_ws)
-        safe_logout_sdk("Esun Trade SDK", sdk)
-        safe_logout_sdk("EsunMarketdata", realtime_sdk)
-
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
-        try:
-            with open(execute_result_path, "w", encoding="utf-8") as f:
-                f.write(capture_buffer.getvalue())
-        except Exception as e:
-            print(f"[WARN] 無法輸出 execute_strategy_result.txt：{e}", file=original_stderr)
-'''
-
-
 DOCKER_PERSIST_SELECTED_STOCKS = '''def persist_selected_stocks_to_stock_data(
     stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]]
 ):
@@ -307,32 +261,6 @@ def output_name_for(strategy_filename: str) -> str:
     return strategy_filename.replace("_singleton_", "_docker_", 1)
 
 
-def replace_main_block(source: str, replacement: str) -> str:
-    tree = ast.parse(source)
-    lines = source.splitlines(keepends=True)
-
-    for node in tree.body:
-        if not isinstance(node, ast.If):
-            continue
-        test = node.test
-        is_main_guard = (
-            isinstance(test, ast.Compare)
-            and isinstance(test.left, ast.Name)
-            and test.left.id == "__name__"
-            and len(test.ops) == 1
-            and isinstance(test.ops[0], ast.Eq)
-            and len(test.comparators) == 1
-            and isinstance(test.comparators[0], ast.Constant)
-            and test.comparators[0].value == "__main__"
-        )
-        if is_main_guard:
-            start = node.lineno - 1
-            end = node.end_lineno
-            return "".join(lines[:start]) + replacement.rstrip() + "\n" + "".join(lines[end:])
-
-    raise ValueError('Cannot find if __name__ == "__main__" block')
-
-
 def replace_top_level_function(source: str, function_name: str, replacement: str) -> str:
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)
@@ -347,6 +275,55 @@ def replace_top_level_function(source: str, function_name: str, replacement: str
             return "".join(lines[:start]) + replacement.rstrip() + "\n\n" + "".join(lines[end:])
 
     raise ValueError(f"Cannot find function: {function_name}")
+
+
+def replace_once_required(source: str, old: str, new: str, description: str) -> str:
+    """Replace one Docker-specific hook, failing instead of silently dropping behavior."""
+    occurrences = source.count(old)
+    if occurrences != 1:
+        raise ValueError(
+            f"Expected exactly one {description}, found {occurrences}; "
+            "the singleton startup flow may have changed"
+        )
+    return source.replace(old, new, 1)
+
+
+def transform_main_for_docker(source: str) -> str:
+    """Keep the singleton main flow and patch only container-specific operations."""
+    source = replace_once_required(
+        source,
+        "    market_index_ws = None\n\n    try:\n",
+        "    realtime_sdk = None\n"
+        "    sdk = None\n"
+        "    market_index_ws = None\n\n"
+        "    try:\n"
+        "        print(\"===== Prepare runtime files =====\")\n"
+        "        download_runtime_files_from_s3()\n"
+        "        load_stock_data_from_runtime_file()\n\n",
+        "main resource initialization",
+    )
+    source = replace_once_required(
+        source,
+        "        realtime_sdk = EsunMarketdata(config)\n"
+        "        realtime_sdk.login()\n",
+        "        realtime_sdk, sdk = login_sdks(config)\n",
+        "market-data login block",
+    )
+    source = replace_once_required(
+        source,
+        "        sdk = SDK(config)\n        sdk.login()\n",
+        "",
+        "trade SDK login block",
+    )
+    source = replace_once_required(
+        source,
+        "        close_market_index_stream(market_index_ws)\n",
+        "        close_market_index_stream(market_index_ws)\n"
+        "        safe_logout_sdk(\"Esun Trade SDK\", sdk)\n"
+        "        safe_logout_sdk(\"EsunMarketdata\", realtime_sdk)\n",
+        "market-index cleanup hook",
+    )
+    return source
 
 
 def transform_singleton_to_docker(source: str) -> str:
@@ -382,7 +359,7 @@ def transform_singleton_to_docker(source: str) -> str:
         DOCKER_PERSIST_ENTRY_MODE,
     )
 
-    return replace_main_block(source, DOCKER_MAIN)
+    return transform_main_for_docker(source)
 
 
 def main() -> None:
