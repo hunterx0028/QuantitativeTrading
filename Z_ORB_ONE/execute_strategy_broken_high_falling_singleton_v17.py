@@ -66,6 +66,8 @@ TRADE_SIDE_LONG = 'LONG'
 ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 ENABLE_ENTRY_MODE_CHANCE = True  # False 時，STRATEGY_DECISION 判定為 CHANCE 後立即結束程序
+ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
+ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -1700,8 +1702,6 @@ def build_initial_state(
         "avg_price": None,
         "best_bid_price": None,
         "best_ask_price": None,
-        "follow_decision_low_price": None,
-        "follow_decision_low_time": None,
         "chance_effective_yesterday_low_price": v3,
         "chance_effective_yesterday_low_time": None,
         "traded": False,
@@ -2004,31 +2004,6 @@ def entry_follow_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
         FOLLOW_ENTRY_RANGE_END_PERCENT,
     )
     if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        return False
-
-    follow_decision_low_price = state.get("follow_decision_low_price")
-    try:
-        follow_decision_low = float(follow_decision_low_price)
-    except (TypeError, ValueError):
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"FOLLOW 缺少 STRATEGY_DECISION 前最低價紀錄，今日不進場"
-        )
-        return 'BLOCKED'
-
-    if follow_decision_low <= 0:
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"FOLLOW STRATEGY_DECISION 前最低價紀錄無效：{follow_decision_low_price!r}，今日不進場"
-        )
-        return 'BLOCKED'
-
-    if pre_last_px <= follow_decision_low:
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"FOLLOW 前一筆即時價小於等於 STRATEGY_DECISION 前最低價，暫不進場 "
-            f"pre_last_price={pre_last_px} decision_low={follow_decision_low}"
-        )
         return False
 
     if best_ask < last_px:
@@ -3243,23 +3218,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                             ):
                                 st["chance_effective_yesterday_low_price"] = low_price_float
                                 st["chance_effective_yesterday_low_time"] = now_tpe().isoformat()
-                    if (now_local.hour, now_local.minute) < STRATEGY_DECISION:
-                        try:
-                            low_price_float = float(low_price)
-                        except (TypeError, ValueError):
-                            low_price_float = 0.0
-                        if low_price_float > 0:
-                            previous_follow_decision_low = st.get("follow_decision_low_price")
-                            try:
-                                previous_follow_decision_low_float = float(previous_follow_decision_low)
-                            except (TypeError, ValueError):
-                                previous_follow_decision_low_float = 0.0
-                            if (
-                                previous_follow_decision_low_float <= 0
-                                or low_price_float < previous_follow_decision_low_float
-                            ):
-                                st["follow_decision_low_price"] = low_price_float
-                                st["follow_decision_low_time"] = now_tpe().isoformat()
                     # round_has_market_update = True
 
                     entry_check_end_time = get_entry_check_end_time(st)
@@ -3377,15 +3335,21 @@ if __name__ == "__main__":
             )
 
         candidate_symbols = selected_stocks
+        candidate_limit_up_symbols = selected_limit_up_stocks if ENABLE_LIMIT_UP_STRATEGY else []
+        candidate_limit_down_symbols = selected_limit_down_stocks if ENABLE_LIMIT_DOWN_STRATEGY else []
+        if not ENABLE_LIMIT_UP_STRATEGY:
+            print("[CONFIG] ENABLE_LIMIT_UP_STRATEGY=False，selected_limit_up_stocks 強制視為空陣列")
+        if not ENABLE_LIMIT_DOWN_STRATEGY:
+            print("[CONFIG] ENABLE_LIMIT_DOWN_STRATEGY=False，selected_limit_down_stocks 強制視為空陣列")
         states = initialize_states(candidate_symbols, realtime_sdk)
         limit_up_states = initialize_states(
-            selected_limit_up_stocks,
+            candidate_limit_up_symbols,
             realtime_sdk,
             strategy_type=STRATEGY_LIMIT_UP,
         )
         states.update(limit_up_states)
         limit_down_states = initialize_states(
-            selected_limit_down_stocks,
+            candidate_limit_down_symbols,
             realtime_sdk,
             strategy_type=STRATEGY_LIMIT_DOWN,
         )
