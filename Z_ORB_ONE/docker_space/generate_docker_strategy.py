@@ -23,6 +23,8 @@ S3_BUCKET = os.getenv("QUANT_S3_BUCKET", "leegueishen-quant-trading-17")
 S3_PREFIX = os.getenv("QUANT_S3_PREFIX", "exchange").strip("/")
 stock_data = None
 selected_stocks = []
+selected_limit_up_stocks = []
+selected_limit_down_stocks = []
 market_previous_close_indices = {}
 
 REQUIRED_RUNTIME_FILES = (
@@ -75,7 +77,8 @@ def load_stock_data_from_runtime_file():
     延後載入 stock_data.py。
     這樣在 Fargate 啟動時，可以先從 S3 下載 stock_data.py，再載入策略需要的資料。
     """
-    global stock_data, selected_stocks, market_previous_close_indices
+    global stock_data, selected_stocks, selected_limit_up_stocks
+    global selected_limit_down_stocks, market_previous_close_indices
 
     import importlib.util
     import sys
@@ -97,6 +100,8 @@ def load_stock_data_from_runtime_file():
 
     stock_data = module
     selected_stocks = module.selected_stocks
+    selected_limit_up_stocks = getattr(module, "selected_limit_up_stocks", [])
+    selected_limit_down_stocks = getattr(module, "selected_limit_down_stocks", [])
     market_previous_close_indices = getattr(module, "market_previous_close_indices", {})
     return selected_stocks
 
@@ -347,12 +352,10 @@ def replace_top_level_function(source: str, function_name: str, replacement: str
 def transform_singleton_to_docker(source: str) -> str:
     source = source.replace("\r\n", "\n")
 
-    source = re.sub(
-        r"\nimport stock_data\nfrom stock_data import selected_stocks, market_previous_close_indices\n+",
-        "\n",
-        source,
-        count=1,
-    )
+    # Docker 版必須先從 S3 下載 stock_data.py，不能在 module import 階段載入。
+    # 分別移除兩種 import，避免 stock_data 新增匯出名稱時，因完整字串不符而殘留。
+    source = re.sub(r"(?m)^import stock_data\s*\n", "", source, count=1)
+    source = re.sub(r"(?m)^from stock_data import [^\n]+\n", "", source, count=1)
     source = source.replace("\nstock_data.entry_mode = ENTRY_MODE_NO_TRADE\n", "\n")
 
     marker = "# ============ 下單函式 ============"
