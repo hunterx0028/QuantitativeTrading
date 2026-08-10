@@ -27,7 +27,11 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import selected_stocks
+from Z_ORB_ONE.stock_data import (
+    selected_limit_down_stocks,
+    selected_limit_up_stocks,
+    selected_stocks,
+)
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
@@ -37,6 +41,8 @@ STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，
 STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
+CHECK_START_LIMIT_DOWN = (9, 40)
+CHECK_START_LIMIT_UP = (9, 40)
 
 def normalize_config_paths(config: ConfigParser):
     cert_path = config.get("Cert", "Path", fallback="")
@@ -282,12 +288,7 @@ def add_bracket(ax, x_center, y, x_half_width, y_bump, direction="up", lw=1.6, y
     ax.add_patch(patch)
 
 
-def draw_strategy_start_lines(price_ax, volume_ax, target_date: date):
-    start_times = {
-        STRATEGY_START_LOWER,
-        STRATEGY_START_FOLLOW,
-        STRATEGY_START_CHANCE,
-    }
+def draw_strategy_start_lines(price_ax, volume_ax, target_date: date, start_times):
     for hour, minute in sorted(start_times):
         x_value = mdates.date2num(datetime.combine(target_date, time(hour, minute)))
         for ax in (price_ax, volume_ax):
@@ -340,6 +341,7 @@ def draw_intraday_ohlc(
     show_prev_high_line: bool = True,
     show_prev_low_line: bool = True,
     value_formatter=format_tw_price,
+    strategy_start_times=(),
 ):
     """繪製單一商品的當日分K OHLC 與下方成交量長條圖。"""
 
@@ -435,7 +437,7 @@ def draw_intraday_ohlc(
         x1 = mdates.date2num(datetime.combine(target_date, time(13, 31)))
         ax.set_xlim(x0, x1)
         volume_ax.set_xlim(x0, x1)
-        draw_strategy_start_lines(ax, volume_ax, target_date)
+        draw_strategy_start_lines(ax, volume_ax, target_date, strategy_start_times)
         volume_ax.bar(x_i, volumes_i, width=tick_width_min * 1.6, color=bar_colors, edgecolor=bar_colors, alpha=0.85)
         volume_ax.set_ylim(0, max(max(volumes_i), 1) * 1.25)
         volume_ax.set_ylabel("Volume", fontsize=9)
@@ -520,6 +522,12 @@ def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
 def main():
+    default_strategy_start_times = {
+        STRATEGY_START_LOWER,
+        STRATEGY_START_FOLLOW,
+        STRATEGY_START_CHANCE,
+    }
+
     # ========= 指數固定在前，接著才是個股 =========
     report_items = [
         {
@@ -527,6 +535,7 @@ def main():
             "label": code.strip().upper(),
             "atr_value": None,
             "is_index": True,
+            "strategy_start_times": default_strategy_start_times,
         }
         for code in SPECIFIED_INDEX_CODES
     ]
@@ -536,8 +545,29 @@ def main():
             "label": item[0],
             "atr_value": item[7],
             "is_index": False,
+            "strategy_start_times": default_strategy_start_times,
         }
         for item in selected_stocks
+    )
+    report_items.extend(
+        {
+            "code": extract_stock_code(item[0]),
+            "label": item[0],
+            "atr_value": item[7],
+            "is_index": False,
+            "strategy_start_times": {CHECK_START_LIMIT_UP},
+        }
+        for item in selected_limit_up_stocks
+    )
+    report_items.extend(
+        {
+            "code": extract_stock_code(item[0]),
+            "label": item[0],
+            "atr_value": item[7],
+            "is_index": False,
+            "strategy_start_times": {CHECK_START_LIMIT_DOWN},
+        }
+        for item in selected_limit_down_stocks
     )
     target_date = parse_specified_date(SPECIFIED_DATE)
 
@@ -570,6 +600,7 @@ def main():
             item_label = item["label"]
             atr_value = item["atr_value"]
             is_index = item["is_index"]
+            strategy_start_times = item["strategy_start_times"]
             lookback_days = 40 if is_index else 10
             value_formatter = format_index_value if is_index else format_tw_price
             candles_by_day = fetch_recent_candles(
@@ -630,6 +661,7 @@ def main():
                 show_prev_high_line=(not is_index) and (not simplify_reference_lines),
                 show_prev_low_line=not simplify_reference_lines,
                 value_formatter=value_formatter,
+                strategy_start_times=strategy_start_times,
             )
 
             fig.subplots_adjust(left=0.03, right=0.985, top=0.95, bottom=0.08, hspace=0.05)
