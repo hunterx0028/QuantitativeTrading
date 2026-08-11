@@ -49,6 +49,7 @@ GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
 STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_CHANCE = 'CHANCE'
+STRATEGY_VOLUMN_DOWN = 'VOLUMN_DOWN'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
@@ -56,10 +57,21 @@ ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = True
+INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
+
+# 前一日及本日於 09:30 前至少須有此數量的分鐘 K 棒；
+# 少於此數量視為延遲撮合股票，不納入當沖策略。
+MIN_MINUTE_BARS_BEFORE_0930 = 25
+
+SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
+SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
+
+OPTIMIZE_LOSS_PER_VOLUMN_DOWN = 2.0 # volumn_down 停損百分比(%)
+OPTIMIZE_PROFIT_PER_VOLUMN_DOWN = 8.0 # volumn_down 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -93,6 +105,7 @@ STRATEGY_END_CHANCE = (10, 1) # chance 策略可進場截止分k棒的(時, 分)
 INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(時, 分)，預設沿用 chance
 INTRADAY_COMPARE_END_CHANCE = (13, 0)  # chance 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_VOLUMN_DOWN = (13, 0) # volumn_down 盤中停損/停利比對截止(時, 分)
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
@@ -1734,7 +1747,7 @@ def find_first_bar(today_bars: list):
 
 
 def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
-    """09:30 前分K少於 25 根者視為處分股票，排除。"""
+    """09:30 前分K少於設定根數者視為延遲撮合股票，排除。"""
     before_0930_count = 0
     for bar in today_bars:
         dtv = bar.get('dt')
@@ -1742,7 +1755,7 @@ def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
             continue
         if (dtv.hour, dtv.minute) < (9, 30):
             before_0930_count += 1
-    return before_0930_count >= 25
+    return before_0930_count >= MIN_MINUTE_BARS_BEFORE_0930
 
 
 def scan_entry_signal_lower(
@@ -2132,6 +2145,8 @@ def should_include_strategy_in_print_stats(strategy_type: str | None) -> bool:
         return INCLUDE_FOLLOW_IN_PRINT_STATS
     if strategy_type == STRATEGY_CHANCE:
         return INCLUDE_CHANCE_IN_PRINT_STATS
+    if strategy_type == STRATEGY_VOLUMN_DOWN:
+        return INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS
     return True
 
 
@@ -2230,12 +2245,13 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    grouped_results: dict[str, list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
+    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
-        grouped_results.setdefault(date_key, []).append((
+        strategy_type = signal.get('strategy_type', STRATEGY_NO_TRADE)
+        grouped_results.setdefault((date_key, strategy_type), []).append((
             signal['name'],
             signal.get('industry_code', ''),
             signal.get('entry_dt'),
@@ -2246,53 +2262,67 @@ def print_daily_optimization_results(
             result.get('outcome') == 'success',
         ))
 
-    daily_date_keys = (
-        set(grouped_results)
-        | lower_gate_date_keys
-        | follow_gate_date_keys
-        | chance_gate_date_keys
-    )
+    normal_gate_group_keys = {
+        (
+            date_key,
+            strategy_type_by_gate_status.get(
+                gate_status_by_date_key.get(date_key),
+                STRATEGY_NO_TRADE,
+            ),
+        )
+        for date_key in lower_gate_date_keys | follow_gate_date_keys | chance_gate_date_keys
+    }
+    daily_group_keys = set(grouped_results) | normal_gate_group_keys
+    daily_date_keys = {date_key for date_key, _ in daily_group_keys}
+    strategy_order = {
+        STRATEGY_LOWER: 0,
+        STRATEGY_FOLLOW: 0,
+        STRATEGY_CHANCE: 0,
+        STRATEGY_VOLUMN_DOWN: 1,
+        STRATEGY_NO_TRADE: 2,
+    }
     for date_key in sorted(daily_date_keys, reverse=True):
-        day_rows = grouped_results.get(date_key, [])
-        day_total_cost = sum(row[4] for row in day_rows)
-        day_total = sum(row[6] for row in day_rows)
-        day_successes = sum(1 for row in day_rows if row[7])
-        day_failures = len(day_rows) - day_successes
-        strategy_type = strategy_type_by_gate_status.get(
-            gate_status_by_date_key.get(date_key),
-            STRATEGY_NO_TRADE,
+        date_group_keys = sorted(
+            (key for key in daily_group_keys if key[0] == date_key),
+            key=lambda key: (strategy_order.get(key[1], 99), key[1]),
         )
-        print(
-            f'{format_date_with_weekday(date_key)} '
-            f'模式={strategy_type}  '
-            f'筆數={len(day_rows)}  '
-            f'成功={day_successes}  '
-            f'失敗={day_failures}  '
-            f'總支出={day_total_cost:.2f}  '
-            f'總收益={day_total:+.2f}'
-        )
-        target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
-        if date_key in follow_gate_date_keys:
-            for index_summary in build_market_index_daily_follow_summary(
-                target_date,
-                index_minute_bars_by_key,
-            ):
-                print(index_summary)
-        elif date_key in lower_gate_date_keys:
-            for index_summary in build_market_index_daily_low_summary(
-                target_date,
-                index_minute_bars_by_key,
-            ):
-                print(index_summary)
-        for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
-            day_rows,
-            key=lambda row: (format_entry_time(row[2]), row[0]),
-        ):
+        for _, strategy_type in date_group_keys:
+            day_rows = grouped_results.get((date_key, strategy_type), [])
+            day_total_cost = sum(row[4] for row in day_rows)
+            day_total = sum(row[6] for row in day_rows)
+            day_successes = sum(1 for row in day_rows if row[7])
+            day_failures = len(day_rows) - day_successes
             print(
-                f'{format_stock_label(stock_name, industry_code)} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
-                f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
+                f'{format_date_with_weekday(date_key)} '
+                f'模式={strategy_type}  '
+                f'筆數={len(day_rows)}  '
+                f'成功={day_successes}  '
+                f'失敗={day_failures}  '
+                f'總支出={day_total_cost:.2f}  '
+                f'總收益={day_total:+.2f}'
             )
-        print('')
+            target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
+            if strategy_type == STRATEGY_FOLLOW and date_key in follow_gate_date_keys:
+                for index_summary in build_market_index_daily_follow_summary(
+                    target_date,
+                    index_minute_bars_by_key,
+                ):
+                    print(index_summary)
+            elif strategy_type == STRATEGY_LOWER and date_key in lower_gate_date_keys:
+                for index_summary in build_market_index_daily_low_summary(
+                    target_date,
+                    index_minute_bars_by_key,
+                ):
+                    print(index_summary)
+            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
+                day_rows,
+                key=lambda row: (format_entry_time(row[2]), row[0]),
+            ):
+                print(
+                    f'{format_stock_label(stock_name, industry_code)} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
+                    f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
+                )
+            print('')
 
     for exchange_suffix, industry_code, successes, failures, pnl_value in summarize_industry_results(print_results):
         print(
@@ -2310,6 +2340,8 @@ def print_daily_optimization_results(
         f'總收益統計={summary["total_pnl"]:+.2f}'
     )
     print(
+        f'VOLUMN_DOWN_LOSS_PER={OPTIMIZE_LOSS_PER_VOLUMN_DOWN:.1f}%  '
+        f'VOLUMN_DOWN_PROFIT_PER={OPTIMIZE_PROFIT_PER_VOLUMN_DOWN:.1f}%  '
         f'LOWER_LOSS_PER={OPTIMIZE_LOSS_PER_LOWER:.1f}%  '
         f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%  '
         f'FOLLOW_LOSS_PER={OPTIMIZE_LOSS_PER_FOLLOW:.1f}%  '
@@ -2318,9 +2350,17 @@ def print_daily_optimization_results(
         f'CHANCE_PROFIT_PER={OPTIMIZE_PROFIT_PER_CHANCE:.1f}%'
     )
     print(
+        f'SHORT_VOLUME_SUMMARY_CANDLES={SHORT_VOLUME_SUMMARY_CANDLES}  '
+        f'SHORT_VOLUME_RATIO_THRESHOLD={SHORT_VOLUME_RATIO_THRESHOLD:.4f}  '
+        f'MIN_MINUTE_BARS_BEFORE_0930={MIN_MINUTE_BARS_BEFORE_0930}  '
+        f'VOLUMN_DOWN出場時間={INTRADAY_COMPARE_END_VOLUMN_DOWN[0]:02d}:'
+        f'{INTRADAY_COMPARE_END_VOLUMN_DOWN[1]:02d}'
+    )
+    print(
         f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}  '
         f'INCLUDE_FOLLOW_IN_PRINT_STATS={INCLUDE_FOLLOW_IN_PRINT_STATS}  '
-        f'INCLUDE_CHANCE_IN_PRINT_STATS={INCLUDE_CHANCE_IN_PRINT_STATS}'
+        f'INCLUDE_CHANCE_IN_PRINT_STATS={INCLUDE_CHANCE_IN_PRINT_STATS}  '
+        f'INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS={INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS}'
     )
     print(
         f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%  '
@@ -2353,6 +2393,74 @@ def print_daily_optimization_results(
 # ---------------------------------------------------------------------------
 # Core orchestration — analyze_stock
 # ---------------------------------------------------------------------------
+
+def find_volumn_down_candidate_on_date(
+    stock_item: tuple,
+    target_date: date,
+    bars_by_date: dict,
+):
+    """優先判斷單日 VOLUMN_DOWN；未同時符合縮量及開低條件則回傳 None。"""
+    stock_name = stock_item[0]
+    today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
+    if not today_bars or not yesterday_bars:
+        return None
+    if (
+        not has_enough_minute_bars_before_0930(today_bars)
+        or not has_enough_minute_bars_before_0930(yesterday_bars)
+    ):
+        return None
+
+    today_ordered = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+    yesterday_ordered = sorted(
+        (bar for bar in yesterday_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+    required_today_count = SHORT_VOLUME_SUMMARY_CANDLES + 1
+    if (
+        len(today_ordered) < required_today_count
+        or len(yesterday_ordered) < SHORT_VOLUME_SUMMARY_CANDLES
+    ):
+        return None
+
+    yesterday_volume = sum(
+        float(bar.get('volume', 0) or 0)
+        for bar in yesterday_ordered[:SHORT_VOLUME_SUMMARY_CANDLES]
+    )
+    today_volume = sum(
+        float(bar.get('volume', 0) or 0)
+        for bar in today_ordered[:SHORT_VOLUME_SUMMARY_CANDLES]
+    )
+    if yesterday_volume <= 0:
+        return None
+    if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
+        return None
+
+    entry_bar = today_ordered[SHORT_VOLUME_SUMMARY_CANDLES]
+    entry_price = float(entry_bar['open'])
+
+    ystats = compute_yesterday_stats(yesterday_ordered)
+    limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
+    if limit_up_price > MAX_LIMIT_UP_PRICE or limit_down_price < MIN_LIMIT_DOWN_PRICE:
+        return None
+
+    return build_trade_candidate(
+        stock_name,
+        get_stock_industry_code(stock_item),
+        target_date,
+        entry_bar,
+        entry_price,
+        today_ordered,
+        limit_up_price,
+        limit_down_price,
+        STRATEGY_VOLUMN_DOWN,
+        INTRADAY_COMPARE_END_VOLUMN_DOWN,
+        TRADE_SIDE_SHORT,
+        None,
+    )
+
 
 def find_trade_candidate_on_date(
     stock_item: tuple,
@@ -2478,6 +2586,16 @@ def collect_trade_candidates(
 
     candidates = []
     for current_date in available_dates:
+        if INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS:
+            volumn_down_candidate = find_volumn_down_candidate_on_date(
+                stock_item,
+                current_date,
+                bars_by_date,
+            )
+            if volumn_down_candidate is not None:
+                candidates.append(volumn_down_candidate)
+                continue
+
         if current_date not in market_start_gate_cache:
             market_start_gate_cache[current_date] = get_strategy_market_decision_gate_status(
                 current_date,
@@ -2583,6 +2701,9 @@ def evaluate_candidates(
         elif strategy_type == STRATEGY_CHANCE:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_CHANCE
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_CHANCE
+        elif strategy_type == STRATEGY_VOLUMN_DOWN:
+            optimize_loss_percent = OPTIMIZE_LOSS_PER_VOLUMN_DOWN
+            optimize_profit_percent = OPTIMIZE_PROFIT_PER_VOLUMN_DOWN
         else:
             continue
 
@@ -2852,6 +2973,15 @@ def main() -> None:
         strategy_end_lower_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
         strategy_end_follow_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
         strategy_end_chance_hm = STRATEGY_END_CHANCE[0] * 60 + STRATEGY_END_CHANCE[1]
+        if SHORT_VOLUME_SUMMARY_CANDLES <= 0:
+            print('[ERROR] SHORT_VOLUME_SUMMARY_CANDLES 必須大於 0', file=sys.stderr)
+            sys.exit(1)
+        if SHORT_VOLUME_RATIO_THRESHOLD < 0:
+            print('[ERROR] SHORT_VOLUME_RATIO_THRESHOLD 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
+            print('[ERROR] MIN_MINUTE_BARS_BEFORE_0930 必須大於 0', file=sys.stderr)
+            sys.exit(1)
         if not (0 <= strategy_decision_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_DECISION 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)

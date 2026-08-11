@@ -32,9 +32,9 @@ if PROJECT_ROOT not in sys.path:
 from Z_ORB_ONE.stock_data import market_previous_close_indices
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = "20260706"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 DISPLAY_INDEX_CODES = ("IX0001", "IX0043")  # 依序以分頁顯示上市、上櫃指數
-DISPLAY_STOCK_CODES = ["1326"]  # 要額外顯示的 4 位數股票代碼，例如 ["2330", "2317"]
+DISPLAY_STOCK_CODES = []  # 要額外顯示的 4 位數股票代碼，例如 ["2330", "2317"]
 
 RESERVE_MARKET_INDICES = {
     "TWSE:MARKET": {
