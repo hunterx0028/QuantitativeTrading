@@ -9,7 +9,7 @@ import io
 import threading
 from pprint import pformat
 from typing import List, Tuple, Optional, Dict, Any
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import pytz
 from tempfile import NamedTemporaryFile
 from configparser import ConfigParser
@@ -57,6 +57,7 @@ GATE_NO_TRADE = 'NO_TRADE'
 STRATEGY_LOWER = 'LOWER'
 STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_CHANCE = 'CHANCE'
+STRATEGY_VOLUMN_DOWN = 'VOLUMN_DOWN'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 STRATEGY_LIMIT_DOWN = 'LIMIT_DOWN'
 STRATEGY_LIMIT_UP = 'LIMIT_UP'
@@ -66,6 +67,7 @@ TRADE_SIDE_LONG = 'LONG'
 ENABLE_ENTRY_MODE_FOLLOW = True  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 ENABLE_ENTRY_MODE_CHANCE = True  # False 時，STRATEGY_DECISION 判定為 CHANCE 後立即結束程序
+ENABLE_VOLUMN_DOWN_STRATEGY = True  # False 時，不取得分鐘量，也不執行 VOLUMN_DOWN
 ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
 ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
@@ -77,6 +79,13 @@ OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
+
+SHORT_VOLUME_SUMMARY_CANDLES = 5 # VOLUMN_DOWN 計算開盤前 N 根一分鐘 K 棒交易量
+SHORT_VOLUME_RATIO_THRESHOLD = 0.4 # 本日前 N 根量須小於或等於前一日前 N 根量的此倍數
+MIN_MINUTE_BARS_BEFORE_0930 = 25 # 前一日 09:30 前至少須有此數量的一分鐘 K 棒
+VOLUMN_DOWN_EVALUATION_TIME = (9, 5, 10) # 稍晚取得 09:00~09:05 K 棒，避免 09:04 資料尚未完成
+OPTIMIZE_LOSS_PER_VOLUMN_DOWN = 2.0 # volumn_down 停損百分比(%)
+OPTIMIZE_PROFIT_PER_VOLUMN_DOWN = 8.0 # volumn_down 動態追蹤停利首次目標百分比(%)
 
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
@@ -109,12 +118,14 @@ ENTRY_CHECK_END_TIME_LIMIT_UP = (10, 1)  # limit up 進場檢核截止時間（�
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
 FORCE_CLOSE_TIME_FOLLOW = (13, 0)  # follow 收盤前強制平倉時間
 FORCE_CLOSE_TIME_CHANCE = (13, 0)  # chance 收盤前強制平倉時間
+FORCE_CLOSE_TIME_VOLUMN_DOWN = (13, 0) # volumn_down 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LIMIT_DOWN = (13, 0)  # limit down 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LIMIT_UP = (13, 0)  # limit up 收盤前強制平倉時間
 
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
 ENTRY_ORDER_QUANTITY_FOLLOW = 1 # follow 每次進場下單數量
 ENTRY_ORDER_QUANTITY_CHANCE = 1 # chance 每次進場下單數量
+ENTRY_ORDER_QUANTITY_VOLUMN_DOWN = 1 # volumn_down 每次進場下單數量
 ENTRY_ORDER_QUANTITY_LIMIT_DOWN = 1 # limit down 每次進場下單數量
 ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 
@@ -402,6 +413,18 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError("IX0001_CHANCE_MAX_RANGE_PERCENT 不可小於 0")
     if EMA_SPAN_MULTIPLIER <= 0:
         raise ValueError("EMA_SPAN_MULTIPLIER 必須大於 0")
+    if SHORT_VOLUME_SUMMARY_CANDLES <= 0:
+        raise ValueError("SHORT_VOLUME_SUMMARY_CANDLES 必須大於 0")
+    if SHORT_VOLUME_RATIO_THRESHOLD < 0:
+        raise ValueError("SHORT_VOLUME_RATIO_THRESHOLD 不可小於 0")
+    if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
+        raise ValueError("MIN_MINUTE_BARS_BEFORE_0930 必須大於 0")
+    if len(VOLUMN_DOWN_EVALUATION_TIME) != 3 or not (
+        0 <= VOLUMN_DOWN_EVALUATION_TIME[0] <= 23
+        and 0 <= VOLUMN_DOWN_EVALUATION_TIME[1] <= 59
+        and 0 <= VOLUMN_DOWN_EVALUATION_TIME[2] <= 59
+    ):
+        raise ValueError("VOLUMN_DOWN_EVALUATION_TIME 設定錯誤，需為有效的 (時, 分, 秒)")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -493,6 +516,229 @@ def get_realtime_price(stock_id: str, realtime_sdk):
     best_ask_price = asks[0].get('price') if asks else None
 
     return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
+
+
+def parse_minute_candle_datetime(row: Dict[str, Any]) -> datetime | None:
+    raw_value = row.get("date")
+    if raw_value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(TZ).replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def get_continuous_opening_candles(
+    rows: List[Dict[str, Any]],
+    target_date: date,
+    required_count: int,
+) -> List[Dict[str, Any]]:
+    """取得 09:00 起連續 required_count 根分 K；任一分鐘缺失即回傳空陣列。"""
+    rows_by_datetime: Dict[datetime, Dict[str, Any]] = {}
+    for row in rows:
+        parsed = parse_minute_candle_datetime(row)
+        if parsed is None or parsed.date() != target_date:
+            continue
+        rows_by_datetime[parsed.replace(second=0, microsecond=0)] = row
+
+    opening_dt = datetime.combine(target_date, datetime.min.time()).replace(hour=9)
+    expected_datetimes = [
+        opening_dt + timedelta(minutes=offset)
+        for offset in range(required_count)
+    ]
+    if any(expected_dt not in rows_by_datetime for expected_dt in expected_datetimes):
+        return []
+    return [rows_by_datetime[expected_dt] for expected_dt in expected_datetimes]
+
+
+def count_minute_candles_before_0930(rows: List[Dict[str, Any]], target_date: date) -> int:
+    minute_keys = set()
+    for row in rows:
+        parsed = parse_minute_candle_datetime(row)
+        if parsed is None or parsed.date() != target_date:
+            continue
+        if (parsed.hour, parsed.minute) < (9, 30):
+            minute_keys.add((parsed.hour, parsed.minute))
+    return len(minute_keys)
+
+
+def fetch_previous_minute_candles(stock_id: str, realtime_sdk) -> tuple[date | None, List[Dict[str, Any]]]:
+    symbol = stock_id.split(".")[0]
+    today = now_tpe().date()
+    response = realtime_sdk.rest_client.stock.historical.candles(
+        **{
+            "symbol": symbol,
+            "from": (today - timedelta(days=14)).strftime("%Y-%m-%d"),
+            "to": today.strftime("%Y-%m-%d"),
+            "timeframe": "1",
+        }
+    )
+    rows = response.get("data", []) if isinstance(response, dict) else []
+    dates = sorted({
+        parsed.date()
+        for row in rows
+        if (parsed := parse_minute_candle_datetime(row)) is not None
+        and parsed.date() < today
+    })
+    if not dates:
+        return None, []
+    previous_date = dates[-1]
+    return previous_date, [
+        row for row in rows
+        if (parsed := parse_minute_candle_datetime(row)) is not None
+        and parsed.date() == previous_date
+    ]
+
+
+def prepare_volumn_down_yesterday_data(
+    states: Dict[str, Dict[str, Any]],
+    realtime_sdk,
+) -> None:
+    """開盤前準備一般個股的前一交易日開盤量；失敗者只放棄 VOLUMN_DOWN。"""
+    if not ENABLE_VOLUMN_DOWN_STRATEGY:
+        print("[CONFIG] ENABLE_VOLUMN_DOWN_STRATEGY=False，不取得 VOLUMN_DOWN 分鐘 K 資料")
+        return
+
+    for state in states.values():
+        if state.get("strategy_type"):
+            continue
+        symbol_name = state.get("symbol_name", "UNKNOWN")
+        try:
+            previous_date, rows = fetch_previous_minute_candles(
+                state.get("symbol_code_with_suf", ""),
+                realtime_sdk,
+            )
+            if previous_date is None:
+                raise ValueError("找不到前一交易日分鐘 K")
+            before_0930_count = count_minute_candles_before_0930(rows, previous_date)
+            if before_0930_count < MIN_MINUTE_BARS_BEFORE_0930:
+                raise ValueError(
+                    f"前一日 09:30 前僅 {before_0930_count} 根，"
+                    f"少於 {MIN_MINUTE_BARS_BEFORE_0930} 根"
+                )
+            opening_rows = get_continuous_opening_candles(
+                rows,
+                previous_date,
+                SHORT_VOLUME_SUMMARY_CANDLES,
+            )
+            if not opening_rows:
+                raise ValueError(f"前一日 09:00 起前 {SHORT_VOLUME_SUMMARY_CANDLES} 根資料不連續")
+            previous_volume = sum(float(row.get("volume", 0) or 0) for row in opening_rows)
+            if previous_volume <= 0:
+                raise ValueError("前一日前 N 根交易量為 0")
+            state["volumn_down_yesterday_date"] = previous_date.isoformat()
+            state["volumn_down_yesterday_volume"] = previous_volume
+            state["volumn_down_yesterday_ready"] = True
+            print(
+                f"[{symbol_name}] VOLUMN_DOWN 前日資料完成："
+                f"日期={previous_date.isoformat()} 前{SHORT_VOLUME_SUMMARY_CANDLES}根量={previous_volume:,.0f}"
+            )
+        except Exception as exc:
+            state["volumn_down_yesterday_ready"] = False
+            print(f"[{symbol_name}] ⚠️ VOLUMN_DOWN 前日資料不可用：{exc}，將回到一般模式")
+        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        time.sleep(0.2)
+
+
+def fetch_today_intraday_candles(stock_id: str, realtime_sdk) -> List[Dict[str, Any]]:
+    symbol = stock_id.split(".")[0]
+    response = realtime_sdk.rest_client.stock.intraday.candles(symbol=symbol)
+    return response.get("data", []) if isinstance(response, dict) else []
+
+
+def evaluate_volumn_down_entries(
+    states: Dict[str, Dict[str, Any]],
+    mysdk,
+    realtime_sdk,
+) -> None:
+    """於指定時間只執行一次 VOLUMN_DOWN 判斷；符合者立即送出市價空單。"""
+    if not ENABLE_VOLUMN_DOWN_STRATEGY:
+        return
+
+    today = now_tpe().date()
+    required_count = SHORT_VOLUME_SUMMARY_CANDLES + 1
+    for state in states.values():
+        if state.get("strategy_type") or state.get("traded") or state.get("in_position"):
+            continue
+        if state.get("volumn_down_checked"):
+            continue
+
+        symbol_name = state.get("symbol_name", "UNKNOWN")
+        state["volumn_down_checked"] = True
+        if not state.get("volumn_down_yesterday_ready"):
+            print(f"[{symbol_name}] VOLUMN_DOWN 前日資料未通過，繼續等待一般模式")
+            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+            continue
+
+        try:
+            rows = fetch_today_intraday_candles(
+                state.get("symbol_code_with_suf", ""),
+                realtime_sdk,
+            )
+            opening_rows = get_continuous_opening_candles(rows, today, required_count)
+            if not opening_rows:
+                raise ValueError(
+                    f"本日 09:00 起前 {required_count} 根資料不連續或不足"
+                )
+
+            today_volume = sum(
+                float(row.get("volume", 0) or 0)
+                for row in opening_rows[:SHORT_VOLUME_SUMMARY_CANDLES]
+            )
+            yesterday_volume = float(state.get("volumn_down_yesterday_volume", 0) or 0)
+            if yesterday_volume <= 0:
+                raise ValueError("前一日前 N 根交易量無效")
+            volume_ratio = today_volume / yesterday_volume
+            state["volumn_down_today_volume"] = today_volume
+            state["volumn_down_volume_ratio"] = volume_ratio
+
+            if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
+                print(
+                    f"[{symbol_name}] VOLUMN_DOWN 不成立："
+                    f"前日量={yesterday_volume:,.0f} 本日量={today_volume:,.0f} "
+                    f"比例={volume_ratio:.4f} > 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
+                    "繼續等待一般模式"
+                )
+                atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+                continue
+
+            entry_row = opening_rows[SHORT_VOLUME_SUMMARY_CANDLES]
+            entry_open = float(entry_row.get("open", 0) or 0)
+            entry_dt = parse_minute_candle_datetime(entry_row)
+            if entry_open <= 0 or entry_dt is None:
+                raise ValueError("第 N+1 根 open 或時間無效")
+
+            state["strategy_type"] = STRATEGY_VOLUMN_DOWN
+            state["volumn_down_qualified"] = True
+            state["side"] = TRADE_SIDE_SHORT
+            state["qty"] = ENTRY_ORDER_QUANTITY_VOLUMN_DOWN
+            state["entry_order_qty"] = ENTRY_ORDER_QUANTITY_VOLUMN_DOWN
+            state["entry_trigger_price"] = entry_open
+            state["volumn_down_entry_bar_time"] = entry_dt.isoformat()
+            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+            print(
+                f"[{symbol_name}] VOLUMN_DOWN 成立："
+                f"前日量={yesterday_volume:,.0f} 本日量={today_volume:,.0f} "
+                f"比例={volume_ratio:.4f} <= 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
+                f"第{required_count}根={entry_dt.strftime('%H:%M')} open={entry_open:.2f}，送出市價放空"
+            )
+            try_open_position(state, mysdk)
+        except Exception as exc:
+            if is_volumn_down_strategy(state):
+                print(
+                    f"[{symbol_name}] ⚠️ VOLUMN_DOWN 已成立但執行失敗：{exc}，"
+                    "本日不轉入其他模式"
+                )
+            else:
+                print(
+                    f"[{symbol_name}] ⚠️ VOLUMN_DOWN 本日資料不可用：{exc}，"
+                    "繼續等待一般模式"
+                )
+            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        time.sleep(0.2)
 
 
 def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
@@ -786,10 +1032,9 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
     ):
         market_state["strategy_decision_decline_blocked"] = True
         market_state["strategy_decision_decline_time"] = event_time or now_local.isoformat()
-        MARKET_REVERSAL_STOP_EVENT.set()
         print(
             f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數 FOLLOW 突破後回跌，"
-            "非獨立策略今日 NO_TRADE；若有 LIMIT_UP/LIMIT_DOWN 未完成，將繼續獨立監控"
+            "FOLLOW 模式不成立；其餘模式將於判斷時間依原規則決定"
         )
 
 
@@ -1184,7 +1429,7 @@ def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]
 def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: int) -> None:
     persist_entry_mode_to_stock_data(entry_mode)
     for st in states.values():
-        if is_independent_limit_strategy(st):
+        if is_independent_strategy(st):
             continue
         st["qty"] = get_entry_order_quantity()
         st["entry_time"] = now_tpe().isoformat()
@@ -1733,6 +1978,13 @@ def build_initial_state(
         "yesterday_close_price": v4,  # 昨收
         "up_streak_days": up_streak_days,  # 連漲天數
         "down_streak_days": down_streak_days,  # 連跌天數
+        "volumn_down_checked": False,
+        "volumn_down_qualified": False,
+        "volumn_down_yesterday_date": None,
+        "volumn_down_yesterday_volume": None,
+        "volumn_down_yesterday_ready": False,
+        "volumn_down_today_volume": None,
+        "volumn_down_volume_ratio": None,
     }
 
 
@@ -1798,8 +2050,18 @@ def is_limit_up_strategy(state: Dict[str, Any] | None) -> bool:
     return state.get("strategy_type") == STRATEGY_LIMIT_UP
 
 
+def is_volumn_down_strategy(state: Dict[str, Any] | None) -> bool:
+    if not state:
+        return False
+    return state.get("strategy_type") == STRATEGY_VOLUMN_DOWN
+
+
 def is_independent_limit_strategy(state: Dict[str, Any] | None) -> bool:
     return is_limit_down_strategy(state) or is_limit_up_strategy(state)
+
+
+def is_independent_strategy(state: Dict[str, Any] | None) -> bool:
+    return is_independent_limit_strategy(state) or is_volumn_down_strategy(state)
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
@@ -1807,6 +2069,8 @@ def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, floa
         return OPTIMIZE_LOSS_PER_LIMIT_DOWN, OPTIMIZE_PROFIT_PER_LIMIT_DOWN
     if is_limit_up_strategy(state):
         return OPTIMIZE_LOSS_PER_LIMIT_UP, OPTIMIZE_PROFIT_PER_LIMIT_UP
+    if is_volumn_down_strategy(state):
+        return OPTIMIZE_LOSS_PER_VOLUMN_DOWN, OPTIMIZE_PROFIT_PER_VOLUMN_DOWN
     if is_follow_mode():
         return OPTIMIZE_LOSS_PER_FOLLOW, OPTIMIZE_PROFIT_PER_FOLLOW
     if is_chance_mode():
@@ -1825,6 +2089,8 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
         return FORCE_CLOSE_TIME_LIMIT_DOWN
     if is_limit_up_strategy(state):
         return FORCE_CLOSE_TIME_LIMIT_UP
+    if is_volumn_down_strategy(state):
+        return FORCE_CLOSE_TIME_VOLUMN_DOWN
     if is_follow_mode():
         return FORCE_CLOSE_TIME_FOLLOW
     if is_chance_mode():
@@ -1839,6 +2105,8 @@ def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
         return ENTRY_ORDER_QUANTITY_LIMIT_DOWN
     if is_limit_up_strategy(state):
         return ENTRY_ORDER_QUANTITY_LIMIT_UP
+    if is_volumn_down_strategy(state):
+        return ENTRY_ORDER_QUANTITY_VOLUMN_DOWN
     if is_follow_mode():
         return ENTRY_ORDER_QUANTITY_FOLLOW
     if is_chance_mode():
@@ -2297,7 +2565,7 @@ def entry_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bo
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
-    if POSITION_MARKET_REVERSAL_EVENT.is_set() and not is_independent_limit_strategy(state):
+    if POSITION_MARKET_REVERSAL_EVENT.is_set() and not is_independent_strategy(state):
         state["traded"] = True
         state["exit_reason"] = "market_reversal"
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -2379,7 +2647,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
             state["entry_price_source"] = "estimated"
             state["entry_price"] = entry_ref_px
 
-            industry_filter_text = "" if is_independent_limit_strategy(state) else format_industry_market_filter_pass_text(state)
+            industry_filter_text = "" if is_independent_strategy(state) else format_industry_market_filter_pass_text(state)
             recalc_entry_position_prices(state)
             if side == TRADE_SIDE_SHORT:
                 print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功{industry_filter_text}")
@@ -2803,7 +3071,7 @@ def handle_position_market_reversal(
 ) -> bool:
     """沿用原平倉機制：平倉委託回傳成功即視為交易完成。"""
     for state in states.values():
-        if is_independent_limit_strategy(state):
+        if is_independent_strategy(state):
             continue
 
         apply_market_reversal_metadata(state)
@@ -2823,7 +3091,7 @@ def handle_position_market_reversal(
     return all_traded({
         symbol: state
         for symbol, state in states.items()
-        if not is_independent_limit_strategy(state)
+        if not is_independent_strategy(state)
     })
 
 
@@ -2913,23 +3181,23 @@ def all_traded(states: Dict[str, Dict[str, Any]]) -> bool:
     return all(s.get("traded", False) for s in states.values())
 
 
-def has_unfinished_independent_limit_states(states: Dict[str, Dict[str, Any]]) -> bool:
+def has_unfinished_independent_states(states: Dict[str, Dict[str, Any]]) -> bool:
     return any(
-        is_independent_limit_strategy(state) and not state.get("traded")
+        is_independent_strategy(state) and not state.get("traded")
         for state in states.values()
     )
 
 
 def has_unfinished_non_independent_states(states: Dict[str, Dict[str, Any]]) -> bool:
     return any(
-        (not is_independent_limit_strategy(state)) and not state.get("traded")
+        (not is_independent_strategy(state)) and not state.get("traded")
         for state in states.values()
     )
 
 
 def mark_non_independent_states_blocked(states: Dict[str, Dict[str, Any]], reason: str) -> None:
     for state in states.values():
-        if is_independent_limit_strategy(state) or state.get("traded") or state.get("in_position"):
+        if is_independent_strategy(state) or state.get("traded") or state.get("in_position"):
             continue
         state["traded"] = True
         state["entry_time"] = now_tpe().isoformat()
@@ -2942,14 +3210,14 @@ def block_non_independent_states_for_disabled_entry_mode(
     entry_mode_name: str,
 ) -> bool:
     mark_non_independent_states_blocked(states, "entry_mode_disabled")
-    if has_unfinished_independent_limit_states(states):
+    if has_unfinished_independent_states(states):
         print(
             f"[MODE] {entry_mode_name} 已停用，非獨立策略今日不執行，"
-            "LIMIT_UP/LIMIT_DOWN 繼續獨立監控"
+            "獨立策略繼續監控"
         )
         return False
     print(
-        f"[MODE] {entry_mode_name} 已停用，且無未完成 LIMIT_UP/LIMIT_DOWN，"
+        f"[MODE] {entry_mode_name} 已停用，且無未完成獨立策略，"
         "結束監控"
     )
     return True
@@ -3058,26 +3326,37 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     entry_check_start_announced = False
     entry_check_end_announced = False
     entry_mode_decided = False
+    volumn_down_evaluation_done = not ENABLE_VOLUMN_DOWN_STRATEGY
     last_order_results_update_monotonic = 0.0
     while True:
         if POSITION_MARKET_REVERSAL_EVENT.is_set() and has_unfinished_non_independent_states(states):
             if handle_position_market_reversal(states, mysdk):
-                if not has_unfinished_independent_limit_states(states):
+                if not has_unfinished_independent_states(states):
                     print("[MARKET_REVERSAL] 所有標的均已完成大盤反轉處理，結束監控")
                     return
-                print("[MARKET_REVERSAL] 非獨立策略標的已完成大盤反轉處理，LIMIT_UP/LIMIT_DOWN 繼續獨立監控")
+                print("[MARKET_REVERSAL] 非獨立策略標的已完成大盤反轉處理，獨立策略繼續監控")
             else:
                 time.sleep(5.0)
                 continue
 
         if MARKET_REVERSAL_STOP_EVENT.is_set():
             mark_non_independent_states_blocked(states, "market_mode_blocked")
-            if not has_unfinished_independent_limit_states(states):
+            if not has_unfinished_independent_states(states):
                 print("[MODE] 市場模式已封鎖，維持 NO_TRADE 並結束監控")
                 return
 
         # round_has_market_update = False
         now_local = now_tpe()
+        if (
+            not volumn_down_evaluation_done
+            and (now_local.hour, now_local.minute, now_local.second) >= VOLUMN_DOWN_EVALUATION_TIME
+        ):
+            print(
+                f"⏰ VOLUMN_DOWN 判斷時間！目前時間：{now_local.strftime('%H:%M:%S')}"
+            )
+            volumn_down_evaluation_done = True
+            evaluate_volumn_down_entries(states, mysdk, realtime_sdk)
+
         if stop_if_ix0001_early_breakout_missing():
             return
 
@@ -3280,7 +3559,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         now = now_tpe()
         nxt = ceil_next_interval(now, 5) # 秒數在5的倍數輪巡
         sleep_sec = max(0.2, (nxt - now).total_seconds())
-        if MARKET_REVERSAL_STOP_EVENT.is_set() and has_unfinished_independent_limit_states(states):
+        if MARKET_REVERSAL_STOP_EVENT.is_set() and has_unfinished_independent_states(states):
             time.sleep(sleep_sec)
         elif MARKET_REVERSAL_STOP_EVENT.wait(timeout=sleep_sec):
             continue
@@ -3354,6 +3633,8 @@ if __name__ == "__main__":
             strategy_type=STRATEGY_LIMIT_DOWN,
         )
         states.update(limit_down_states)
+
+        prepare_volumn_down_yesterday_data(states, realtime_sdk)
 
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()

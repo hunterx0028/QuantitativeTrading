@@ -14,7 +14,49 @@ FOLLOW 模式成立條件
 CHANCE 模式成立條件
 1. 不是LOWER也不是FOLLOW時成立。
 2. 上下幅度變化須小於等於 1%。
+
+LIMIT_UP 策略成立條件
+1. 該股票連漲停符合指定次數
+
+LIMIT_DOWN 策略成立條件
+1. 該股票連跌停符合指定次數
+
+VOLUMN_DOWN 策略成立條件
+1. 開盤5分的交易量是前一日5分鐘的數分之一
+
+LOWER 模式個股入場條件
+1. 個股本日 09:30 前分鐘 K 棒數量須達 MIN_MINUTE_BARS_BEFORE_0930，且漲跌停價須在設定的可交易價格範圍內。
+2. 於 STRATEGY_START_LOWER～STRATEGY_END_LOWER（含）尋找第一根 low 落在「昨收到跌停價」之 LOWER_ENTRY_RANGE_START_PERCENT～LOWER_ENTRY_RANGE_END_PERCENT 區間內的分 K。
+3. 以上述分 K 的 low 作為放空入場價。
+4. 入場當下 IX0001、IX0043 均仍須維持 LOWER，且個股所屬產業指數不得高於 LOWER 允許門檻；任一資料不足或條件不符即不入場。
+
+FOLLOW 模式個股入場條件
+1. 個股本日 09:30 前分鐘 K 棒數量須達 MIN_MINUTE_BARS_BEFORE_0930，且漲跌停價須在設定的可交易價格範圍內。
+2. 於 STRATEGY_START_FOLLOW～STRATEGY_END_FOLLOW（含）尋找第一根 high 落在「昨收到漲停價」之 FOLLOW_ENTRY_RANGE_START_PERCENT～FOLLOW_ENTRY_RANGE_END_PERCENT 區間內的分 K。
+3. 以上述分 K 的 high 作為做多入場價。
+4. 入場當下 IX0001、IX0043 均仍須維持 FOLLOW，且個股所屬產業指數必須高於 FOLLOW 允許門檻；任一資料不足或條件不符即不入場。
+
+CHANCE 模式個股入場條件
+1. 個股本日 09:30 前分鐘 K 棒數量須達 MIN_MINUTE_BARS_BEFORE_0930，且漲跌停價須在設定的可交易價格範圍內。
+2. 先以昨低為基準；若本日 09:06（含）以前出現更低的 low，則以下探後的最低 low 作為「有效昨低」。
+3. 若有效昨低再往下一個 tick 已進入「有效昨低到跌停價」的後三分之一區域，當日直接禁止進場。
+4. 於 STRATEGY_START_CHANCE～STRATEGY_END_CHANCE（含）尋找第一根 low 嚴格跌破有效昨低的分 K，並以該根 low 作為放空入場價。
+5. 實際入場價若已進入上述跌停區域，或入場價加停損價差已達漲停價，皆不入場；個股所屬產業指數亦不得高於 CHANCE 允許門檻。
+
+VOLUMN_DOWN 策略個股入場條件
+1. 前一日 09:30 前分鐘 K 棒數量須達 MIN_MINUTE_BARS_BEFORE_0930；前一日 09:00 起前 N 根及本日 09:00 起前 N+1 根分鐘 K 必須完整且連續。
+2. 本日前 N 根交易量總和須小於或等於前一日前 N 根交易量總和乘以 SHORT_VOLUME_RATIO_THRESHOLD，且前一日前 N 根交易量須大於 0。
+3. 條件成立後，直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
+4. 個股漲跌停價仍須在設定的可交易價格範圍內；VOLUMN_DOWN 優先於 LOWER、FOLLOW、CHANCE，成立後該股票當日不再進入其他模式。
+
+LIMIT_UP 策略個股入場條件
+1. 本回測程式目前沒有 LIMIT_UP 的個股入場掃描及交易候選建立，因此尚無可套用的回測入場條件。
+
+LIMIT_DOWN 策略個股入場條件
+1. 本回測程式目前沒有 LIMIT_DOWN 的個股入場掃描及交易候選建立，因此尚無可套用的回測入場條件。
 """
+
+
 
 import builtins
 import argparse
@@ -2404,10 +2446,8 @@ def find_volumn_down_candidate_on_date(
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
     if not today_bars or not yesterday_bars:
         return None
-    if (
-        not has_enough_minute_bars_before_0930(today_bars)
-        or not has_enough_minute_bars_before_0930(yesterday_bars)
-    ):
+    # 本日是否可當沖已在 selected_stocks 形成前排除；前日仍沿用完整度檢核。
+    if not has_enough_minute_bars_before_0930(yesterday_bars):
         return None
 
     today_ordered = sorted(
@@ -2418,27 +2458,50 @@ def find_volumn_down_candidate_on_date(
         (bar for bar in yesterday_bars if bar.get('dt') is not None),
         key=lambda bar: bar['dt'],
     )
-    required_today_count = SHORT_VOLUME_SUMMARY_CANDLES + 1
-    if (
-        len(today_ordered) < required_today_count
-        or len(yesterday_ordered) < SHORT_VOLUME_SUMMARY_CANDLES
-    ):
+    def get_continuous_opening_bars(
+        ordered_bars: list,
+        current_date: date,
+        required_count: int,
+    ) -> list:
+        """取得自 09:00 起連續的分 K；任一分鐘缺失即回傳空陣列。"""
+        bars_by_dt = {bar['dt']: bar for bar in ordered_bars}
+        opening_dt = datetime.combine(current_date, datetime.min.time()).replace(hour=9)
+        expected_datetimes = [
+            opening_dt + timedelta(minutes=offset)
+            for offset in range(required_count)
+        ]
+        if any(expected_dt not in bars_by_dt for expected_dt in expected_datetimes):
+            return []
+        return [bars_by_dt[expected_dt] for expected_dt in expected_datetimes]
+
+    yesterday_date = yesterday_ordered[0]['dt'].date()
+    today_opening_bars = get_continuous_opening_bars(
+        today_ordered,
+        target_date,
+        SHORT_VOLUME_SUMMARY_CANDLES + 1,
+    )
+    yesterday_opening_bars = get_continuous_opening_bars(
+        yesterday_ordered,
+        yesterday_date,
+        SHORT_VOLUME_SUMMARY_CANDLES,
+    )
+    if not today_opening_bars or not yesterday_opening_bars:
         return None
 
     yesterday_volume = sum(
         float(bar.get('volume', 0) or 0)
-        for bar in yesterday_ordered[:SHORT_VOLUME_SUMMARY_CANDLES]
+        for bar in yesterday_opening_bars
     )
     today_volume = sum(
         float(bar.get('volume', 0) or 0)
-        for bar in today_ordered[:SHORT_VOLUME_SUMMARY_CANDLES]
+        for bar in today_opening_bars[:SHORT_VOLUME_SUMMARY_CANDLES]
     )
     if yesterday_volume <= 0:
         return None
     if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
         return None
 
-    entry_bar = today_ordered[SHORT_VOLUME_SUMMARY_CANDLES]
+    entry_bar = today_opening_bars[SHORT_VOLUME_SUMMARY_CANDLES]
     entry_price = float(entry_bar['open'])
 
     ystats = compute_yesterday_stats(yesterday_ordered)
