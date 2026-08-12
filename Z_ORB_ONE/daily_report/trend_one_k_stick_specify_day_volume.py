@@ -34,7 +34,7 @@ from Z_ORB_ONE.stock_data import market_previous_close_indices
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 DISPLAY_INDEX_CODES = ("IX0001", "IX0043")  # 依序以分頁顯示上市、上櫃指數
-DISPLAY_STOCK_CODES = []  # 要額外顯示的 4 位數股票代碼，例如 ["2330", "2317"]
+DISPLAY_STOCK_CODES = [""]  # 要額外顯示的 4 位數股票代碼；空字串會被忽略，等同空陣列
 
 RESERVE_MARKET_INDICES = {
     "TWSE:MARKET": {
@@ -625,7 +625,12 @@ def main():
         fig, tab_title = build_index_figure(rest_stock, index_code, target_date)
         add_figure_tab(notebook, fig, tab_title)
 
-    for stock_code in DISPLAY_STOCK_CODES:
+    display_stock_codes = [
+        stock_code
+        for stock_code in DISPLAY_STOCK_CODES
+        if str(stock_code).strip()
+    ]
+    for stock_code in display_stock_codes:
         fig, tab_title = build_stock_figure(rest_stock, stock_code, target_date)
         add_figure_tab(notebook, fig, tab_title)
 

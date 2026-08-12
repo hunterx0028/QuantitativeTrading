@@ -12,8 +12,9 @@ FOLLOW 模式成立條件
 5. IX0001 從 09:00～09:42 的 close regression EMA 斜率必須大於 0。
 
 CHANCE 模式成立條件
-1. 不是LOWER也不是FOLLOW時成立。
-2. 上下幅度變化須小於等於 1%。
+1. 不是LOWER也不是FOLLOW時。
+2. 上下穿越不能超過 3次。
+3. 上下幅度變化須小於等於 1%。
 
 LIMIT_UP 策略成立條件
 1. 該股票連漲停符合指定次數
@@ -21,7 +22,7 @@ LIMIT_UP 策略成立條件
 LIMIT_DOWN 策略成立條件
 1. 該股票連跌停符合指定次數
 
-VOLUMN_DOWN 策略成立條件
+VOLUME_DOWN 策略成立條件
 1. 開盤5分的交易量是前一日5分鐘的數分之一
 
 ------------------------------------------------
@@ -52,7 +53,7 @@ LIMIT_DOWN 策略個股入場條件
 3. 第一根 high <= 昨收，第二根 high > 昨收。
 4. 以第二根 high 作為放空入場價。
 
-VOLUMN_DOWN 策略個股入場條件
+VOLUME_DOWN 策略個股入場條件
 1. 條件成立後，直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
 """
 
@@ -96,7 +97,7 @@ GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
 STRATEGY_FOLLOW = 'FOLLOW'
 STRATEGY_CHANCE = 'CHANCE'
-STRATEGY_VOLUMN_DOWN = 'VOLUMN_DOWN'
+STRATEGY_VOLUME_DOWN = 'VOLUME_DOWN'
 STRATEGY_LIMIT_DOWN = 'LIMIT_DOWN'
 STRATEGY_LIMIT_UP = 'LIMIT_UP'
 STRATEGY_NO_TRADE = 'NO_TRADE'
@@ -106,7 +107,7 @@ ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = True
-INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
 INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 
@@ -116,13 +117,13 @@ INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 
 # 前一日及本日於 09:30 前至少須有此數量的分鐘 K 棒；
 # 少於此數量視為延遲撮合股票，不納入當沖策略。
-MIN_MINUTE_BARS_BEFORE_0930 = 25
+MIN_MINUTE_BARS_BEFORE_0930 = 20
 
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
 SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
 
-OPTIMIZE_LOSS_PER_VOLUMN_DOWN = 2.0 # volumn_down 停損百分比(%)
-OPTIMIZE_PROFIT_PER_VOLUMN_DOWN = 8.0 # volumn_down 停利百分比(%)
+OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
+OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
@@ -167,7 +168,7 @@ ENTRY_CHECK_END_TIME_LIMIT_UP = (10, 1) # limit up 進場檢核截止分K棒的(
 INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(時, 分)，預設沿用 chance
 INTRADAY_COMPARE_END_CHANCE = (13, 0)  # chance 盤中停損/停利比對截止(時, 分)
-INTRADAY_COMPARE_END_VOLUMN_DOWN = (13, 0) # volumn_down 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_VOLUME_DOWN = (13, 0) # volume_down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
 
@@ -619,6 +620,36 @@ def dedupe_stock_list(stock_lists: list[list[tuple]]) -> list[tuple]:
             seen_names.add(stock_name)
             deduped.append(stock_item)
     return deduped
+
+
+def build_stock_strategy_assignments(
+    stock_list: list[tuple],
+    limit_up_stock_list: list[tuple],
+    limit_down_stock_list: list[tuple],
+) -> list[tuple[tuple, bool, bool, bool]]:
+    """依股票名稱整合清單，回傳股票與一般/LIMIT_UP/LIMIT_DOWN 執行權限。"""
+    assignments: dict[str, list] = {}
+
+    def register(stock_item: tuple, mode_index: int) -> None:
+        stock_name = stock_item[0]
+        assignment = assignments.setdefault(
+            stock_name,
+            [stock_item, False, False, False],
+        )
+        assignment[mode_index] = True
+
+    for stock_item in stock_list:
+        register(stock_item, 1)
+        if INCLUDE_LIMIT_UP_IN_PRINT_STATS:
+            register(stock_item, 2)
+        if INCLUDE_LIMIT_DOWN_IN_PRINT_STATS:
+            register(stock_item, 3)
+    for stock_item in limit_up_stock_list:
+        register(stock_item, 2)
+    for stock_item in limit_down_stock_list:
+        register(stock_item, 3)
+
+    return [tuple(assignment) for assignment in assignments.values()]
 
 
 def get_required_industry_index_keys(stock_list: list[tuple]) -> set[str]:
@@ -1143,6 +1174,69 @@ def has_market_index_crossed_both_sides_of_previous_close(
     return False
 
 
+def has_market_index_reached_chance_crossing_limit(
+    index_key: str,
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """指定區間內符合昨收突破條件的分 K 達 3 根，即封鎖 CHANCE。"""
+    bars_by_date = index_minute_bars_by_key.get(index_key, {})
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    if previous_close is None:
+        return False
+
+    reversal_start_hm = (
+        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
+    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    interval_bars = sorted(
+        (
+            bar
+            for bar in bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+            if bar.get('dt') is not None
+            and reversal_start_hm
+            <= bar['dt'].hour * 60 + bar['dt'].minute
+            < decision_hm
+        ),
+        key=lambda bar: bar['dt'],
+    )
+
+    crossing_count = 0
+    previous_bar = None
+    for current_bar in interval_bars:
+        current_high = current_bar.get('high')
+        current_low = current_bar.get('low')
+        if current_high is None or current_low is None:
+            previous_bar = None
+            continue
+
+        current_high = float(current_high)
+        current_low = float(current_low)
+        crosses_in_current_bar = current_low <= previous_close <= current_high
+        crosses_from_previous_bar = False
+
+        if previous_bar is not None:
+            previous_high = float(previous_bar['high'])
+            previous_low = float(previous_bar['low'])
+            crosses_from_previous_bar = (
+                previous_high <= previous_close
+                and current_low >= previous_close
+            ) or (
+                previous_low >= previous_close
+                and current_high <= previous_close
+            )
+
+        if crosses_in_current_bar or crosses_from_previous_bar:
+            crossing_count += 1
+            if crossing_count >= 3:
+                return True
+
+        previous_bar = current_bar
+
+    return False
+
+
 def has_complete_market_decision_data(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1464,6 +1558,15 @@ def get_chance_or_no_trade_gate_status(
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> str:
     """回傳 CHANCE gate 狀態。"""
+    if any(
+        has_market_index_reached_chance_crossing_limit(
+            index_key,
+            target_date,
+            index_minute_bars_by_key,
+        )
+        for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
+    ):
+        return GATE_NO_TRADE
     if is_ix0001_chance_range_too_wide_before_decision(
         target_date,
         index_minute_bars_by_key,
@@ -2351,8 +2454,8 @@ def should_include_strategy_in_print_stats(strategy_type: str | None) -> bool:
         return INCLUDE_FOLLOW_IN_PRINT_STATS
     if strategy_type == STRATEGY_CHANCE:
         return INCLUDE_CHANCE_IN_PRINT_STATS
-    if strategy_type == STRATEGY_VOLUMN_DOWN:
-        return INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS
+    if strategy_type == STRATEGY_VOLUME_DOWN:
+        return INCLUDE_VOLUME_DOWN_IN_PRINT_STATS
     if strategy_type == STRATEGY_LIMIT_DOWN:
         return INCLUDE_LIMIT_DOWN_IN_PRINT_STATS
     if strategy_type == STRATEGY_LIMIT_UP:
@@ -2488,7 +2591,7 @@ def print_daily_optimization_results(
         STRATEGY_LOWER: 0,
         STRATEGY_FOLLOW: 0,
         STRATEGY_CHANCE: 0,
-        STRATEGY_VOLUMN_DOWN: 1,
+        STRATEGY_VOLUME_DOWN: 1,
         STRATEGY_LIMIT_DOWN: 2,
         STRATEGY_LIMIT_UP: 2,
         STRATEGY_NO_TRADE: 3,
@@ -2552,8 +2655,8 @@ def print_daily_optimization_results(
         f'總收益統計={summary["total_pnl"]:+.2f}'
     )
     print(
-        f'VOLUMN_DOWN_LOSS_PER={OPTIMIZE_LOSS_PER_VOLUMN_DOWN:.1f}%  '
-        f'VOLUMN_DOWN_PROFIT_PER={OPTIMIZE_PROFIT_PER_VOLUMN_DOWN:.1f}%  '
+        f'VOLUME_DOWN_LOSS_PER={OPTIMIZE_LOSS_PER_VOLUME_DOWN:.1f}%  '
+        f'VOLUME_DOWN_PROFIT_PER={OPTIMIZE_PROFIT_PER_VOLUME_DOWN:.1f}%  '
         f'LIMIT_DOWN_LOSS_PER={OPTIMIZE_LOSS_PER_LIMIT_DOWN:.1f}%  '
         f'LIMIT_DOWN_PROFIT_PER={OPTIMIZE_PROFIT_PER_LIMIT_DOWN:.1f}%  '
         f'LIMIT_UP_LOSS_PER={OPTIMIZE_LOSS_PER_LIMIT_UP:.1f}%  '
@@ -2569,14 +2672,14 @@ def print_daily_optimization_results(
         f'SHORT_VOLUME_SUMMARY_CANDLES={SHORT_VOLUME_SUMMARY_CANDLES}  '
         f'SHORT_VOLUME_RATIO_THRESHOLD={SHORT_VOLUME_RATIO_THRESHOLD:.4f}  '
         f'MIN_MINUTE_BARS_BEFORE_0930={MIN_MINUTE_BARS_BEFORE_0930}  '
-        f'VOLUMN_DOWN出場時間={INTRADAY_COMPARE_END_VOLUMN_DOWN[0]:02d}:'
-        f'{INTRADAY_COMPARE_END_VOLUMN_DOWN[1]:02d}'
+        f'VOLUME_DOWN出場時間={INTRADAY_COMPARE_END_VOLUME_DOWN[0]:02d}:'
+        f'{INTRADAY_COMPARE_END_VOLUME_DOWN[1]:02d}'
     )
     print(
         f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}  '
         f'INCLUDE_FOLLOW_IN_PRINT_STATS={INCLUDE_FOLLOW_IN_PRINT_STATS}  '
         f'INCLUDE_CHANCE_IN_PRINT_STATS={INCLUDE_CHANCE_IN_PRINT_STATS}  '
-        f'INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS={INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS}  '
+        f'INCLUDE_VOLUME_DOWN_IN_PRINT_STATS={INCLUDE_VOLUME_DOWN_IN_PRINT_STATS}  '
         f'INCLUDE_LIMIT_DOWN_IN_PRINT_STATS={INCLUDE_LIMIT_DOWN_IN_PRINT_STATS}  '
         f'INCLUDE_LIMIT_UP_IN_PRINT_STATS={INCLUDE_LIMIT_UP_IN_PRINT_STATS}'
     )
@@ -2625,12 +2728,12 @@ def print_daily_optimization_results(
 # Core orchestration — analyze_stock
 # ---------------------------------------------------------------------------
 
-def find_volumn_down_candidate_on_date(
+def find_volume_down_candidate_on_date(
     stock_item: tuple,
     target_date: date,
     bars_by_date: dict,
 ):
-    """優先判斷單日 VOLUMN_DOWN；未同時符合縮量及開低條件則回傳 None。"""
+    """優先判斷單日 VOLUME_DOWN；未同時符合縮量及開低條件則回傳 None。"""
     stock_name = stock_item[0]
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
     if not today_bars or not yesterday_bars:
@@ -2647,29 +2750,58 @@ def find_volumn_down_candidate_on_date(
         (bar for bar in yesterday_bars if bar.get('dt') is not None),
         key=lambda bar: bar['dt'],
     )
-    def get_continuous_opening_bars(
+    if not today_ordered or not yesterday_ordered:
+        return None
+
+    def get_opening_volume_bars(
         ordered_bars: list,
         current_date: date,
-        required_count: int,
+        summary_candles: int,
     ) -> list:
-        """取得自 09:00 起連續的分 K；任一分鐘缺失即回傳空陣列。"""
-        bars_by_dt = {bar['dt']: bar for bar in ordered_bars}
+        """取得自 09:00 起、統計截止時間前具有有效成交量的分 K。"""
         opening_dt = datetime.combine(current_date, datetime.min.time()).replace(hour=9)
-        expected_datetimes = [
-            opening_dt + timedelta(minutes=offset)
-            for offset in range(required_count)
-        ]
-        if any(expected_dt not in bars_by_dt for expected_dt in expected_datetimes):
-            return []
-        return [bars_by_dt[expected_dt] for expected_dt in expected_datetimes]
+        summary_end_dt = opening_dt + timedelta(minutes=summary_candles)
+        volume_bars = []
+        for bar in ordered_bars:
+            bar_dt = bar.get('dt')
+            if bar_dt is None or not (opening_dt <= bar_dt < summary_end_dt):
+                continue
+            try:
+                volume = float(bar.get('volume'))
+            except (TypeError, ValueError):
+                continue
+            if volume < 0:
+                continue
+            volume_bars.append(bar)
+        return volume_bars
+
+    def find_entry_bar(
+        ordered_bars: list,
+        current_date: date,
+        summary_candles: int,
+    ) -> dict | None:
+        """從 N+1 根起找進場分 K，缺失時最晚順延至 N+3。"""
+        opening_dt = datetime.combine(current_date, datetime.min.time()).replace(hour=9)
+        first_entry_dt = opening_dt + timedelta(minutes=summary_candles)
+        bars_by_dt = {bar['dt']: bar for bar in ordered_bars}
+        for delay_minutes in range(3):
+            candidate = bars_by_dt.get(first_entry_dt + timedelta(minutes=delay_minutes))
+            if candidate is None:
+                continue
+            try:
+                float(candidate.get('open'))
+            except (TypeError, ValueError):
+                continue
+            return candidate
+        return None
 
     yesterday_date = yesterday_ordered[0]['dt'].date()
-    today_opening_bars = get_continuous_opening_bars(
+    today_opening_bars = get_opening_volume_bars(
         today_ordered,
         target_date,
-        SHORT_VOLUME_SUMMARY_CANDLES + 1,
+        SHORT_VOLUME_SUMMARY_CANDLES,
     )
-    yesterday_opening_bars = get_continuous_opening_bars(
+    yesterday_opening_bars = get_opening_volume_bars(
         yesterday_ordered,
         yesterday_date,
         SHORT_VOLUME_SUMMARY_CANDLES,
@@ -2682,15 +2814,21 @@ def find_volumn_down_candidate_on_date(
         for bar in yesterday_opening_bars
     )
     today_volume = sum(
-        float(bar.get('volume', 0) or 0)
-        for bar in today_opening_bars[:SHORT_VOLUME_SUMMARY_CANDLES]
+        float(bar['volume'])
+        for bar in today_opening_bars
     )
     if yesterday_volume <= 0:
         return None
     if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
         return None
 
-    entry_bar = today_opening_bars[SHORT_VOLUME_SUMMARY_CANDLES]
+    entry_bar = find_entry_bar(
+        today_ordered,
+        target_date,
+        SHORT_VOLUME_SUMMARY_CANDLES,
+    )
+    if entry_bar is None:
+        return None
     entry_price = float(entry_bar['open'])
 
     ystats = compute_yesterday_stats(yesterday_ordered)
@@ -2707,8 +2845,8 @@ def find_volumn_down_candidate_on_date(
         today_ordered,
         limit_up_price,
         limit_down_price,
-        STRATEGY_VOLUMN_DOWN,
-        INTRADAY_COMPARE_END_VOLUMN_DOWN,
+        STRATEGY_VOLUME_DOWN,
+        INTRADAY_COMPARE_END_VOLUME_DOWN,
         TRADE_SIDE_SHORT,
         None,
     )
@@ -2720,11 +2858,12 @@ def find_limit_candidate_on_date(
     bars_by_date: dict,
     day_candles_by_symbol: dict[str, list],
     strategy_type: str,
+    sequence_already_confirmed: bool = False,
 ):
     """判斷連續漲跌停後次一交易日的 limit 獨立策略候選交易。"""
     stock_name = stock_item[0]
     if strategy_type == STRATEGY_LIMIT_UP:
-        if not has_limit_sequence_before_date(
+        if not sequence_already_confirmed and not has_limit_sequence_before_date(
             stock_name,
             target_date,
             day_candles_by_symbol,
@@ -2733,7 +2872,7 @@ def find_limit_candidate_on_date(
         ):
             return None
     elif strategy_type == STRATEGY_LIMIT_DOWN:
-        if not has_limit_sequence_before_date(
+        if not sequence_already_confirmed and not has_limit_sequence_before_date(
             stock_name,
             target_date,
             day_candles_by_symbol,
@@ -2895,8 +3034,11 @@ def collect_trade_candidates(
     index_minute_bars_by_key: dict[str, dict[str, list]],
     market_start_gate_cache: dict[date, str],
     market_reversal_cache: dict[tuple[date, str], datetime | None],
+    enable_general_strategies: bool = True,
+    enable_limit_up_strategy: bool = False,
+    enable_limit_down_strategy: bool = False,
 ) -> list:
-    """蒐集單支股票自 target_date 起往前的所有候選交易。"""
+    """逐日先執行強制 LIMIT 策略；未符合 LIMIT 序列時才執行一般策略。"""
     stock_name = stock_item[0]
     bars_by_date = minute_bars_by_symbol.get(stock_name, {})
     if not bars_by_date:
@@ -2912,14 +3054,48 @@ def collect_trade_candidates(
 
     candidates = []
     for current_date in available_dates:
-        if INCLUDE_VOLUMN_DOWN_IN_PRINT_STATS:
-            volumn_down_candidate = find_volumn_down_candidate_on_date(
+        limit_up_forced = enable_limit_up_strategy and has_limit_sequence_before_date(
+            stock_name,
+            current_date,
+            day_candles_by_symbol,
+            LONG_LIMIT_UP_DAYS,
+            STRATEGY_LIMIT_UP,
+        )
+        limit_down_forced = enable_limit_down_strategy and has_limit_sequence_before_date(
+            stock_name,
+            current_date,
+            day_candles_by_symbol,
+            SHORT_LIMIT_DOWN_DAYS,
+            STRATEGY_LIMIT_DOWN,
+        )
+        if limit_up_forced or limit_down_forced:
+            forced_strategy_type = (
+                STRATEGY_LIMIT_UP if limit_up_forced else STRATEGY_LIMIT_DOWN
+            )
+            limit_candidate = find_limit_candidate_on_date(
+                stock_item,
+                current_date,
+                bars_by_date,
+                day_candles_by_symbol,
+                forced_strategy_type,
+                sequence_already_confirmed=True,
+            )
+            if limit_candidate is not None:
+                candidates.append(limit_candidate)
+            # LIMIT 屬強制策略；序列成立後即使沒有進場訊號，也不再執行其他策略。
+            continue
+
+        if not enable_general_strategies:
+            continue
+
+        if INCLUDE_VOLUME_DOWN_IN_PRINT_STATS:
+            volume_down_candidate = find_volume_down_candidate_on_date(
                 stock_item,
                 current_date,
                 bars_by_date,
             )
-            if volumn_down_candidate is not None:
-                candidates.append(volumn_down_candidate)
+            if volume_down_candidate is not None:
+                candidates.append(volume_down_candidate)
                 continue
 
         if current_date not in market_start_gate_cache:
@@ -3062,9 +3238,9 @@ def evaluate_candidates(
         elif strategy_type == STRATEGY_CHANCE:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_CHANCE
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_CHANCE
-        elif strategy_type == STRATEGY_VOLUMN_DOWN:
-            optimize_loss_percent = OPTIMIZE_LOSS_PER_VOLUMN_DOWN
-            optimize_profit_percent = OPTIMIZE_PROFIT_PER_VOLUMN_DOWN
+        elif strategy_type == STRATEGY_VOLUME_DOWN:
+            optimize_loss_percent = OPTIMIZE_LOSS_PER_VOLUME_DOWN
+            optimize_profit_percent = OPTIMIZE_PROFIT_PER_VOLUME_DOWN
         elif strategy_type == STRATEGY_LIMIT_DOWN:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_LIMIT_DOWN
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_LIMIT_DOWN
@@ -3232,7 +3408,7 @@ def main() -> None:
             f'一般模式股票數={len(stock_list)}  '
             f'LIMIT_UP股票數={len(limit_up_stock_list)}  '
             f'LIMIT_DOWN股票數={len(limit_down_stock_list)}  '
-            f'API去重股票數={len(analysis_stock_list)}'
+            f'API去除重複股票後={len(analysis_stock_list)}'
         )
 
         # 目標日期
@@ -3300,7 +3476,12 @@ def main() -> None:
             )
             print(f'已儲存API快取: {cache_path.name}')
 
-        total_stocks = len(stock_list) + len(limit_up_stock_list) + len(limit_down_stock_list)
+        stock_strategy_assignments = build_stock_strategy_assignments(
+            stock_list,
+            limit_up_stock_list,
+            limit_down_stock_list,
+        )
+        total_stocks = len(stock_strategy_assignments)
 
         def evaluate_one_window() -> dict:
             nonlocal total_stocks
@@ -3309,15 +3490,25 @@ def main() -> None:
             market_start_gate_cache: dict[date, str] = {}
             market_reversal_cache: dict[tuple[date, str], datetime | None] = {}
             progress_idx = 0
-            for stock_item in stock_list:
+            for (
+                stock_item,
+                enable_general_strategies,
+                enable_limit_up_strategy,
+                enable_limit_down_strategy,
+            ) in stock_strategy_assignments:
                 progress_idx += 1
                 stock_name = stock_item[0]
+                enabled_strategy_labels = []
+                if enable_general_strategies:
+                    enabled_strategy_labels.append('GENERAL')
+                if enable_limit_up_strategy:
+                    enabled_strategy_labels.append(STRATEGY_LIMIT_UP)
+                if enable_limit_down_strategy:
+                    enabled_strategy_labels.append(STRATEGY_LIMIT_DOWN)
                 print_progress(
                     progress_idx,
                     total_stocks,
-                    f'{stock_name} [L {STRATEGY_START_LOWER[0]:02d}:{STRATEGY_START_LOWER[1]:02d}~{STRATEGY_END_LOWER[0]:02d}:{STRATEGY_END_LOWER[1]:02d} / '
-                    f'F {STRATEGY_START_FOLLOW[0]:02d}:{STRATEGY_START_FOLLOW[1]:02d}~{STRATEGY_END_FOLLOW[0]:02d}:{STRATEGY_END_FOLLOW[1]:02d} / '
-                    f'C {STRATEGY_START_CHANCE[0]:02d}:{STRATEGY_START_CHANCE[1]:02d}~{STRATEGY_END_CHANCE[0]:02d}:{STRATEGY_END_CHANCE[1]:02d}]',
+                    f'{stock_name} [{"/".join(enabled_strategy_labels)}]',
                 )
                 all_candidates.extend(
                     collect_trade_candidates(
@@ -3328,42 +3519,9 @@ def main() -> None:
                         index_minute_bars_by_key,
                         market_start_gate_cache,
                         market_reversal_cache,
-                    )
-                )
-            for stock_item in limit_up_stock_list:
-                progress_idx += 1
-                stock_name = stock_item[0]
-                print_progress(
-                    progress_idx,
-                    total_stocks,
-                    f'{stock_name} [{STRATEGY_LIMIT_UP} {ENTRY_CHECK_START_TIME_LIMIT_UP[0]:02d}:{ENTRY_CHECK_START_TIME_LIMIT_UP[1]:02d}~'
-                    f'{ENTRY_CHECK_END_TIME_LIMIT_UP[0]:02d}:{ENTRY_CHECK_END_TIME_LIMIT_UP[1]:02d}]',
-                )
-                all_candidates.extend(
-                    collect_limit_trade_candidates(
-                        stock_item,
-                        target_date,
-                        minute_bars_by_symbol,
-                        day_candles_by_symbol,
-                        STRATEGY_LIMIT_UP,
-                    )
-                )
-            for stock_item in limit_down_stock_list:
-                progress_idx += 1
-                stock_name = stock_item[0]
-                print_progress(
-                    progress_idx,
-                    total_stocks,
-                    f'{stock_name} [{STRATEGY_LIMIT_DOWN} {ENTRY_CHECK_START_TIME_LIMIT_DOWN[0]:02d}:{ENTRY_CHECK_START_TIME_LIMIT_DOWN[1]:02d}~'
-                    f'{ENTRY_CHECK_END_TIME_LIMIT_DOWN[0]:02d}:{ENTRY_CHECK_END_TIME_LIMIT_DOWN[1]:02d}]',
-                )
-                all_candidates.extend(
-                    collect_limit_trade_candidates(
-                        stock_item,
-                        target_date,
-                        minute_bars_by_symbol,
-                        day_candles_by_symbol,
-                        STRATEGY_LIMIT_DOWN,
+                        enable_general_strategies,
+                        enable_limit_up_strategy,
+                        enable_limit_down_strategy,
                     )
                 )
 
