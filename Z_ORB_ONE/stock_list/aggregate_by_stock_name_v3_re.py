@@ -7,6 +7,7 @@ from pathlib import Path
 
 MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
+MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
 LIMIT_UP_REPEAT_COUNT = 2 # 連漲停多少次，才分開列於 stock_data.py
 LIMIT_DOWN_REPEAT_COUNT = 2 # 連跌停多少次，才分開列於 stock_data.py
@@ -127,6 +128,20 @@ def is_record_in_price_range(record: tuple) -> bool:
 
 def filter_records_by_price_range(ranked: list[tuple[tuple, int]]) -> list[tuple[tuple, int]]:
     return [(record, count) for record, count in ranked if is_record_in_price_range(record)]
+
+
+def is_record_atr_qualified(record: tuple) -> bool:
+    if len(record) <= 7:
+        return False
+    try:
+        atr_value = float(record[7])
+    except (TypeError, ValueError):
+        return False
+    return atr_value >= MIN_ATR
+
+
+def filter_records_by_min_atr(ranked: list[tuple[tuple, int]]) -> list[tuple[tuple, int]]:
+    return [(record, count) for record, count in ranked if is_record_atr_qualified(record)]
 
 
 def normalize_industry_code(industry_code) -> str:
@@ -381,7 +396,8 @@ def main() -> None:
     lines = result_path.read_text(encoding="utf-8").splitlines(keepends=True)
     ranked_records = extract_ranked_records(lines)
     price_filtered_ranked_records = filter_records_by_price_range(ranked_records)
-    filtered_ranked_records = filter_records_by_excluded_industries(price_filtered_ranked_records)
+    atr_filtered_ranked_records = filter_records_by_min_atr(price_filtered_ranked_records)
+    filtered_ranked_records = filter_records_by_excluded_industries(atr_filtered_ranked_records)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
     repeat_records, repeat_header = select_records_for_repeat_count(filtered_ranked_records)
     updated_lines = upsert_execution_start_time(lines, execution_start_time)
@@ -409,12 +425,14 @@ def main() -> None:
     log(f"source={result_path}")
     log(f"ranked_count={len(ranked_records)}")
     log(f"price_filtered_ranked_count={len(price_filtered_ranked_records)}")
+    log(f"atr_filtered_ranked_count={len(atr_filtered_ranked_records)}")
     log(f"filtered_ranked_count={len(filtered_ranked_records)}")
     log(f"excluded_industry_codes={EXCLUDED_INDUSTRY_CODES}")
     log(f"top_rank={TOP_RANK}")
     log(f"min_repeat_count={MIN_REPEAT_COUNT}")
     log(f"max_limit_up_price={MAX_LIMIT_UP_PRICE}")
     log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
+    log(f"min_atr={MIN_ATR}")
     log(f"top_result_count(rank)={len(rank_records)}")
     log(f"top_result_count(repeat_count)={len(repeat_records)}")
     log(f"selected_stocks_count={len(selected_stock_records)}")

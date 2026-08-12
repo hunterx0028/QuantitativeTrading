@@ -158,9 +158,6 @@ INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產
 PROFIT_BACK_PERCENT = 0.5 # 獲利後允許回撤百分比
 PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
 
-MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
-MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
-
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
@@ -3349,14 +3346,6 @@ def initialize_states(
             print(f"[{symbolStr}] ⚠️ 已連跌多日，排除")
             continue
         '''
-
-        if limit_up_price > MAX_LIMIT_UP_PRICE:
-            print(f"[{symbolStr}] ⚠️ 本日漲停價位太高，排除")
-            continue
-
-        if limit_down_price < MIN_LIMIT_DOWN_PRICE:
-            print(f"[{symbolStr}] ⚠️ 本日跌停價位太低，排除")
-            continue
 
         if not symbol_can_buy_day_trade:
             print(f"[{symbolStr}] ⚠️ 無法當沖，排除")

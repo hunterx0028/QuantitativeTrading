@@ -194,8 +194,6 @@ IX0001_CHANCE_MAX_RANGE_PERCENT = 1.0
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數當下 close 必須嚴格大於昨收指數下跌此百分比後的位置
 
-MAX_LIMIT_UP_PRICE = 200 # 漲停不可超過的價格
-MIN_LIMIT_DOWN_PRICE = 50 # 跌停不可超過的價格
 EXCLUDED_INDUSTRY_CODES: list[str] = [] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"
 
@@ -2833,8 +2831,6 @@ def find_volume_down_candidate_on_date(
 
     ystats = compute_yesterday_stats(yesterday_ordered)
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
-    if limit_up_price > MAX_LIMIT_UP_PRICE or limit_down_price < MIN_LIMIT_DOWN_PRICE:
-        return None
 
     return build_trade_candidate(
         stock_name,
@@ -2895,8 +2891,6 @@ def find_limit_candidate_on_date(
     )
     ystats = compute_yesterday_stats(yesterday_bars)
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
-    if limit_up_price > MAX_LIMIT_UP_PRICE or limit_down_price < MIN_LIMIT_DOWN_PRICE:
-        return None
 
     if strategy_type == STRATEGY_LIMIT_UP:
         pair = scan_entry_signal_limit_up(today_ordered, ystats)
@@ -2944,10 +2938,6 @@ def find_trade_candidate_on_date(
 
     ystats = compute_yesterday_stats(yesterday_bars)
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
-    if limit_up_price > MAX_LIMIT_UP_PRICE:
-        return None
-    if limit_down_price < MIN_LIMIT_DOWN_PRICE:
-        return None
 
     first_bar, first_bar_idx = find_first_bar(today_bars)
     if first_bar_idx < 0:
