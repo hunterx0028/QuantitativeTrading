@@ -88,7 +88,7 @@ OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 動態追蹤停利首次目�
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 5.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 
 PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比

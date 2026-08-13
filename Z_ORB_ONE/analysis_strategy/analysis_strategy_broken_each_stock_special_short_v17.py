@@ -100,10 +100,10 @@ TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_FOLLOW_IN_PRINT_STATS = False
-INCLUDE_CHANCE_IN_PRINT_STATS = False
+INCLUDE_CHANCE_IN_PRINT_STATS = True
 INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -119,7 +119,7 @@ OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 5.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
@@ -1049,6 +1049,38 @@ def build_market_index_daily_follow_summary(
             f'回跌時間={decline_time_text}'
         )
     return rows
+
+
+def build_market_open_summary_at_entry(
+    target_date: date,
+    entry_dt: datetime | None,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> str:
+    """建立日彙總用的 IX0001 入場分鐘 open 與昨收比較文字。"""
+    if entry_dt is None:
+        return 'N/A N/A N/A'
+    bars_by_date = index_minute_bars_by_key.get('TWSE:MARKET', {})
+    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+    if previous_close is None or previous_close == 0 or not today_bars:
+        return 'N/A N/A N/A'
+    entry_bar = next(
+        (
+            bar
+            for bar in today_bars
+            if bar.get('dt') == entry_dt and bar.get('open') is not None
+        ),
+        None,
+    )
+    if entry_bar is None:
+        return 'N/A N/A N/A'
+    try:
+        market_open = float(entry_bar['open'])
+    except (TypeError, ValueError):
+        return 'N/A N/A N/A'
+    diff = market_open - previous_close
+    diff_percent = (diff / previous_close) * 100.0
+    return f'{market_open:.2f} {diff:+.2f} {diff_percent:+.1f}%'
 
 
 def has_strategy_market_rebound_block(
@@ -2404,16 +2436,29 @@ def print_daily_optimization_results(
             day_total = sum(row[6] for row in day_rows)
             day_successes = sum(1 for row in day_rows if row[7])
             day_failures = len(day_rows) - day_successes
+            target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
+            market_open_text = ''
+            if strategy_type in (STRATEGY_CHANCE, STRATEGY_VOLUME_DOWN, STRATEGY_LIMIT_UP):
+                entry_dt_values = [row[2] for row in day_rows if row[2] is not None]
+                market_open_entry_dt = min(entry_dt_values) if entry_dt_values else None
+                market_open_text = (
+                    build_market_open_summary_at_entry(
+                        target_date,
+                        market_open_entry_dt,
+                        index_minute_bars_by_key,
+                    )
+                    + '  '
+                )
             print(
                 f'{format_date_with_weekday(date_key)} '
                 f'模式={strategy_type}  '
+                f'{market_open_text}'
                 f'筆數={len(day_rows)}  '
                 f'成功={day_successes}  '
                 f'失敗={day_failures}  '
                 f'總支出={day_total_cost:.2f}  '
                 f'總收益={day_total:+.2f}'
             )
-            target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
             if strategy_type == STRATEGY_FOLLOW and date_key in follow_gate_date_keys:
                 for index_summary in build_market_index_daily_follow_summary(
                     target_date,
