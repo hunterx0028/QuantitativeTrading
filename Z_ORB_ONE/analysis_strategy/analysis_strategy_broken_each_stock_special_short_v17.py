@@ -102,7 +102,7 @@ INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = False
 INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
 INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的�
 FOLLOW_ENTRY_RANGE_END_PERCENT = 25.0 # follow 入場價距昨收到漲停的結束百分比
 
 LONG_LIMIT_UP_DAYS = 2 # limit up 策略需連續收漲停天數
-SHORT_LIMIT_DOWN_DAYS = 2 # limit down 策略需連續收跌停天數
+SHORT_LIMIT_DOWN_DAYS = 1 # limit down 策略需連續收跌停天數
 
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
 SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
@@ -2438,7 +2438,12 @@ def print_daily_optimization_results(
             day_failures = len(day_rows) - day_successes
             target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
             market_open_text = ''
-            if strategy_type in (STRATEGY_CHANCE, STRATEGY_VOLUME_DOWN, STRATEGY_LIMIT_UP):
+            if strategy_type in (
+                STRATEGY_CHANCE,
+                STRATEGY_VOLUME_DOWN,
+                STRATEGY_LIMIT_DOWN,
+                STRATEGY_LIMIT_UP,
+            ):
                 entry_dt_values = [row[2] for row in day_rows if row[2] is not None]
                 market_open_entry_dt = min(entry_dt_values) if entry_dt_values else None
                 market_open_text = (
