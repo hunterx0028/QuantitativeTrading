@@ -88,7 +88,7 @@ OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 動態追蹤停利首次目�
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 5.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 
 PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
@@ -157,6 +157,14 @@ BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
+ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 預掛單於開盤前不可能成交，09:00 前不查委託結果
+ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS = 60.0  # AGR0005 後依券商指示暫停查詢
+
+ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
+PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
+DEALT_REPORT_LOCK = threading.Lock()
+SEEN_DEALT_REPORT_KEYS: set[tuple[str, str]] = set()
+ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = 0.0
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
@@ -240,6 +248,65 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
     return order_no
 
 
+def _find_state_by_entry_order_no(order_no: str) -> Optional[Dict[str, Any]]:
+    for state in ACTIVE_ORDER_STATES.values():
+        if str(state.get("entry_order_no", "") or "").strip() == order_no:
+            return state
+    return None
+
+
+def _apply_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, Any]) -> bool:
+    """以主動成交回報校正入場價量；若已由另一來源接管則不覆寫。"""
+    source = str(state.get("entry_price_source", "estimated") or "estimated")
+    if source == "order_results" or state.get("entry_fully_filled"):
+        return False
+
+    try:
+        mat_price = float(data.get("mat_price", 0) or 0)
+        mat_shares = int(data.get("mat_qty", 0) or 0)
+        entry_order_qty = int(state.get("entry_order_qty", state.get("qty", 0)) or 0)
+    except (TypeError, ValueError):
+        return False
+    if mat_price <= 0 or mat_shares <= 0 or entry_order_qty <= 0:
+        return False
+
+    accumulated_shares = int(state.get("dealt_report_filled_shares", 0) or 0) + mat_shares
+    accumulated_value = float(state.get("dealt_report_filled_value", 0.0) or 0.0) + mat_price * mat_shares
+    expected_shares = entry_order_qty * 1000
+    filled_lots = min(accumulated_shares // 1000, entry_order_qty)
+
+    state["dealt_report_filled_shares"] = accumulated_shares
+    state["dealt_report_filled_value"] = accumulated_value
+    state["entry_price"] = accumulated_value / accumulated_shares
+    state["entry_filled_qty"] = filled_lots
+    state["entry_fill_confirmed"] = True
+    state["entry_fully_filled"] = accumulated_shares >= expected_shares
+    state["entry_price_source"] = "dealt_report"
+    state["entry_fill_update_time"] = now_tpe().isoformat()
+    state["qty"] = max(filled_lots, 1)
+    recalc_entry_position_prices(state)
+    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+
+    fill_text = "完整成交" if state.get("entry_fully_filled") else "部分成交"
+    print(
+        f"[{state.get('symbol_name')}] DEALT_REPORT 更新入場成交："
+        f"{fill_text} avg_price={state['entry_price']} "
+        f"mat_qty={accumulated_shares}/{expected_shares}股"
+    )
+    print_entry_position_prices(state)
+    return True
+
+
+def apply_pending_dealt_reports(state: Dict[str, Any]) -> None:
+    order_no = str(state.get("entry_order_no", "") or "").strip()
+    if not order_no:
+        return
+    with DEALT_REPORT_LOCK:
+        reports = PENDING_DEALT_REPORTS.pop(order_no, [])
+        for report in reports:
+            _apply_dealt_report_to_state(state, report)
+
+
 def start_trade_report_stream(sdk: SDK) -> threading.Thread:
     """註冊交易主動回報，並在背景執行阻塞式 connect_websocket()。"""
 
@@ -249,8 +316,28 @@ def start_trade_report_stream(sdk: SDK) -> threading.Thread:
 
     @sdk.on("dealt")
     def on_dealt(data):
-        # 目前先保留原始成交回報，尚不以它更新策略狀態。
         print(f"[DEALT_REPORT] {data!r}")
+        if not isinstance(data, dict):
+            return
+        order_no = str(data.get("ord_no", "") or "").strip()
+        if not order_no:
+            return
+        report_identity = str(data.get("mkt_seq_num", "") or "").strip()
+        if not report_identity:
+            report_identity = "|".join(
+                str(data.get(key, "") or "").strip()
+                for key in ("mat_time", "mat_price", "mat_qty")
+            )
+        report_key = (order_no, report_identity)
+        with DEALT_REPORT_LOCK:
+            if report_key in SEEN_DEALT_REPORT_KEYS:
+                return
+            SEEN_DEALT_REPORT_KEYS.add(report_key)
+            state = _find_state_by_entry_order_no(order_no)
+            if state is None:
+                PENDING_DEALT_REPORTS.setdefault(order_no, []).append(dict(data))
+                return
+            _apply_dealt_report_to_state(state, data)
 
     def websocket_worker():
         try:
@@ -737,6 +824,10 @@ def evaluate_volume_down_entries(
 def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
     if not state.get("in_position") or state.get("traded"):
         return False
+    # DEALT_REPORT 已接管此筆委託後，由後續主動回報累計部分成交；
+    # get_order_results 不再覆寫，也不再為這筆委託持續輪詢。
+    if state.get("entry_price_source") == "dealt_report":
+        return False
     try:
         entry_order_qty = int(state.get("entry_order_qty", state.get("qty", 0)) or 0)
         entry_filled_qty = int(state.get("entry_filled_qty", 0) or 0)
@@ -786,6 +877,7 @@ def get_order_fill_info_by_results(state: Dict[str, Any], order_results: List[Di
 
 
 def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk) -> None:
+    global ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC
     candidates = [st for st in states.values() if state_needs_entry_fill_update(st)]
     if not candidates:
         return
@@ -794,6 +886,15 @@ def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk
         order_results = sdk.get_order_results()
     except Exception as exc:
         print(f"[WARN] get_order_results() 成交價量校正失敗：{exc}", file=sys.stderr)
+        if "AGR0005" in str(exc):
+            ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = (
+                time.monotonic() + ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS
+            )
+            print(
+                f"[WARN] get_order_results() 遭限流，暫停 "
+                f"{ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS:.0f} 秒後再查",
+                file=sys.stderr,
+            )
         return
 
     if not isinstance(order_results, list):
@@ -801,6 +902,9 @@ def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk
         return
 
     for state in candidates:
+        # 呼叫期間可能剛收到 DEALT_REPORT；先成功的來源擁有本筆校正權。
+        if state.get("entry_price_source") == "dealt_report":
+            continue
         avg_price, mat_qty = get_order_fill_info_by_results(state, order_results)
         if avg_price <= 0 or mat_qty <= 0:
             continue
@@ -1920,7 +2024,9 @@ def build_initial_state(
         "entry_filled_qty": 0, # get_order_results 查得的入場成交張數
         "entry_fully_filled": False, # 入場成交張數是否已達原始委託張數
         "entry_fill_confirmed": False, # 是否已用 get_order_results 確認至少一筆成交
-        "entry_price_source": "estimated", # estimated / order_results
+        "entry_price_source": "estimated", # estimated / order_results / dealt_report
+        "dealt_report_filled_shares": 0,
+        "dealt_report_filled_value": 0.0,
         "flat_price": 0, # 強制平倉價格
         "stop_profit_price": limit_down_price, # 追蹤停利點（啟動後才有意義）
         "profit_price": 0, # 下一個獲利目標價
@@ -2520,7 +2626,6 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
         if place_order_result:  # 下單成功
             state["in_position"] = True
-            state["entry_order_no"] = str(place_order_result)
             state["entry_order_qty"] = qty
             state["entry_filled_qty"] = 0
             state["entry_fully_filled"] = False
@@ -2536,6 +2641,9 @@ def try_open_position(state: Dict[str, Any], mysdk):
                 print(f"[{state['symbol_name']}] 作多 已至入場時機，下單成功{industry_filter_text}")
 
             state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
+            # 最後才公開 ord_no，避免 callback 在估計欄位尚未初始化完成時搶先更新又遭覆寫。
+            state["entry_order_no"] = str(place_order_result)
+            apply_pending_dealt_reports(state)
             print_entry_position_prices(state)
         else:  # 下單失敗
             state["traded"] = True
@@ -2598,7 +2706,6 @@ def try_place_preopen_limit_order(state: Dict[str, Any], mysdk) -> bool:
 
     state["side"] = side
     state["in_position"] = True
-    state["entry_order_no"] = str(place_order_result)
     state["entry_order_qty"] = qty
     state["entry_filled_qty"] = 0
     state["entry_fully_filled"] = False
@@ -2608,6 +2715,9 @@ def try_place_preopen_limit_order(state: Dict[str, Any], mysdk) -> bool:
     state["entry_price"] = entry_ref_px
     state["profit_tracking_active"] = False
     recalc_entry_position_prices(state)
+    # 最後才公開 ord_no，避免 callback 在估計欄位尚未初始化完成時搶先更新又遭覆寫。
+    state["entry_order_no"] = str(place_order_result)
+    apply_pending_dealt_reports(state)
     atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
     print(f"[{state['symbol_name']}] {order_text}成功，委託價={entry_ref_px:.2f}")
     print_entry_position_prices(state)
@@ -2719,6 +2829,9 @@ def _protect_profit_stop(state: Dict[str, Any]):
 
 
 def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
+
+    if not state.get("entry_fill_confirmed"):
+        return False
 
     side = state.get("side")
     try:
@@ -3390,7 +3503,17 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             round_should_update_realtime = False
 
         now_monotonic = time.monotonic()
-        if now_monotonic - last_order_results_update_monotonic >= ORDER_RESULTS_UPDATE_SECONDS:
+        order_results_start_reached = (
+            (now_local.hour, now_local.minute) >= ORDER_RESULTS_QUERY_START_TIME
+        )
+        order_results_cooldown_finished = (
+            now_monotonic >= ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC
+        )
+        if (
+            order_results_start_reached
+            and order_results_cooldown_finished
+            and now_monotonic - last_order_results_update_monotonic >= ORDER_RESULTS_UPDATE_SECONDS
+        ):
             update_entry_fills_from_order_results(states, mysdk)
             last_order_results_update_monotonic = now_monotonic
 
@@ -3561,16 +3684,6 @@ if __name__ == "__main__":
 
         sdk = SDK(config)
         sdk.login()
-        trade_report_thread = start_trade_report_stream(sdk)
-        time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線，再進入策略監控
-        if trade_report_thread.is_alive():
-            print("[TRADE_WS] 委託／成交主動回報背景執行緒已啟動")
-        else:
-            print(
-                "[WARN] 交易回報背景執行緒未持續運作；"
-                "下單仍會檢查 place_order() 同步回傳",
-                file=sys.stderr,
-            )
 
         candidate_symbols = selected_stocks
         candidate_limit_up_symbols = selected_limit_up_stocks if ENABLE_LIMIT_UP_STRATEGY else []
@@ -3592,6 +3705,19 @@ if __name__ == "__main__":
             strategy_type=STRATEGY_LIMIT_DOWN,
         )
         states.update(limit_down_states)
+        ACTIVE_ORDER_STATES.clear()
+        ACTIVE_ORDER_STATES.update(states)
+
+        trade_report_thread = start_trade_report_stream(sdk)
+        time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線，再送出預掛單
+        if trade_report_thread.is_alive():
+            print("[TRADE_WS] 委託／成交主動回報背景執行緒已啟動")
+        else:
+            print(
+                "[WARN] 交易回報背景執行緒未持續運作；"
+                "下單仍會檢查 place_order() 同步回傳",
+                file=sys.stderr,
+            )
         place_preopen_limit_orders(states, sdk)
 
         prepare_volume_down_yesterday_data(states, realtime_sdk)

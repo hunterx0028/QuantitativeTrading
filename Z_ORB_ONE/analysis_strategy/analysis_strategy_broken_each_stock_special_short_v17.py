@@ -98,10 +98,10 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_FOLLOW_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_FOLLOW_IN_PRINT_STATS = False
 INCLUDE_CHANCE_IN_PRINT_STATS = False
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 
@@ -113,16 +113,13 @@ INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 # 少於此數量視為延遲撮合股票，不納入當沖策略。
 MIN_MINUTE_BARS_BEFORE_0930 = 20
 
-SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
-SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
-
 OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 5.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
@@ -139,8 +136,12 @@ LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結�
 
 FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的起始百分比
 FOLLOW_ENTRY_RANGE_END_PERCENT = 25.0 # follow 入場價距昨收到漲停的結束百分比
+
 LONG_LIMIT_UP_DAYS = 2 # limit up 策略需連續收漲停天數
 SHORT_LIMIT_DOWN_DAYS = 2 # limit down 策略需連續收跌停天數
+
+SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
+SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間；也作為 chance 有效昨低緩衝截止，包含此時間
 
@@ -175,12 +176,12 @@ IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門�
 IX0001_FOLLOW_REGRESSION_MIN_GRADIENT = 0 # IX0001 follow 成立門檻：STRATEGY_DECISION 前 close regression EMA 斜率需大於此值
 EMA_SPAN_MULTIPLIER = 2.0 # regression EMA 權重參數，1.5 ~ 3.0 預設 2.0，值越大代表對於較近的價格不敏感
 
-BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
-SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
-
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數當下 close 必須嚴格大於昨收指數下跌此百分比後的位置
+
+BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
+SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
 
 EXCLUDED_INDUSTRY_CODES: list[str] = [] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"
