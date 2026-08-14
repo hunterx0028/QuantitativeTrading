@@ -161,12 +161,14 @@ ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 預掛單於開盤前不可能成交�
 ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS = 60.0  # AGR0005 後依券商指示暫停查詢
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
+ACTIVE_ORDER_STATES_LOCK = threading.RLock()
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
 DEALT_REPORT_LOCK = threading.Lock()
 SEEN_DEALT_REPORT_KEYS: set[tuple[str, str]] = set()
 ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = 0.0
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
+MARKET_DATA_WS_CONNECTED_EVENT = threading.Event()
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
 MARKET_REVERSAL_STOP_EVENT = threading.Event()
 MARKET_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
@@ -380,9 +382,10 @@ def get_up_down_price(stock_id: str, realtime_sdk):
     limit_up_price = round(stock_intra_ticker.get('limitUpPrice', 0), 2)
     limit_down_price = round(stock_intra_ticker.get('limitDownPrice', 0), 2)
 
-    symbol_can_buy_day_trade = stock_intra_ticker.get('canBuyDayTrade', False)
+    symbol_can_day_trade = stock_intra_ticker.get('canDayTrade', False)
+    symbol_is_disposition = stock_intra_ticker.get('isDisposition')
 
-    return limit_up_price, limit_down_price, symbol_can_buy_day_trade
+    return limit_up_price, limit_down_price, symbol_can_day_trade, symbol_is_disposition
 
 
 def now_tpe() -> datetime:
@@ -1514,6 +1517,58 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
         try:
             payload = json.loads(message) if isinstance(message, str) else message
             data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            channel = payload.get("channel") if isinstance(payload, dict) else None
+            event = payload.get("event") if isinstance(payload, dict) else None
+
+            if channel == "trades":
+                if event != "data" or not isinstance(data, dict) or data.get("isTrial"):
+                    return
+
+                stock_symbol = str(data.get("symbol", ""))
+                with ACTIVE_ORDER_STATES_LOCK:
+                    state = next(
+                        (
+                            candidate
+                            for candidate in ACTIVE_ORDER_STATES.values()
+                            if str(candidate.get("symbol_code", "")) == stock_symbol
+                        ),
+                        None,
+                    )
+                    if (
+                        state is None
+                        or not state.get("in_position")
+                        or not state.get("entry_fill_confirmed")
+                        or state.get("traded")
+                    ):
+                        return
+
+                    side = state.get("side")
+                    if side == TRADE_SIDE_LONG and data.get("isLimitUpPrice"):
+                        flag_name = "limit_up_trade_after_entry"
+                        time_name = "limit_up_trade_time"
+                        limit_text = "漲停"
+                    elif side == TRADE_SIDE_SHORT and data.get("isLimitDownPrice"):
+                        flag_name = "limit_down_trade_after_entry"
+                        time_name = "limit_down_trade_time"
+                        limit_text = "跌停"
+                    else:
+                        return
+
+                    if state.get(flag_name):
+                        return
+
+                    state[flag_name] = True
+                    state[time_name] = data.get("time")
+                    state["limit_trade_price"] = data.get("price")
+                    state["limit_trade_serial"] = data.get("serial")
+                    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+                    print(
+                        f"[{state.get('symbol_name')}] [MARKET_WS] "
+                        f"持倉期間偵測到{limit_text}成交 "
+                        f"price={data.get('price')} time={data.get('time')}"
+                    )
+                return
+
             index_symbol = str(data.get("symbol", ""))
             market_key = symbol_to_market_key.get(index_symbol)
             if not market_key:
@@ -1532,10 +1587,13 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
             update_market_strategy_decision_gate_state(market_key, index_float, data.get("time"))
             update_position_market_reversal_state(market_key, index_float, data.get("time"))
         except Exception as e:
-            print(f"[WARN] 處理盤勢指數訊息失敗: {e}")
+            print(f"[WARN] 處理行情 WebSocket 訊息失敗: {e}")
 
     try:
         stock_ws = realtime_sdk.websocket_client.stock
+        stock_ws.on("connect", lambda *args: MARKET_DATA_WS_CONNECTED_EVENT.set())
+        stock_ws.on("disconnect", lambda *args: MARKET_DATA_WS_CONNECTED_EVENT.clear())
+        stock_ws.on("error", lambda error: print(f"[MARKET_WS_ERROR] {error!r}", file=sys.stderr))
         stock_ws.on("message", handle_message)
         stock_ws.connect()
         for index_symbol in symbol_to_market_key:
@@ -1553,6 +1611,30 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
     except Exception as e:
         print(f"[WARN] 啟動盤勢指數 WebSocket 失敗，盤勢濾網將等待指數資料: {e}")
         return None
+
+
+def subscribe_stock_trade_stream(stock_ws: Any, states: Dict[str, Dict[str, Any]]) -> None:
+    """在既有行情 WebSocket 上訂閱個股逐筆成交；失敗時仍沿用 last_price 出場判斷。"""
+    if stock_ws is None:
+        print("[WARN] 個股逐筆成交 WebSocket 不可用，沿用 last_price 判斷漲跌停")
+        return
+
+    symbols = sorted({
+        str(state.get("symbol_code", ""))
+        for state in states.values()
+        if state.get("symbol_code")
+    })
+    if not symbols:
+        return
+
+    try:
+        stock_ws.subscribe({
+            "channel": "trades",
+            "symbols": symbols,
+        })
+        print(f"[MARKET_WS] 已訂閱 {len(symbols)} 檔個股逐筆成交")
+    except Exception as e:
+        print(f"[WARN] 訂閱個股逐筆成交失敗，沿用 last_price 判斷漲跌停：{e}")
 
 
 def close_market_index_stream(stock_ws: Any) -> None:
@@ -2027,6 +2109,12 @@ def build_initial_state(
         "entry_price_source": "estimated", # estimated / order_results / dealt_report
         "dealt_report_filled_shares": 0,
         "dealt_report_filled_value": 0.0,
+        "limit_up_trade_after_entry": False,
+        "limit_down_trade_after_entry": False,
+        "limit_up_trade_time": None,
+        "limit_down_trade_time": None,
+        "limit_trade_price": None,
+        "limit_trade_serial": None,
         "flat_price": 0, # 強制平倉價格
         "stop_profit_price": limit_down_price, # 追蹤停利點（啟動後才有意義）
         "profit_price": 0, # 下一個獲利目標價
@@ -2632,6 +2720,12 @@ def try_open_position(state: Dict[str, Any], mysdk):
             state["entry_fill_confirmed"] = False
             state["entry_price_source"] = "estimated"
             state["entry_price"] = entry_ref_px
+            state["limit_up_trade_after_entry"] = False
+            state["limit_down_trade_after_entry"] = False
+            state["limit_up_trade_time"] = None
+            state["limit_down_trade_time"] = None
+            state["limit_trade_price"] = None
+            state["limit_trade_serial"] = None
 
             industry_filter_text = "" if is_independent_strategy(state) else format_industry_market_filter_pass_text(state)
             recalc_entry_position_prices(state)
@@ -2713,6 +2807,12 @@ def try_place_preopen_limit_order(state: Dict[str, Any], mysdk) -> bool:
     state["entry_trigger_price"] = entry_ref_px
     state["entry_price_source"] = "estimated"
     state["entry_price"] = entry_ref_px
+    state["limit_up_trade_after_entry"] = False
+    state["limit_down_trade_after_entry"] = False
+    state["limit_up_trade_time"] = None
+    state["limit_down_trade_time"] = None
+    state["limit_trade_price"] = None
+    state["limit_trade_serial"] = None
     state["profit_tracking_active"] = False
     recalc_entry_position_prices(state)
     # 最後才公開 ord_no，避免 callback 在估計欄位尚未初始化完成時搶先更新又遭覆寫。
@@ -2884,6 +2984,13 @@ def reached_resize_profit(state: Dict[str, Any]) -> bool:
 def reached_profitable_limit_price(state: Dict[str, Any]) -> bool:
     """作多達漲停、作空達跌停時，當沖獲利已到當日極限，應立即平倉。"""
     side = state.get("side")
+
+    with ACTIVE_ORDER_STATES_LOCK:
+        if side == TRADE_SIDE_LONG and state.get("limit_up_trade_after_entry"):
+            return True
+        if side == TRADE_SIDE_SHORT and state.get("limit_down_trade_after_entry"):
+            return True
+
     try:
         px = float(state.get("last_price"))
     except (TypeError, ValueError):
@@ -3326,7 +3433,12 @@ def initialize_states(
         up_streak_days, down_streak_days = streak_tuple
 
         try:
-            limit_up_price, limit_down_price, symbol_can_buy_day_trade = get_up_down_price(code_with_suf, realtime_sdk)
+            (
+                limit_up_price,
+                limit_down_price,
+                symbol_can_day_trade,
+                symbol_is_disposition,
+            ) = get_up_down_price(code_with_suf, realtime_sdk)
         except Exception as e:
             print(f"[{symbolStr}] ⚠️ 取得漲跌停/當沖資格失敗，排除：{e}")
             continue
@@ -3337,8 +3449,16 @@ def initialize_states(
             continue
         '''
 
-        if not symbol_can_buy_day_trade:
-            print(f"[{symbolStr}] ⚠️ 無法當沖，排除")
+        if not symbol_can_day_trade:
+            print(f"[{symbolStr}] ⚠️ 無法買賣現沖，排除")
+            continue
+
+        if symbol_is_disposition is None:
+            print(f"[{symbolStr}] ⚠️ API 未回傳處置股狀態，為避免誤下單，排除")
+            continue
+
+        if symbol_is_disposition:
+            print(f"[{symbolStr}] ⚠️ 處置股，排除")
             continue
 
         if symbolStr.split(":")[1].split(".")[0] in []: # in ["1597", "8064"]
@@ -3705,8 +3825,10 @@ if __name__ == "__main__":
             strategy_type=STRATEGY_LIMIT_DOWN,
         )
         states.update(limit_down_states)
-        ACTIVE_ORDER_STATES.clear()
-        ACTIVE_ORDER_STATES.update(states)
+        with ACTIVE_ORDER_STATES_LOCK:
+            ACTIVE_ORDER_STATES.clear()
+            ACTIVE_ORDER_STATES.update(states)
+        subscribe_stock_trade_stream(market_index_ws, states)
 
         trade_report_thread = start_trade_report_stream(sdk)
         time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線，再送出預掛單
