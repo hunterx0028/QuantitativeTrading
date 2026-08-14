@@ -9,8 +9,8 @@ MAX_LIMIT_UP_PRICE = 200.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
-LIMIT_UP_REPEAT_COUNT = 2 # 連漲停多少次，才分開列於 stock_data.py
-LIMIT_DOWN_REPEAT_COUNT = 1 # 連跌停多少次，才分開列於 stock_data.py
+LONG_LIMIT_UP_DAYS = [2] # 分入 selected_limit_up_stocks 的實際連續漲停天數
+SHORT_LIMIT_DOWN_DAYS = [] # 分入 selected_limit_down_stocks 的實際連續跌停天數
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
@@ -299,9 +299,9 @@ def split_records_by_limit_repeat(
     limit_down_records = []
     for record in records:
         up_repeat_count, down_repeat_count = get_limit_repeat_counts(record)
-        if up_repeat_count >= LIMIT_UP_REPEAT_COUNT:
+        if up_repeat_count in LONG_LIMIT_UP_DAYS:
             limit_up_records.append(record)
-        elif down_repeat_count >= LIMIT_DOWN_REPEAT_COUNT:
+        elif down_repeat_count in SHORT_LIMIT_DOWN_DAYS:
             limit_down_records.append(record)
         else:
             selected_records.append(record)
@@ -385,6 +385,20 @@ def upsert_execution_start_time(lines: list[str], execution_start_time: str) -> 
 def main() -> None:
     execution_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log(f"[INFO] 執行開始時間: {execution_start_time}")
+
+    for setting_name, allowed_days in (
+        ("LONG_LIMIT_UP_DAYS", LONG_LIMIT_UP_DAYS),
+        ("SHORT_LIMIT_DOWN_DAYS", SHORT_LIMIT_DOWN_DAYS),
+    ):
+        if (
+            not isinstance(allowed_days, list)
+            or any(type(days) is not int or days < 1 for days in allowed_days)
+            or len(set(allowed_days)) != len(allowed_days)
+        ):
+            raise ValueError(
+                f"{setting_name} 必須是沒有重複值的正整數陣列（可為空）: {allowed_days}"
+            )
+
     base_dir = Path(__file__).resolve().parent
     result_path = base_dir / RESULT_FILE_NAME
     output_result_path = base_dir / OUTPUT_RESULT_FILE_NAME
@@ -430,6 +444,8 @@ def main() -> None:
     log(f"excluded_industry_codes={EXCLUDED_INDUSTRY_CODES}")
     log(f"top_rank={TOP_RANK}")
     log(f"min_repeat_count={MIN_REPEAT_COUNT}")
+    log(f"long_limit_up_days={LONG_LIMIT_UP_DAYS}")
+    log(f"short_limit_down_days={SHORT_LIMIT_DOWN_DAYS}")
     log(f"max_limit_up_price={MAX_LIMIT_UP_PRICE}")
     log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
     log(f"min_atr={MIN_ATR}")

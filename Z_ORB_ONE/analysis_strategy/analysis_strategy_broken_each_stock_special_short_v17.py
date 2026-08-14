@@ -42,10 +42,10 @@ CHANCE 模式個股入場條件
 5. 實際入場價若已進入上述跌停區域，或入場價加停損價差已達漲停價，皆不入場；個股所屬產業指數亦不得高於 CHANCE 允許門檻。
 
 LIMIT_UP 策略個股入場條件
-1. 該股票連續 LONG_LIMIT_UP_DAYS 個交易日收漲停後，於次一交易日直接以第一根分 K 的 open 做多進場。
+1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中，當日直接以第一根分 K 的 open 做多進場。
 
 LIMIT_DOWN 策略個股入場條件
-1. 該股票連續 SHORT_LIMIT_DOWN_DAYS 個交易日收跌停後，於次一交易日直接以第一根分 K 的 open 放空進場。
+1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中，當日直接以第一根分 K 的 open 放空進場。
 
 VOLUME_DOWN 策略個股入場條件
 1. 條件成立後，直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
@@ -98,12 +98,12 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_FOLLOW_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = False
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -120,7 +120,7 @@ OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -137,8 +137,8 @@ LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結�
 FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的起始百分比
 FOLLOW_ENTRY_RANGE_END_PERCENT = 25.0 # follow 入場價距昨收到漲停的結束百分比
 
-LONG_LIMIT_UP_DAYS = 2 # limit up 策略需連續收漲停天數
-SHORT_LIMIT_DOWN_DAYS = 1 # limit down 策略需連續收跌停天數
+LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
+SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
 SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
@@ -2032,31 +2032,34 @@ def has_limit_sequence_before_date(
     stock_name: str,
     target_date: date,
     day_candles_by_symbol: dict[str, list],
-    days: int,
+    allowed_days: list[int],
     direction: str,
 ) -> bool:
-    """判斷 target_date 前一段交易日是否連續收在漲停或跌停價。"""
-    if days < 1:
-        raise ValueError(f'{direction}連續天數必須大於等於 1: {days}')
-
-    daily_map = normalize_daily_candles(day_candles_by_symbol.get(stock_name, []))
-    previous_dates = sorted(
-        (day_key for day_key in daily_map if day_key < target_date),
-        reverse=True,
-    )[:days + 1]
-    if len(previous_dates) < days + 1:
+    """判斷 target_date 前的實際連續漲跌停天數是否恰好在允許清單內。"""
+    if not isinstance(allowed_days, list):
+        raise ValueError(f'{direction}連續天數必須是陣列: {allowed_days}')
+    if any(type(days) is not int or days < 1 for days in allowed_days):
+        raise ValueError(f'{direction}連續天數只能包含正整數: {allowed_days}')
+    if not allowed_days:
         return False
 
-    sequence_dates = list(reversed(previous_dates[:days]))
-    reference_dates = list(reversed(previous_dates[1:days + 1]))
-    for current_date, previous_date in zip(sequence_dates, reference_dates):
+    daily_map = normalize_daily_candles(day_candles_by_symbol.get(stock_name, []))
+    previous_dates = sorted(day_key for day_key in daily_map if day_key < target_date)
+    if len(previous_dates) < 2:
+        return False
+
+    actual_days = 0
+    for index in range(len(previous_dates) - 1, 0, -1):
+        current_date = previous_dates[index]
+        previous_date = previous_dates[index - 1]
         current = daily_map[current_date]
         previous = daily_map[previous_date]
         limit_up_price, limit_down_price = calculate_limit_prices(previous['close'])
         limit_price = limit_up_price if direction == STRATEGY_LIMIT_UP else limit_down_price
         if not is_same_price(current['close'], limit_price):
-            return False
-    return True
+            break
+        actual_days += 1
+    return actual_days in allowed_days
 
 
 def get_day_streaks(
@@ -2218,7 +2221,7 @@ def format_stock_label(stock_name: str, industry_code: str | None) -> str:
     """股票名稱後加上產業別代碼。"""
     if not industry_code:
         return stock_name
-    return f'{stock_name} {industry_code}'
+    return f"{stock_name} '{industry_code}'"
 
 
 def summarize_industry_results(all_results: list) -> list[tuple[str, str, int, int, float]]:
@@ -2387,7 +2390,7 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
+    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool, list[float]]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
@@ -2402,6 +2405,7 @@ def print_daily_optimization_results(
             result['exit_price'],
             signed_pnl(result),
             result.get('outcome') == 'success',
+            signal.get('opening_volumes', []),
         ))
 
     normal_gate_group_keys = {
@@ -2476,12 +2480,19 @@ def print_daily_optimization_results(
                     index_minute_bars_by_key,
                 ):
                     print(index_summary)
-            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _ in sorted(
+            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _, opening_volumes in sorted(
                 day_rows,
                 key=lambda row: (format_entry_time(row[2]), row[0]),
             ):
+                opening_volumes_text = ''
+                if strategy_type == STRATEGY_VOLUME_DOWN:
+                    opening_volumes_text = ''.join(
+                        f' {volume:g}'
+                        for volume in opening_volumes
+                    )
                 print(
-                    f'{format_stock_label(stock_name, industry_code)} {format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
+                    f'{format_stock_label(stock_name, industry_code)}{opening_volumes_text} '
+                    f'{format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
                     f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
                 )
             print('')
@@ -2557,12 +2568,12 @@ def print_daily_optimization_results(
         f'CHANCE出場時間窗={INTRADAY_COMPARE_END_CHANCE[0]:02d}:{INTRADAY_COMPARE_END_CHANCE[1]:02d}'
     )
     print(
-        f'LIMIT_DOWN連續跌停天數={SHORT_LIMIT_DOWN_DAYS}  '
+        f'LIMIT_DOWN允許的實際連續跌停天數={SHORT_LIMIT_DOWN_DAYS}  '
         f'LIMIT_DOWN進場=第一根分K open    '
         f'LIMIT_DOWN出場時間窗={INTRADAY_COMPARE_END_LIMIT_DOWN[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_DOWN[1]:02d}'
     )
     print(
-        f'LIMIT_UP連續漲停天數={LONG_LIMIT_UP_DAYS}  '
+        f'LIMIT_UP允許的實際連續漲停天數={LONG_LIMIT_UP_DAYS}  '
         f'LIMIT_UP進場=第一根分K open    '
         f'LIMIT_UP出場時間窗={INTRADAY_COMPARE_END_LIMIT_UP[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_UP[1]:02d}'
     )
@@ -2680,7 +2691,7 @@ def find_volume_down_candidate_on_date(
     ystats = compute_yesterday_stats(yesterday_ordered)
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
-    return build_trade_candidate(
+    candidate = build_trade_candidate(
         stock_name,
         get_stock_industry_code(stock_item),
         target_date,
@@ -2694,6 +2705,26 @@ def find_volume_down_candidate_on_date(
         TRADE_SIDE_SHORT,
         None,
     )
+    available_dates = sorted(
+        datetime.strptime(date_key, '%Y-%m-%d').date()
+        for date_key in bars_by_date
+        if datetime.strptime(date_key, '%Y-%m-%d').date() <= target_date
+    )[-3:]
+    candidate['opening_volumes'] = [
+        sum(
+            float(bar.get('volume', 0) or 0)
+            for bar in get_opening_volume_bars(
+                sorted(
+                    bars_by_date.get(current_date.strftime('%Y-%m-%d'), []),
+                    key=lambda bar: bar['dt'],
+                ),
+                current_date,
+                SHORT_VOLUME_SUMMARY_CANDLES,
+            )
+        )
+        for current_date in available_dates
+    ]
+    return candidate
 
 
 def find_limit_candidate_on_date(
@@ -3122,6 +3153,7 @@ def evaluate_candidates(
             'entry_price': entry_price,
             'strategy_type': strategy_type,
             'trade_side': trade_side,
+            'opening_volumes': candidate.get('opening_volumes', []),
             'take_profit_price': take_profit_price,
             'effective_profit': effective_profit,
             'effective_stop_loss': effective_stop_loss,
@@ -3399,11 +3431,19 @@ def main() -> None:
         if SHORT_VOLUME_SUMMARY_CANDLES <= 0:
             print('[ERROR] SHORT_VOLUME_SUMMARY_CANDLES 必須大於 0', file=sys.stderr)
             sys.exit(1)
-        if SHORT_LIMIT_DOWN_DAYS < 1:
-            print('[ERROR] SHORT_LIMIT_DOWN_DAYS 必須大於等於 1', file=sys.stderr)
+        if (
+            not isinstance(SHORT_LIMIT_DOWN_DAYS, list)
+            or any(type(days) is not int or days < 1 for days in SHORT_LIMIT_DOWN_DAYS)
+            or len(set(SHORT_LIMIT_DOWN_DAYS)) != len(SHORT_LIMIT_DOWN_DAYS)
+        ):
+            print('[ERROR] SHORT_LIMIT_DOWN_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
             sys.exit(1)
-        if LONG_LIMIT_UP_DAYS < 1:
-            print('[ERROR] LONG_LIMIT_UP_DAYS 必須大於等於 1', file=sys.stderr)
+        if (
+            not isinstance(LONG_LIMIT_UP_DAYS, list)
+            or any(type(days) is not int or days < 1 for days in LONG_LIMIT_UP_DAYS)
+            or len(set(LONG_LIMIT_UP_DAYS)) != len(LONG_LIMIT_UP_DAYS)
+        ):
+            print('[ERROR] LONG_LIMIT_UP_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
             sys.exit(1)
         if SHORT_VOLUME_RATIO_THRESHOLD < 0:
             print('[ERROR] SHORT_VOLUME_RATIO_THRESHOLD 不可小於 0', file=sys.stderr)
