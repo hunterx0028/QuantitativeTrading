@@ -1,4 +1,12 @@
 """
+已知對齊原則與刻意差異
+1. 回測版以分 K 模擬策略，實機版以即時 quote/websocket 執行；逐項比對時不把資料粒度差異視為策略不一致。
+2. VOLUME_DOWN 回測以第 N+1 根分 K open 模擬「條件符合後立刻入場」；實機則在條件成立時用即時價立刻送單。
+3. VOLUME_DOWN 回測會用本日 09:30 前分 K 數量檢查資料完整性，作為無法檢核處置股/當沖資格的替代保守條件；實機可用 API 直接排除處置股與不可當沖標的。
+4. LIMIT_UP / LIMIT_DOWN 回測自行用日 K 驗證連續漲跌停天數；實機只交易當日名單，信任 selected_limit_up_stocks / selected_limit_down_stocks 已由前置流程產生。
+5. 實機 LOWER/FOLLOW/CHANCE 多了 best bid/ask 可成交性保護，回測分 K 無足夠委買委賣資料，因此不納入回測。
+6. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
+
 LOWER 模式成立條件
 1. IX0001 在 09:06～09:16（含）曾發生早盤突破。
 2. 09:06～09:42 期間，IX0001、IX0043 都不能上下穿越。
@@ -7,9 +15,7 @@ LOWER 模式成立條件
 FOLLOW 模式成立條件
 1. IX0001 在 09:06～09:16（含）曾發生早盤突破。
 2. 09:06～09:42 期間，IX0001、IX0043 都不能上下穿越。
-3. IX0001、IX0043 都曾在 09:43 前突破 FOLLOW 上漲門檻。
-4. 但 IX0001、IX0043 只要其一回跌至門檻，模式立刻失敗。
-5. IX0001 從 09:00～09:42 的 close regression EMA 斜率必須大於 0。
+3. IX0001、IX0043 均曾在 09:43 前突破各自的 FOLLOW 上漲門檻且在判別模式時仍維持住。
 
 CHANCE 模式成立條件
 1. 不是LOWER也不是FOLLOW時。
@@ -65,7 +71,6 @@ import numpy as np
 from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -173,9 +178,6 @@ IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRA
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.15 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
-IX0001_FOLLOW_REGRESSION_MIN_GRADIENT = 0 # IX0001 follow 成立門檻：STRATEGY_DECISION 前 close regression EMA 斜率需大於此值
-EMA_SPAN_MULTIPLIER = 2.0 # regression EMA 權重參數，1.5 ~ 3.0 預設 2.0，值越大代表對於較近的價格不敏感
-
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數當下 close 必須嚴格大於昨收指數下跌此百分比後的位置
@@ -403,51 +405,6 @@ def calculate_entry_range_bounds(
 def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
     """判斷價格是否落在入場區間內，含上下界。"""
     return lower_bound <= price <= upper_bound
-
-
-def round_half_away_from_zero(value: float) -> int:
-    if value >= 0:
-        return math.floor(value + 0.5)
-    return math.ceil(value - 0.5)
-
-
-def _extract_close_value(candle: Any) -> float:
-    if isinstance(candle, dict):
-        return float(candle.get("close", 0.0) or 0.0)
-    return float(getattr(candle, "close"))
-
-
-def calculate_regression_gradient(candles: list[Any]) -> int | None:
-    current_window = len(candles)
-    if current_window < 2:
-        return None
-
-    closes = [_extract_close_value(candle) for candle in candles]
-    base_close = closes[0]
-    if math.isclose(base_close, 0.0, abs_tol=1e-12):
-        return 0
-
-    normalized_closes = [(close / base_close - 1.0) * 100.0 for close in closes]
-    x_values = list(range(current_window))
-    ema_span = current_window * EMA_SPAN_MULTIPLIER
-    alpha = 2.0 / (ema_span + 1.0)
-    decay = 1.0 - alpha
-    weights = [decay ** (current_window - 1 - i) for i in range(current_window)]
-    weight_sum = sum(weights)
-    if math.isclose(weight_sum, 0.0, abs_tol=1e-12):
-        return 0
-
-    x_avg = sum(w * x for w, x in zip(weights, x_values)) / weight_sum
-    y_avg = sum(w * y for w, y in zip(weights, normalized_closes)) / weight_sum
-
-    numerator = sum(w * (x - x_avg) * (y - y_avg) for w, x, y in zip(weights, x_values, normalized_closes))
-    denominator = sum(w * (x - x_avg) ** 2 for w, x in zip(weights, x_values))
-    if math.isclose(denominator, 0.0, abs_tol=1e-12):
-        return 0
-
-    slope = numerator / denominator
-    angle = math.degrees(math.atan(slope))
-    return round_half_away_from_zero(angle)
 
 
 # ---------------------------------------------------------------------------
@@ -1334,34 +1291,10 @@ def get_market_index_strategy_decision_follow_detail(
         bar for bar in sorted_bars
         if bar.get('high') is not None and float(bar['high']) > threshold
     ]
-    if raise_bars and float(close_bars[-1]['close']) > decline_threshold:
+    final_close = float(close_bars[-1]['close'])
+    if raise_bars and final_close > decline_threshold:
         return GATE_FOLLOW_PASSED, raise_bars[0]['dt']
     return GATE_NOT_PASSED, None
-
-
-def has_ix0001_positive_regression_before_decision(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """IX0001 自開盤至模式判別時間前 close 的 regression EMA 斜率需為正。"""
-    index_key = 'TWSE:MARKET'
-    bars_by_date = index_minute_bars_by_key.get(index_key, {})
-    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
-    regression_bars = sorted(
-        (
-            bar for bar in today_bars
-            if bar.get('dt') is not None
-            and bar.get('close') is not None
-            and 9 * 60 <= (bar['dt'].hour * 60 + bar['dt'].minute) < decision_hm
-        ),
-        key=lambda item: item['dt'],
-    )
-    regression_gradient = calculate_regression_gradient(regression_bars)
-    return (
-        regression_gradient is not None
-        and regression_gradient > IX0001_FOLLOW_REGRESSION_MIN_GRADIENT
-    )
 
 
 def has_ix0001_early_strategy_breakout(
@@ -1480,40 +1413,6 @@ def get_chance_gate_status(
     return GATE_CHANCE_PASSED
 
 
-def has_strategy_market_follow_decline_block(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """任一市場指數在決策時間前突破後又於後續分 K 回跌，即永久封鎖當日 FOLLOW。"""
-    for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
-        bars_by_date = index_minute_bars_by_key.get(index_key, {})
-        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-        raise_percent = get_strategy_decision_raise_percent(index_key)
-        decline_percent = get_strategy_decision_decline_percent(index_key)
-        if previous_close is None or raise_percent is None or decline_percent is None:
-            continue
-
-        raise_threshold = previous_close * (1 + raise_percent / 100.0)
-        raise_break = find_strategy_decision_raise_break(
-            bars_by_date,
-            target_date,
-            raise_threshold,
-        )
-        if raise_break is None:
-            continue
-
-        _, raise_dt = raise_break
-        decline_threshold = previous_close * (1 + decline_percent / 100.0)
-        if find_strategy_decision_decline_to_threshold(
-            bars_by_date,
-            target_date,
-            raise_dt,
-            decline_threshold,
-        ) is not None:
-            return True
-    return False
-
-
 def get_strategy_market_decision_gate_status(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1557,50 +1456,9 @@ def get_strategy_market_decision_gate_status(
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ]
-    follow_decline_blocked = has_strategy_market_follow_decline_block(
-        target_date,
-        index_minute_bars_by_key,
-    )
-    if follow_decline_blocked:
-        return get_chance_gate_status(target_date, index_minute_bars_by_key)
 
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
-    final_positions_above_previous_close = []
-    final_positions_below_previous_close = []
-    for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
-        bars_by_date = index_minute_bars_by_key.get(index_key, {})
-        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-        today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-        close_bars = sorted(
-            (
-                bar for bar in today_bars
-                if bar.get('dt') is not None and bar.get('close') is not None
-                and (bar['dt'].hour * 60 + bar['dt'].minute) < decision_hm
-            ),
-            key=lambda item: item['dt'],
-        )
-        if previous_close is None or not close_bars:
-            return get_chance_gate_status(target_date, index_minute_bars_by_key)
-        final_close = float(close_bars[-1]['close'])
-        final_positions_above_previous_close.append(
-            final_close > previous_close
-        )
-        final_positions_below_previous_close.append(
-            final_close < previous_close
-        )
-
-    if (
-        all(final_positions_above_previous_close)
-        and all(status == GATE_FOLLOW_PASSED for status, _ in follow_details)
-        and has_ix0001_positive_regression_before_decision(
-            target_date,
-            index_minute_bars_by_key,
-        )
-    ):
+    if all(status == GATE_FOLLOW_PASSED for status, _ in follow_details):
         return GATE_FOLLOW_PASSED
-
-    if not all(final_positions_below_previous_close):
-        return get_chance_gate_status(target_date, index_minute_bars_by_key)
 
     both_ever_dropped = all(break_dt is not None for _, break_dt in lower_details)
     if not both_ever_dropped:
@@ -1876,9 +1734,6 @@ def scan_entry_signal_lower(
         hm = dtv.hour * 60 + dtv.minute
         indexed_bars.append((idx, bar, hm))
     indexed_bars.sort(key=lambda item: item[1]['dt'])
-
-    if len(indexed_bars) < 2:
-        return None
 
     for original_idx, bar, hm in indexed_bars:
         if bar.get('low') is None:
