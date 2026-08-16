@@ -305,13 +305,24 @@ def transform_main_for_docker(source: str) -> str:
     source = replace_once_required(
         source,
         "        realtime_sdk = EsunMarketdata(config)\n"
-        "        realtime_sdk.login()\n",
+        "        try:\n"
+        "            realtime_sdk.login()\n"
+        "            trade_log(\"LOGIN_OK\", api=\"marketdata\")\n"
+        "        except Exception as exc:\n"
+        "            trade_log(\"LOGIN_ERROR\", error=True, api=\"marketdata\", error_msg=repr(exc))\n"
+        "            raise\n",
         "        realtime_sdk, sdk = login_sdks(config)\n",
         "market-data login block",
     )
     source = replace_once_required(
         source,
-        "        sdk = SDK(config)\n        sdk.login()\n",
+        "        sdk = SDK(config)\n"
+        "        try:\n"
+        "            sdk.login()\n"
+        "            trade_log(\"LOGIN_OK\", api=\"trade\")\n"
+        "        except Exception as exc:\n"
+        "            trade_log(\"LOGIN_ERROR\", error=True, api=\"trade\", error_msg=repr(exc))\n"
+        "            raise\n",
         "",
         "trade SDK login block",
     )
