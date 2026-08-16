@@ -27,7 +27,8 @@ LIMIT_DOWN 策略成立條件
 1. 該股票連跌停符合指定次數
 
 VOLUME_DOWN 策略成立條件
-1. 開盤5分的交易量是前一日5分鐘的數分之一
+1. 前一日開盤5分的交易量須至少為前前一日開盤5分交易量的指定倍數。
+2. 本日開盤5分的交易量是前一日5分鐘的數分之一。
 
 ------------------------------------------------
 
@@ -45,7 +46,11 @@ CHANCE 模式個股入場條件
 2. 先以昨低為基準；若本日 09:06（含）以前出現更低的 low，則以下探後的最低 low 作為「有效昨低」。
 3. 若有效昨低再往下一個 tick 已進入「有效昨低到跌停價」的後三分之一區域，當日直接禁止進場。
 4. 於 STRATEGY_START_CHANCE～STRATEGY_END_CHANCE（含）尋找第一根 low 嚴格跌破有效昨低的分 K，並以該根 low 作為放空入場價。
-5. 實際入場價若已進入上述跌停區域，或入場價加停損價差已達漲停價，皆不入場；個股所屬產業指數亦不得高於 CHANCE 允許門檻。
+5. 實際入場價若已進入上述跌停區域，當日直接禁止進場；個股所屬產業指數亦不得高於 CHANCE 允許門檻。
+
+非 LIMIT_UP / LIMIT_DOWN 策略共同入場保護
+1. 入場分 K 之前若當日已觸及漲停或跌停，當日不進場。
+2. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
 1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中，當日直接以第一根分 K 的 open 做多進場。
@@ -61,6 +66,7 @@ VOLUME_DOWN 策略個股入場條件
 
 import builtins
 import argparse
+import ast
 import configparser
 import json
 import math
@@ -71,6 +77,8 @@ import numpy as np
 from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from pprint import pformat
+from tempfile import NamedTemporaryFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -85,6 +93,8 @@ from Z_ORB_ONE.stock_data import (
 )
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
+STOCK_DATA_PATH = Path(__file__).resolve().parents[1] / 'stock_data.py'
+INDUSTRY_INDEX_MAP_PATH = Path(__file__).resolve().parents[1] / 'industry_index_map.json'
 EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each_stock_special_short_v17_result.txt')
 OUTPUT_BUFFER: list[str] = []
 GATE_LOWER_PASSED = 'LOWER_PASSED'
@@ -103,12 +113,15 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
-INCLUDE_LOWER_IN_PRINT_STATS = False
-INCLUDE_FOLLOW_IN_PRINT_STATS = True
+
+INCLUDE_FOLLOW_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = True
 INCLUDE_CHANCE_IN_PRINT_STATS = False
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
+
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
+
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -136,17 +149,18 @@ OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chan
 OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
 
+FOLLOW_ENTRY_RANGE_END_PERCENT = 15.0 # follow 入場價距昨收到漲停的結束百分比
+FOLLOW_ENTRY_RANGE_START_PERCENT = 5.0 # follow 入場價距昨收到漲停的起始百分比
+
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-
-FOLLOW_ENTRY_RANGE_START_PERCENT = 0.0 # follow 入場價距昨收到漲停的起始百分比
-FOLLOW_ENTRY_RANGE_END_PERCENT = 25.0 # follow 入場價距昨收到漲停的結束百分比
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
 SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
+SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD = 2.0 # 前一日前N分鐘量須大於或等於前前一日的此倍數。
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間；也作為 chance 有效昨低緩衝截止，包含此時間
 
@@ -175,7 +189,7 @@ IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATE
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
 IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.15 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.0 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
@@ -210,6 +224,149 @@ MARKET_INDEX_METADATA = {**market_previous_close_indices, **RESERVE_MARKET_INDIC
 
 # 額外API的配置
 API_REQUEST_DELAY_SEC = 1 # 每次 API 查詢前的延遲
+
+
+def find_assignment(source: str, name: str) -> tuple[int, int]:
+    """回傳指定頂層 assignment 的起訖行；寫回 stock_data.py 時使用。"""
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if name in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+    raise ValueError(f'找不到 {name} 宣告')
+
+
+def write_stock_data_market_indices(indices: dict[str, dict]) -> None:
+    """只更新 stock_data.py 的 market_previous_close_indices assignment。"""
+    source = STOCK_DATA_PATH.read_text(encoding='utf-8')
+    lines = source.splitlines()
+    start_line, end_line = find_assignment(source, 'market_previous_close_indices')
+    replacement = (
+        'market_previous_close_indices = '
+        + pformat(indices, sort_dicts=False)
+    ).splitlines()
+    updated_source = '\n'.join(lines[:start_line] + replacement + lines[end_line:]) + '\n'
+
+    with NamedTemporaryFile(
+        'w',
+        encoding='utf-8',
+        dir=str(STOCK_DATA_PATH.parent),
+        delete=False,
+    ) as tmp_file:
+        tmp_file.write(updated_source)
+        tmp_file.flush()
+        tmp_path = Path(tmp_file.name)
+
+    tmp_path.replace(STOCK_DATA_PATH)
+
+
+def get_required_industry_targets(stock_list: list[tuple]) -> set[tuple[str, str]]:
+    """依股票清單回傳需要的 (exchange, industry_code)。"""
+    targets: set[tuple[str, str]] = set()
+    for stock_item in stock_list:
+        if len(stock_item) <= 6:
+            continue
+        exchange = get_exchange_for_stock(stock_item[0])
+        if exchange is None:
+            continue
+        industry_code = str(stock_item[6]).zfill(2)
+        targets.add((exchange, industry_code))
+    return targets
+
+
+def build_industry_index_entry(
+    exchange: str,
+    industry_code: str,
+    index_map: dict,
+) -> dict | None:
+    """從 update_stock_data_industry_indices.py 產出的 mapping 建立產業指數 metadata。"""
+    exchange_map = index_map.get('exchanges', {}).get(exchange, {})
+    industry = exchange_map.get('industries', {}).get(industry_code, {})
+    index_info = industry.get('index')
+    if not index_info:
+        return None
+
+    symbol = index_info.get('symbol')
+    name = index_info.get('name')
+    if not symbol or not name:
+        return None
+
+    industry_codes = index_map.get('industry_codes', {})
+    industry_name = industry.get('industry_name') or industry_codes.get(industry_code)
+    return {
+        'exchange': exchange,
+        'industry_code': industry_code,
+        'industry_name': industry_name,
+        'symbol': symbol,
+        'name': name,
+        'previous_close': None,
+        'time': None,
+        'last_updated': None,
+        'source': 'historical.candles',
+    }
+
+
+def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> None:
+    """
+    回測程式專用：啟動時檢查 stock_data.py 是否具備足夠產業別指數 metadata。
+    只補齊產業指數結構與代碼，不更新最新 previous_close；回測會另外抓歷史分 K。
+    """
+    required_targets = get_required_industry_targets(stock_list)
+    missing_targets = [
+        (exchange, industry_code)
+        for exchange, industry_code in sorted(required_targets)
+        if not market_previous_close_indices.get(f'{exchange}:{industry_code}', {}).get('symbol')
+    ]
+    if not missing_targets:
+        return
+
+    if not INDUSTRY_INDEX_MAP_PATH.exists():
+        missing_text = ', '.join(f'{exchange}:{industry_code}' for exchange, industry_code in missing_targets)
+        raise FileNotFoundError(
+            f'缺少產業指數 metadata: {missing_text}；且找不到 {INDUSTRY_INDEX_MAP_PATH}'
+        )
+
+    index_map = json.loads(INDUSTRY_INDEX_MAP_PATH.read_text(encoding='utf-8'))
+    updated_indices = dict(market_previous_close_indices)
+    unresolved: list[str] = []
+    added_keys: list[str] = []
+    for exchange, industry_code in missing_targets:
+        index_key = f'{exchange}:{industry_code}'
+        entry = build_industry_index_entry(exchange, industry_code, index_map)
+        if entry is None:
+            unresolved.append(index_key)
+            continue
+        updated_indices[index_key] = entry
+        added_keys.append(index_key)
+
+    if unresolved:
+        raise ValueError(
+            'industry_index_map.json 找不到以下產業指數 mapping: '
+            + ', '.join(unresolved)
+        )
+
+    write_stock_data_market_indices(updated_indices)
+    market_previous_close_indices.clear()
+    market_previous_close_indices.update(updated_indices)
+    MARKET_INDEX_METADATA.clear()
+    MARKET_INDEX_METADATA.update({**market_previous_close_indices, **RESERVE_MARKET_INDICES})
+    print(
+        '回測啟動檢查：已補齊 stock_data.py 產業別指數 metadata '
+        f'({len(added_keys)}): {", ".join(added_keys)}'
+    )
+
 
 def get_api_cache_path(target_date: date) -> Path:
     """回傳 API 快取檔路徑（json_cache 資料夾）。"""
@@ -388,6 +545,34 @@ def should_skip_entry_by_limit_down_zone(
 def should_skip_entry_by_limit_up(entry_price: float, stop_loss: float, limit_up_price: float) -> bool:
     """若作空進場價加停損差價已達漲停，略過本次交易。"""
     return (entry_price + stop_loss) >= limit_up_price
+
+
+def should_skip_entry_by_limit_down(entry_price: float, stop_loss: float, limit_down_price: float) -> bool:
+    """若作多進場價減停損差價已達跌停，略過本次交易。"""
+    return (entry_price - stop_loss) <= limit_down_price
+
+
+def is_independent_limit_strategy(strategy_type: str | None) -> bool:
+    """LIMIT_UP / LIMIT_DOWN 為獨立預掛策略，不套用一般入場保護。"""
+    return strategy_type in (STRATEGY_LIMIT_UP, STRATEGY_LIMIT_DOWN)
+
+
+def has_limit_price_touched_before_entry(
+    high_values: np.ndarray,
+    low_values: np.ndarray,
+    entry_idx: int,
+    limit_up_price: float,
+    limit_down_price: float,
+) -> bool:
+    """檢查入場分 K 之前是否曾觸及漲停或跌停。"""
+    if entry_idx <= 0:
+        return False
+    prior_high_values = high_values[:entry_idx]
+    prior_low_values = low_values[:entry_idx]
+    return (
+        np.max(prior_high_values) >= limit_up_price
+        or np.min(prior_low_values) <= limit_down_price
+    )
 
 
 def calculate_entry_range_bounds(
@@ -2245,7 +2430,7 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool, list[float]]]] = {}
+    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool, list[float], float | None]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
@@ -2261,6 +2446,7 @@ def print_daily_optimization_results(
             signed_pnl(result),
             result.get('outcome') == 'success',
             signal.get('opening_volumes', []),
+            signal.get('previous_close'),
         ))
 
     normal_gate_group_keys = {
@@ -2335,19 +2521,27 @@ def print_daily_optimization_results(
                     index_minute_bars_by_key,
                 ):
                     print(index_summary)
-            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _, opening_volumes in sorted(
+            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _, opening_volumes, previous_close in sorted(
                 day_rows,
                 key=lambda row: (format_entry_time(row[2]), row[0]),
             ):
                 opening_volumes_text = ''
+                previous_close_text = ''
                 if strategy_type == STRATEGY_VOLUME_DOWN:
                     opening_volumes_text = ''.join(
                         f' {volume:g}'
                         for volume in opening_volumes
                     )
+                if strategy_type in (
+                    STRATEGY_VOLUME_DOWN,
+                    STRATEGY_LIMIT_DOWN,
+                    STRATEGY_LIMIT_UP,
+                ):
+                    if previous_close is not None:
+                        previous_close_text = f' {previous_close:.2f}'
                 print(
                     f'{format_stock_label(stock_name, industry_code)}{opening_volumes_text} '
-                    f'{format_entry_time(entry_dt)} {format_entry_time(exit_dt)} '
+                    f'{format_entry_time(entry_dt)} {format_entry_time(exit_dt)}{previous_close_text} '
                     f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
                 )
             print('')
@@ -2384,6 +2578,7 @@ def print_daily_optimization_results(
     print(
         f'SHORT_VOLUME_SUMMARY_CANDLES={SHORT_VOLUME_SUMMARY_CANDLES}  '
         f'SHORT_VOLUME_RATIO_THRESHOLD={SHORT_VOLUME_RATIO_THRESHOLD:.4f}  '
+        f'SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD={SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:.4f}  '
         f'MIN_MINUTE_BARS_BEFORE_0930={MIN_MINUTE_BARS_BEFORE_0930}  '
         f'VOLUME_DOWN出場時間={INTRADAY_COMPARE_END_VOLUME_DOWN[0]:02d}:'
         f'{INTRADAY_COMPARE_END_VOLUME_DOWN[1]:02d}'
@@ -2448,7 +2643,16 @@ def find_volume_down_candidate_on_date(
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
     if not today_bars or not yesterday_bars:
         return None
+    target_key = target_date.strftime('%Y-%m-%d')
+    previous_dates = sorted(k for k in bars_by_date if k < target_key)
+    if len(previous_dates) < 2:
+        return None
+    day_before_yesterday_bars = bars_by_date.get(previous_dates[-2], [])
+    if not day_before_yesterday_bars:
+        return None
     # 前一日與本日 09:30 前分 K 都需足夠；不足視為本日不可當沖，不交易。
+    if not has_enough_minute_bars_before_0930(day_before_yesterday_bars):
+        return None
     if not has_enough_minute_bars_before_0930(yesterday_bars):
         return None
     if not has_enough_minute_bars_before_0930(today_bars):
@@ -2462,7 +2666,11 @@ def find_volume_down_candidate_on_date(
         (bar for bar in yesterday_bars if bar.get('dt') is not None),
         key=lambda bar: bar['dt'],
     )
-    if not today_ordered or not yesterday_ordered:
+    day_before_yesterday_ordered = sorted(
+        (bar for bar in day_before_yesterday_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+    if not today_ordered or not yesterday_ordered or not day_before_yesterday_ordered:
         return None
 
     def get_opening_volume_bars(
@@ -2508,6 +2716,7 @@ def find_volume_down_candidate_on_date(
         return None
 
     yesterday_date = yesterday_ordered[0]['dt'].date()
+    day_before_yesterday_date = day_before_yesterday_ordered[0]['dt'].date()
     today_opening_bars = get_opening_volume_bars(
         today_ordered,
         target_date,
@@ -2518,9 +2727,18 @@ def find_volume_down_candidate_on_date(
         yesterday_date,
         SHORT_VOLUME_SUMMARY_CANDLES,
     )
-    if not today_opening_bars or not yesterday_opening_bars:
+    day_before_yesterday_opening_bars = get_opening_volume_bars(
+        day_before_yesterday_ordered,
+        day_before_yesterday_date,
+        SHORT_VOLUME_SUMMARY_CANDLES,
+    )
+    if not today_opening_bars or not yesterday_opening_bars or not day_before_yesterday_opening_bars:
         return None
 
+    day_before_yesterday_volume = sum(
+        float(bar.get('volume', 0) or 0)
+        for bar in day_before_yesterday_opening_bars
+    )
     yesterday_volume = sum(
         float(bar.get('volume', 0) or 0)
         for bar in yesterday_opening_bars
@@ -2529,7 +2747,11 @@ def find_volume_down_candidate_on_date(
         float(bar['volume'])
         for bar in today_opening_bars
     )
+    if day_before_yesterday_volume <= 0:
+        return None
     if yesterday_volume <= 0:
+        return None
+    if yesterday_volume < day_before_yesterday_volume * SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:
         return None
     if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
         return None
@@ -2544,6 +2766,8 @@ def find_volume_down_candidate_on_date(
     entry_price = float(entry_bar['open'])
 
     ystats = compute_yesterday_stats(yesterday_ordered)
+    previous_close = float(ystats['close'])
+
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
     candidate = build_trade_candidate(
@@ -2560,6 +2784,7 @@ def find_volume_down_candidate_on_date(
         TRADE_SIDE_SHORT,
         None,
     )
+    candidate['previous_close'] = previous_close
     available_dates = sorted(
         datetime.strptime(date_key, '%Y-%m-%d').date()
         for date_key in bars_by_date
@@ -2624,6 +2849,7 @@ def find_limit_candidate_on_date(
         key=lambda bar: bar['dt'],
     )
     ystats = compute_yesterday_stats(yesterday_bars)
+    previous_close = float(ystats['close'])
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
     first_bar = today_ordered[0] if today_ordered else None
@@ -2644,7 +2870,7 @@ def find_limit_candidate_on_date(
         return None
 
     entry_bar, entry_price = pair
-    return build_trade_candidate(
+    candidate = build_trade_candidate(
         stock_name,
         get_stock_industry_code(stock_item),
         target_date,
@@ -2658,6 +2884,8 @@ def find_limit_candidate_on_date(
         trade_side,
         None,
     )
+    candidate['previous_close'] = previous_close
+    return candidate
 
 
 def find_trade_candidate_on_date(
@@ -2979,8 +3207,35 @@ def evaluate_candidates(
         else:
             continue
 
+        try:
+            entry_idx = dt_values.index(entry_dt)
+        except ValueError:
+            continue
+
         effective_stop_loss = calculate_stop_loss_amount_by_percent(entry_price, optimize_loss_percent)
         effective_profit = calculate_take_profit_amount_by_percent(entry_price, optimize_profit_percent)
+        if not is_independent_limit_strategy(strategy_type):
+            if has_limit_price_touched_before_entry(
+                high_values,
+                low_values,
+                entry_idx,
+                limit_up_price,
+                limit_down_price,
+            ):
+                continue
+            if trade_side == TRADE_SIDE_LONG and should_skip_entry_by_limit_down(
+                entry_price,
+                effective_stop_loss,
+                limit_down_price,
+            ):
+                continue
+            if trade_side == TRADE_SIDE_SHORT and should_skip_entry_by_limit_up(
+                entry_price,
+                effective_stop_loss,
+                limit_up_price,
+            ):
+                continue
+
         if trade_side == TRADE_SIDE_LONG:
             raw_take_profit_price = entry_price + effective_profit
             take_profit_price = min(raw_take_profit_price, limit_up_price)
@@ -2989,16 +3244,6 @@ def evaluate_candidates(
             raw_take_profit_price = entry_price - effective_profit
             take_profit_price = max(raw_take_profit_price, limit_down_price)
             stop_loss_price = calculate_stop_loss_price(entry_price, effective_stop_loss, limit_up_price)
-            if strategy_type == STRATEGY_CHANCE and should_skip_entry_by_limit_up(
-                entry_price,
-                effective_stop_loss,
-                limit_up_price,
-            ):
-                continue
-        try:
-            entry_idx = dt_values.index(entry_dt)
-        except ValueError:
-            continue
 
         signal = {
             'name': name,
@@ -3009,6 +3254,7 @@ def evaluate_candidates(
             'strategy_type': strategy_type,
             'trade_side': trade_side,
             'opening_volumes': candidate.get('opening_volumes', []),
+            'previous_close': candidate.get('previous_close'),
             'take_profit_price': take_profit_price,
             'effective_profit': effective_profit,
             'effective_stop_loss': effective_stop_loss,
@@ -3127,6 +3373,7 @@ def main() -> None:
             limit_up_stock_list,
             limit_down_stock_list,
         ])
+        ensure_backtest_industry_index_metadata(analysis_stock_list)
         excluded_stock_count = len(raw_stock_list) - len(stock_list)
         if EXCLUDED_INDUSTRY_CODES:
             print(
@@ -3302,6 +3549,9 @@ def main() -> None:
             sys.exit(1)
         if SHORT_VOLUME_RATIO_THRESHOLD < 0:
             print('[ERROR] SHORT_VOLUME_RATIO_THRESHOLD 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD < 0:
+            print('[ERROR] SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD 不可小於 0', file=sys.stderr)
             sys.exit(1)
         if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
             print('[ERROR] MIN_MINUTE_BARS_BEFORE_0930 必須大於 0', file=sys.stderr)

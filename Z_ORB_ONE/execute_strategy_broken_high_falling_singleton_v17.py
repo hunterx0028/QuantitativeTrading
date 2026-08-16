@@ -52,7 +52,7 @@ class TeeStream:
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
-MAIN_START_TIME = (8, 45)  # 主程序開始執行時間；此時會開始準備 VOLUME_DOWN 前一交易日交易量資料。若未在此時間前啟動或盤中程式失敗，當天不以重啟補救。
+MAIN_START_TIME = (8, 45)  # 主程序開始執行時間；此時會開始準備 VOLUME_DOWN 前兩交易日交易量資料。若未在此時間前啟動或盤中程式失敗，當天不以重啟補救。
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
@@ -74,9 +74,11 @@ TRADE_SIDE_LONG = 'LONG'
 ENABLE_ENTRY_MODE_FOLLOW = False  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 ENABLE_ENTRY_MODE_CHANCE = False  # False 時，STRATEGY_DECISION 判定為 CHANCE 後立即結束程序
+
 ENABLE_VOLUME_DOWN_STRATEGY = True  # False 時，不取得分鐘量，也不執行 VOLUME_DOWN
+
 ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
-ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
+ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 MIN_MINUTE_BARS_BEFORE_0930 = 20 # 前一日 09:30 前至少須有此數量的一分鐘 K 棒
 
@@ -101,10 +103,11 @@ OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利百分比
 
+VOLUME_DOWN_HISTORICAL_QUERY_SLEEP_SECONDS = 1.5 # 歷史行情限制 60 次/分鐘；逐檔查詢後保守等待 1.5 秒
+VOLUME_DOWN_EVALUATION_SECOND = 10 # VOLUME_DOWN 於 09:00 + SHORT_VOLUME_SUMMARY_CANDLES 分後的第 N 秒判斷
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # VOLUME_DOWN 代表小於 9:5 之前的才取
 SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 本日前 N 根量須小於或等於前一日前 N 根量的此倍數
-VOLUME_DOWN_EVALUATION_TIME = (9, 5, 10) # 設定取K棒的時間
-VOLUME_DOWN_HISTORICAL_QUERY_SLEEP_SECONDS = 1.5 # 歷史行情限制 60 次/分鐘；逐檔查詢後保守等待 1.5 秒
+SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD = 2.0 # 前一日前 N 根量須大於或等於前前一日前 N 根量的此倍數
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
@@ -673,16 +676,20 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError("ENTRY_CHECK_START_TIME_CHANCE 不可早於 STRATEGY_DECISION")
     if SHORT_VOLUME_SUMMARY_CANDLES <= 0:
         raise ValueError("SHORT_VOLUME_SUMMARY_CANDLES 必須大於 0")
+    if SHORT_VOLUME_SUMMARY_CANDLES > 59:
+        raise ValueError("SHORT_VOLUME_SUMMARY_CANDLES 以 09:00 起算時不可大於 59")
     if SHORT_VOLUME_RATIO_THRESHOLD < 0:
         raise ValueError("SHORT_VOLUME_RATIO_THRESHOLD 不可小於 0")
+    if SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD < 0:
+        raise ValueError("SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD 不可小於 0")
     if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
         raise ValueError("MIN_MINUTE_BARS_BEFORE_0930 必須大於 0")
-    if len(VOLUME_DOWN_EVALUATION_TIME) != 3 or not (
-        0 <= VOLUME_DOWN_EVALUATION_TIME[0] <= 23
-        and 0 <= VOLUME_DOWN_EVALUATION_TIME[1] <= 59
-        and 0 <= VOLUME_DOWN_EVALUATION_TIME[2] <= 59
-    ):
-        raise ValueError("VOLUME_DOWN_EVALUATION_TIME 設定錯誤，需為有效的 (時, 分, 秒)")
+    if not (0 <= VOLUME_DOWN_EVALUATION_SECOND <= 59):
+        raise ValueError("VOLUME_DOWN_EVALUATION_SECOND 設定錯誤，需介於 0~59")
+
+
+def get_volume_down_evaluation_time() -> tuple[int, int, int]:
+    return (9, SHORT_VOLUME_SUMMARY_CANDLES, VOLUME_DOWN_EVALUATION_SECOND)
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -823,7 +830,10 @@ def count_minute_candles_before_0930(rows: List[Dict[str, Any]], target_date: da
     return len(minute_keys)
 
 
-def fetch_previous_minute_candles(stock_id: str, realtime_sdk) -> tuple[date | None, List[Dict[str, Any]]]:
+def fetch_recent_previous_minute_candles(
+    stock_id: str,
+    realtime_sdk,
+) -> tuple[date | None, List[Dict[str, Any]], date | None, List[Dict[str, Any]]]:
     symbol = stock_id.split(".")[0]
     today = now_tpe().date()
     response = realtime_sdk.rest_client.stock.historical.candles(
@@ -841,19 +851,32 @@ def fetch_previous_minute_candles(stock_id: str, realtime_sdk) -> tuple[date | N
         if (parsed := parse_minute_candle_datetime(row)) is not None
         and parsed.date() < today
     })
-    if not dates:
-        return None, []
+    if len(dates) < 2:
+        return None, [], None, []
     previous_date = dates[-1]
-    return previous_date, [
-        row for row in rows
-        if (parsed := parse_minute_candle_datetime(row)) is not None
-        and parsed.date() == previous_date
-    ]
+    day_before_previous_date = dates[-2]
+    rows_by_date: Dict[date, List[Dict[str, Any]]] = {
+        previous_date: [],
+        day_before_previous_date: [],
+    }
+    for row in rows:
+        parsed = parse_minute_candle_datetime(row)
+        if parsed is None:
+            continue
+        row_date = parsed.date()
+        if row_date in rows_by_date:
+            rows_by_date[row_date].append(row)
+    return (
+        previous_date,
+        rows_by_date[previous_date],
+        day_before_previous_date,
+        rows_by_date[day_before_previous_date],
+    )
 
 
 def volume_down_yesterday_cache_path(today: date | None = None) -> str:
     """
-    VOLUME_DOWN 前日量 cache 為當次執行用的日檔。
+    VOLUME_DOWN 前兩日量 cache 為當次執行用的日檔。
     程式啟動後會先清空 stock_state，因此此檔不設計成 ECS task 重啟後復用；
     若未在 MAIN_START_TIME 前啟動或盤中程式失敗，當天不以 cache 重啟補救。
     """
@@ -868,6 +891,7 @@ def build_volume_down_cache(today: date | None = None) -> Dict[str, Any]:
         "cache_date": today.isoformat(),
         "created_at": now_tpe().isoformat(),
         "summary_candles": SHORT_VOLUME_SUMMARY_CANDLES,
+        "previous_day_ratio_threshold": SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD,
         "min_minute_bars_before_0930": MIN_MINUTE_BARS_BEFORE_0930,
         "records": {},
     }
@@ -895,6 +919,7 @@ def load_volume_down_yesterday_cache(today: date | None = None) -> Dict[str, Any
     if (
         cache.get("cache_date") != today.isoformat()
         or cache.get("summary_candles") != SHORT_VOLUME_SUMMARY_CANDLES
+        or cache.get("previous_day_ratio_threshold") != SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD
         or cache.get("min_minute_bars_before_0930") != MIN_MINUTE_BARS_BEFORE_0930
         or not isinstance(cache.get("records"), dict)
     ):
@@ -913,9 +938,17 @@ def apply_volume_down_cache_record(state: Dict[str, Any], record: Dict[str, Any]
     if record.get("ok"):
         state["volume_down_yesterday_date"] = record.get("previous_date")
         state["volume_down_yesterday_volume"] = float(record.get("previous_volume", 0) or 0)
+        state["volume_down_day_before_previous_date"] = record.get("day_before_previous_date")
+        state["volume_down_day_before_previous_volume"] = float(record.get("day_before_previous_volume", 0) or 0)
+        state["volume_down_previous_to_day_before_ratio"] = float(record.get("previous_to_day_before_volume_ratio", 0) or 0)
         state["volume_down_yesterday_ready"] = True
         state["volume_down_yesterday_error"] = ""
     else:
+        state["volume_down_day_before_previous_date"] = record.get("day_before_previous_date")
+        state["volume_down_day_before_previous_volume"] = None
+        state["volume_down_yesterday_date"] = record.get("previous_date")
+        state["volume_down_yesterday_volume"] = None
+        state["volume_down_previous_to_day_before_ratio"] = None
         state["volume_down_yesterday_ready"] = False
         state["volume_down_yesterday_error"] = record.get("error")
 
@@ -924,7 +957,7 @@ def prepare_volume_down_yesterday_data(
     states: Dict[str, Dict[str, Any]],
     realtime_sdk,
 ) -> None:
-    """開盤前準備一般個股的前一交易日開盤量；失敗者只放棄 VOLUME_DOWN。"""
+    """開盤前準備一般個股的前兩交易日開盤量；失敗者只放棄 VOLUME_DOWN。"""
     if not ENABLE_VOLUME_DOWN_STRATEGY:
         print("[CONFIG] ENABLE_VOLUME_DOWN_STRATEGY=False，不取得 VOLUME_DOWN 分鐘 K 資料")
         return
@@ -955,8 +988,11 @@ def prepare_volume_down_yesterday_data(
                     "VOLUME_DOWN_CACHE_HIT",
                     symbol=symbol_code_with_suf,
                     name=symbol_name,
+                    day_before_previous_date=cached_record.get("day_before_previous_date"),
+                    day_before_previous_volume=cached_record.get("day_before_previous_volume"),
                     previous_date=cached_record.get("previous_date"),
                     previous_volume=cached_record.get("previous_volume"),
+                    previous_to_day_before_volume_ratio=cached_record.get("previous_to_day_before_volume_ratio"),
                 )
             else:
                 trade_log(
@@ -970,18 +1006,38 @@ def prepare_volume_down_yesterday_data(
             continue
 
         try:
-            previous_date, rows = fetch_previous_minute_candles(
+            (
+                previous_date,
+                rows,
+                day_before_previous_date,
+                day_before_rows,
+            ) = fetch_recent_previous_minute_candles(
                 symbol_code_with_suf,
                 realtime_sdk,
             )
             if previous_date is None:
-                raise ValueError("找不到前一交易日分鐘 K")
+                raise ValueError("找不到前兩個交易日分鐘 K")
+            if day_before_previous_date is None:
+                raise ValueError("找不到前前一交易日分鐘 K")
+            day_before_0930_count = count_minute_candles_before_0930(day_before_rows, day_before_previous_date)
+            if day_before_0930_count < MIN_MINUTE_BARS_BEFORE_0930:
+                raise ValueError(
+                    f"前前一日 09:30 前僅 {day_before_0930_count} 根，"
+                    f"少於 {MIN_MINUTE_BARS_BEFORE_0930} 根"
+                )
             before_0930_count = count_minute_candles_before_0930(rows, previous_date)
             if before_0930_count < MIN_MINUTE_BARS_BEFORE_0930:
                 raise ValueError(
                     f"前一日 09:30 前僅 {before_0930_count} 根，"
                     f"少於 {MIN_MINUTE_BARS_BEFORE_0930} 根"
                 )
+            day_before_opening_rows = get_opening_volume_candles(
+                day_before_rows,
+                day_before_previous_date,
+                SHORT_VOLUME_SUMMARY_CANDLES,
+            )
+            if not day_before_opening_rows:
+                raise ValueError("前前一日統計區間內無有效成交量 K")
             opening_rows = get_opening_volume_candles(
                 rows,
                 previous_date,
@@ -989,26 +1045,44 @@ def prepare_volume_down_yesterday_data(
             )
             if not opening_rows:
                 raise ValueError("前一日統計區間內無有效成交量 K")
+            day_before_volume = sum(float(row["volume"]) for row in day_before_opening_rows)
+            if day_before_volume <= 0:
+                raise ValueError("前前一日前 N 根交易量為 0")
             previous_volume = sum(float(row["volume"]) for row in opening_rows)
             if previous_volume <= 0:
                 raise ValueError("前一日前 N 根交易量為 0")
+            previous_to_day_before_ratio = previous_volume / day_before_volume
+            if previous_volume < day_before_volume * SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:
+                raise ValueError(
+                    f"前一日前 N 根量 {previous_volume:,.0f} 未達前前一日前 N 根量 "
+                    f"{day_before_volume:,.0f} 的 {SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:.4f} 倍"
+                )
             records[symbol_code] = {
                 "ok": True,
                 "symbol": symbol_code_with_suf,
                 "name": symbol_name,
+                "day_before_previous_date": day_before_previous_date.isoformat(),
+                "day_before_previous_volume": day_before_volume,
                 "previous_date": previous_date.isoformat(),
                 "previous_volume": previous_volume,
+                "previous_to_day_before_volume_ratio": previous_to_day_before_ratio,
+                "day_before_0930_count": day_before_0930_count,
                 "before_0930_count": before_0930_count,
                 "updated_at": now_tpe().isoformat(),
             }
+            state["volume_down_day_before_previous_date"] = day_before_previous_date.isoformat()
+            state["volume_down_day_before_previous_volume"] = day_before_volume
             state["volume_down_yesterday_date"] = previous_date.isoformat()
             state["volume_down_yesterday_volume"] = previous_volume
+            state["volume_down_previous_to_day_before_ratio"] = previous_to_day_before_ratio
             state["volume_down_yesterday_ready"] = True
             state["volume_down_yesterday_error"] = ""
             save_volume_down_yesterday_cache(cache)
             print(
-                f"[{symbol_name}] VOLUME_DOWN 前日資料完成："
-                f"日期={previous_date.isoformat()} 前{SHORT_VOLUME_SUMMARY_CANDLES}根量={previous_volume:,.0f}"
+                f"[{symbol_name}] VOLUME_DOWN 前兩日資料完成："
+                f"前前日={day_before_previous_date.isoformat()} 前{SHORT_VOLUME_SUMMARY_CANDLES}根量={day_before_volume:,.0f} "
+                f"前日={previous_date.isoformat()} 前{SHORT_VOLUME_SUMMARY_CANDLES}根量={previous_volume:,.0f} "
+                f"前日/前前日比例={previous_to_day_before_ratio:.4f}"
             )
         except Exception as exc:
             records[symbol_code] = {
@@ -1018,10 +1092,15 @@ def prepare_volume_down_yesterday_data(
                 "error": str(exc),
                 "updated_at": now_tpe().isoformat(),
             }
+            state["volume_down_day_before_previous_date"] = None
+            state["volume_down_day_before_previous_volume"] = None
+            state["volume_down_yesterday_date"] = None
+            state["volume_down_yesterday_volume"] = None
+            state["volume_down_previous_to_day_before_ratio"] = None
             state["volume_down_yesterday_ready"] = False
             state["volume_down_yesterday_error"] = str(exc)
             save_volume_down_yesterday_cache(cache)
-            print(f"[{symbol_name}] ⚠️ VOLUME_DOWN 前日資料不可用：{exc}，將回到一般模式")
+            print(f"[{symbol_name}] ⚠️ VOLUME_DOWN 前兩日資料不可用：{exc}，將回到一般模式")
         atomic_write_json(state_path(symbol_code_with_suf), state)
         time.sleep(VOLUME_DOWN_HISTORICAL_QUERY_SLEEP_SECONDS)
 
@@ -1056,7 +1135,7 @@ def evaluate_volume_down_entries(
         symbol_name = state.get("symbol_name", "UNKNOWN")
         state["volume_down_checked"] = True
         if not state.get("volume_down_yesterday_ready"):
-            print(f"[{symbol_name}] VOLUME_DOWN 前日資料未通過，繼續等待一般模式")
+            print(f"[{symbol_name}] VOLUME_DOWN 前兩日資料未通過，繼續等待一般模式")
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
             continue
 
@@ -1077,18 +1156,36 @@ def evaluate_volume_down_entries(
                 float(row["volume"])
                 for row in opening_rows
             )
+            day_before_volume = float(state.get("volume_down_day_before_previous_volume", 0) or 0)
             yesterday_volume = float(state.get("volume_down_yesterday_volume", 0) or 0)
+            if day_before_volume <= 0:
+                raise ValueError("前前一日前 N 根交易量無效")
             if yesterday_volume <= 0:
                 raise ValueError("前一日前 N 根交易量無效")
+            previous_to_day_before_ratio = yesterday_volume / day_before_volume
             volume_ratio = today_volume / yesterday_volume
             state["volume_down_today_volume"] = today_volume
+            state["volume_down_previous_to_day_before_ratio"] = previous_to_day_before_ratio
             state["volume_down_volume_ratio"] = volume_ratio
+
+            if yesterday_volume < day_before_volume * SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:
+                print(
+                    f"[{symbol_name}] VOLUME_DOWN 不成立："
+                    f"前前日量={day_before_volume:,.0f} 前日量={yesterday_volume:,.0f} "
+                    f"前日/前前日比例={previous_to_day_before_ratio:.4f} "
+                    f"< 門檻={SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:.4f}，"
+                    "繼續等待一般模式"
+                )
+                atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+                continue
 
             if today_volume > yesterday_volume * SHORT_VOLUME_RATIO_THRESHOLD:
                 print(
                     f"[{symbol_name}] VOLUME_DOWN 不成立："
-                    f"前日量={yesterday_volume:,.0f} 本日量={today_volume:,.0f} "
-                    f"比例={volume_ratio:.4f} > 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
+                    f"前前日量={day_before_volume:,.0f} 前日量={yesterday_volume:,.0f} "
+                    f"前日/前前日比例={previous_to_day_before_ratio:.4f}，"
+                    f"本日量={today_volume:,.0f} 本日/前日比例={volume_ratio:.4f} "
+                    f"> 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
                     "繼續等待一般模式"
                 )
                 atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -1111,8 +1208,11 @@ def evaluate_volume_down_entries(
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
             print(
                 f"[{symbol_name}] VOLUME_DOWN 成立："
-                f"前日量={yesterday_volume:,.0f} 本日量={today_volume:,.0f} "
-                f"比例={volume_ratio:.4f} <= 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
+                f"前前日量={day_before_volume:,.0f} 前日量={yesterday_volume:,.0f} "
+                f"前日/前前日比例={previous_to_day_before_ratio:.4f} >= "
+                f"門檻={SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:.4f}，"
+                f"本日量={today_volume:,.0f} 本日/前日比例={volume_ratio:.4f} "
+                f"<= 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
                 f"last_price={entry_trigger_price:.2f}，送出市價放空"
             )
             try_open_position(state, mysdk)
@@ -2387,8 +2487,11 @@ def build_initial_state(
         "down_streak_days": down_streak_days,  # 連跌天數
         "volume_down_checked": False,
         "volume_down_qualified": False,
+        "volume_down_day_before_previous_date": None,
+        "volume_down_day_before_previous_volume": None,
         "volume_down_yesterday_date": None,
         "volume_down_yesterday_volume": None,
+        "volume_down_previous_to_day_before_ratio": None,
         "volume_down_yesterday_ready": False,
         "volume_down_today_volume": None,
         "volume_down_volume_ratio": None,
@@ -3842,9 +3945,10 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
         # round_has_market_update = False
         now_local = now_tpe()
+        volume_down_evaluation_time = get_volume_down_evaluation_time()
         if (
             not volume_down_evaluation_done
-            and (now_local.hour, now_local.minute, now_local.second) >= VOLUME_DOWN_EVALUATION_TIME
+            and (now_local.hour, now_local.minute, now_local.second) >= volume_down_evaluation_time
         ):
             print(
                 f"⏰ VOLUME_DOWN 判斷時間！目前時間：{now_local.strftime('%H:%M:%S')}"
