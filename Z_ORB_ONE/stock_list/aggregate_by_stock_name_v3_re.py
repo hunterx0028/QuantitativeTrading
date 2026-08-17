@@ -10,7 +10,7 @@ MIN_LIMIT_DOWN_PRICE = 50.0
 MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
 LONG_LIMIT_UP_DAYS = [2] # 分入 selected_limit_up_stocks 的實際連續漲停天數
-SHORT_LIMIT_DOWN_DAYS = [] # 分入 selected_limit_down_stocks 的實際連續跌停天數
+SHORT_LIMIT_DOWN_DAYS = [1] # 分入 selected_limit_down_stocks 的實際連續跌停天數
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
