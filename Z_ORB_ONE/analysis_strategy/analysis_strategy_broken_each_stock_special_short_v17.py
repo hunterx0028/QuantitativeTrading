@@ -59,7 +59,8 @@ LIMIT_DOWN 策略個股入場條件
 1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中，當日直接以第一根分 K 的 open 放空進場。
 
 VOLUME_DOWN 策略個股入場條件
-1. 條件成立後，直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
+1. 條件成立後，IX0001、IX0043 在檢核當下均須低於各自昨收。
+2. 直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
 """
 
 
@@ -115,12 +116,11 @@ TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 
 INCLUDE_FOLLOW_IN_PRINT_STATS = False
-INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_CHANCE_IN_PRINT_STATS = False
 
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
-
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
@@ -188,10 +188,10 @@ IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.0 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 2.0 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.5 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數當下 close 必須嚴格大於昨收指數下跌此百分比後的位置
@@ -1695,6 +1695,31 @@ def is_industry_market_filter_passed(
     return entry_index_close < threshold
 
 
+def are_market_indices_below_previous_close_at_entry(
+    target_date: date,
+    entry_dt: datetime,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+) -> bool:
+    """檢查入場當下 IX0001、IX0043 指數 close 是否均低於各自昨收；缺資料視為不通過。"""
+    for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
+        bars_by_date = index_minute_bars_by_key.get(index_key, {})
+        previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
+        today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+        entry_bar = find_bar_at_or_before(today_bars, entry_dt)
+        if previous_close is None or entry_bar is None or entry_bar.get('close') is None:
+            return False
+
+        try:
+            index_close = float(entry_bar['close'])
+            previous_close_value = float(previous_close)
+        except (TypeError, ValueError):
+            return False
+
+        if index_close >= previous_close_value:
+            return False
+    return True
+
+
 def is_market_reversal_blocked_at_entry(
     target_date: date,
     entry_dt: datetime,
@@ -2637,8 +2662,9 @@ def find_volume_down_candidate_on_date(
     stock_item: tuple,
     target_date: date,
     bars_by_date: dict,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
 ):
-    """優先判斷單日 VOLUME_DOWN；未同時符合縮量及開低條件則回傳 None。"""
+    """優先判斷單日 VOLUME_DOWN；未同時符合縮量及市場指數條件則回傳 None。"""
     stock_name = stock_item[0]
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
     if not today_bars or not yesterday_bars:
@@ -2762,6 +2788,12 @@ def find_volume_down_candidate_on_date(
         SHORT_VOLUME_SUMMARY_CANDLES,
     )
     if entry_bar is None:
+        return None
+    if not are_market_indices_below_previous_close_at_entry(
+        target_date,
+        entry_bar['dt'],
+        index_minute_bars_by_key,
+    ):
         return None
     entry_price = float(entry_bar['open'])
 
@@ -3050,6 +3082,7 @@ def collect_trade_candidates(
                 stock_item,
                 current_date,
                 bars_by_date,
+                index_minute_bars_by_key,
             )
             if volume_down_candidate is not None:
                 candidates.append(volume_down_candidate)

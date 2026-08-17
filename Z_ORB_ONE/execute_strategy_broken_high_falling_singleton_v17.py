@@ -72,13 +72,12 @@ TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
 ENABLE_ENTRY_MODE_FOLLOW = False  # False 時，STRATEGY_DECISION 判定為 FOLLOW 後立即結束程序
-ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 ENABLE_ENTRY_MODE_CHANCE = False  # False 時，STRATEGY_DECISION 判定為 CHANCE 後立即結束程序
 
+ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
 ENABLE_VOLUME_DOWN_STRATEGY = True  # False 時，不取得分鐘量，也不執行 VOLUME_DOWN
-
 ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
-ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
+ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 MIN_MINUTE_BARS_BEFORE_0930 = 20 # 前一日及前前一日 09:30 前皆至少須有此數量的一分鐘 K 棒
 
@@ -698,6 +697,47 @@ def get_volume_down_evaluation_time() -> tuple[int, int, int]:
     return (9, SHORT_VOLUME_SUMMARY_CANDLES, VOLUME_DOWN_EVALUATION_SECOND)
 
 
+def get_volume_down_market_index_gate_results() -> list[Dict[str, Any]]:
+    results = []
+    for index_key in MARKET_GATE_INDEX_KEYS:
+        index_config = market_previous_close_indices.get(index_key, {})
+        previous_close = index_config.get("previous_close")
+        last_index = MARKET_INDEX_STATE.get(index_key, {}).get("last_index")
+        result = {
+            "index_key": index_key,
+            "symbol": index_config.get("symbol"),
+            "previous_close": previous_close,
+            "last_index": last_index,
+            "passed": False,
+        }
+        try:
+            previous_close_float = float(previous_close)
+            last_index_float = float(last_index)
+        except (TypeError, ValueError):
+            results.append(result)
+            continue
+
+        result["passed"] = (
+            previous_close_float > 0
+            and last_index_float > 0
+            and last_index_float < previous_close_float
+        )
+        results.append(result)
+    return results
+
+
+def format_volume_down_market_index_gate_results(results: list[Dict[str, Any]]) -> str:
+    return " ".join(
+        (
+            f"{result['index_key']} {result.get('symbol') or ''} "
+            f"last_index={format_market_gate_value(result.get('last_index'))} "
+            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
+            f"passed={result.get('passed')}"
+        )
+        for result in results
+    )
+
+
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
     mode = get_current_entry_mode() if entry_mode is None else entry_mode
     if mode == ENTRY_MODE_NO_TRADE:
@@ -1125,7 +1165,7 @@ def evaluate_volume_down_entries(
     realtime_sdk,
 ) -> None:
     """
-    於指定時間只執行一次 VOLUME_DOWN 判斷；符合者立即送出市價空單。
+    於指定時間只執行一次 VOLUME_DOWN 判斷；符合量能與市場指數條件者立即送出市價空單。
     與回測差異：回測用第 N+1 根分 K open 模擬立刻入場；實機用即時價送市價單。
     """
     if not ENABLE_VOLUME_DOWN_STRATEGY:
@@ -1197,6 +1237,17 @@ def evaluate_volume_down_entries(
                 atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
                 continue
 
+            market_index_gate_results = get_volume_down_market_index_gate_results()
+            if not all(result.get("passed") for result in market_index_gate_results):
+                print(
+                    f"[{symbol_name}] VOLUME_DOWN 不成立："
+                    "市場指數未同步低於昨收 "
+                    f"{format_volume_down_market_index_gate_results(market_index_gate_results)}，"
+                    "繼續等待一般模式"
+                )
+                atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+                continue
+
             try:
                 entry_trigger_price = float(state.get("last_price"))
             except (TypeError, ValueError):
@@ -1219,6 +1270,8 @@ def evaluate_volume_down_entries(
                 f"門檻={SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD:.4f}，"
                 f"本日量={today_volume:,.0f} 本日/前日比例={volume_ratio:.4f} "
                 f"<= 門檻={SHORT_VOLUME_RATIO_THRESHOLD:.4f}，"
+                f"市場指數條件通過 "
+                f"{format_volume_down_market_index_gate_results(market_index_gate_results)}，"
                 f"last_price={entry_trigger_price:.2f}，送出市價放空"
             )
             try_open_position(state, mysdk)
@@ -2542,6 +2595,16 @@ def get_current_entry_mode() -> int:
     return ENTRY_MODE_NO_TRADE
 
 
+def is_entry_mode_enabled(entry_mode: int) -> bool:
+    if entry_mode == ENTRY_MODE_FOLLOW:
+        return ENABLE_ENTRY_MODE_FOLLOW
+    if entry_mode == ENTRY_MODE_LOWER:
+        return ENABLE_ENTRY_MODE_LOWER
+    if entry_mode == ENTRY_MODE_CHANCE:
+        return ENABLE_ENTRY_MODE_CHANCE
+    return False
+
+
 def is_follow_mode() -> bool:
     return get_current_entry_mode() == ENTRY_MODE_FOLLOW
 
@@ -2948,7 +3011,7 @@ def entry_chance_mode_price_check(state: Dict[str, Any], realtime_sdk: EsunMarke
 
 def entry_limit_down_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
-    limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認，直接以第一根分 K open 作空。
+    limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認，直接以即時 quote openPrice 作空。
     """
     open_price = state.get("open_price")
     try:
@@ -2966,7 +3029,7 @@ def entry_limit_down_price_check(state: Dict[str, Any], realtime_sdk: EsunMarket
 
 def entry_limit_up_price_check(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> bool | str:
     """
-    limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認，直接以第一根分 K open 作多。
+    limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認，直接以即時 quote openPrice 作多。
     """
     open_price = state.get("open_price")
     try:
@@ -3307,13 +3370,23 @@ def _protect_profit_stop(state: Dict[str, Any]):
         return
 
     try:
-        px = float(state.get("last_price"))
         entry_price = float(state.get("entry_price"))
         current_flat_price = float(state.get("flat_price"))
     except (TypeError, ValueError):
         return
 
-    if entry_price <= 0:
+    if is_limit_up_strategy(state) and side == TRADE_SIDE_LONG:
+        trigger_price_field = "high_price"
+    elif is_limit_down_strategy(state) and side == TRADE_SIDE_SHORT:
+        trigger_price_field = "low_price"
+    else:
+        trigger_price_field = "last_price"
+    try:
+        px = float(state.get(trigger_price_field))
+    except (TypeError, ValueError):
+        return
+
+    if entry_price <= 0 or px <= 0:
         return
 
     protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
@@ -3372,10 +3445,20 @@ def reached_stop_to_profit(state: Dict[str, Any]) -> bool:
 def reached_resize_profit(state: Dict[str, Any]) -> bool:
     """純判斷：現價是否已達下一個獲利目標點（不修改 state）。"""
     side = state.get("side")
+    if is_limit_up_strategy(state) and side == TRADE_SIDE_LONG:
+        trigger_price_field = "high_price"
+    elif is_limit_down_strategy(state) and side == TRADE_SIDE_SHORT:
+        trigger_price_field = "low_price"
+    else:
+        trigger_price_field = "last_price"
+
     try:
-        px = float(state.get("last_price"))
+        px = float(state.get(trigger_price_field))
         profit_price = float(state.get("profit_price"))
     except (TypeError, ValueError):
+        return False
+
+    if px <= 0:
         return False
 
     if side == TRADE_SIDE_SHORT:
@@ -4000,9 +4083,12 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         return
 
         entry_check_start_time = get_entry_check_start_time()
+        current_entry_mode = get_current_entry_mode()
         if (
             entry_mode_decided
-            and get_current_entry_mode() != ENTRY_MODE_NO_TRADE
+            and current_entry_mode != ENTRY_MODE_NO_TRADE
+            and is_entry_mode_enabled(current_entry_mode)
+            and has_unfinished_non_independent_states(states)
             and not entry_check_start_announced
             and (now_local.hour, now_local.minute) >= entry_check_start_time
         ):
