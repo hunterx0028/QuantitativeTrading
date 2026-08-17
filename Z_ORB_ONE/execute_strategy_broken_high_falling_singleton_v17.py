@@ -80,28 +80,34 @@ ENABLE_VOLUME_DOWN_STRATEGY = True  # False 時，不取得分鐘量，也不執
 ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
 ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
-MIN_MINUTE_BARS_BEFORE_0930 = 20 # 前一日 09:30 前至少須有此數量的一分鐘 K 棒
+MIN_MINUTE_BARS_BEFORE_0930 = 20 # 前一日及前前一日 09:30 前皆至少須有此數量的一分鐘 K 棒
 
-OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
+OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)
 
-OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
+OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 
-OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 動態追蹤停利首次目標百分比(%)
+OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
 
+OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 9.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
-PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
 PROTECT_PROFIT_PER = 2.5 # 觸發調整停利百分比
+PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
+
+PROTECT_PROFIT_PER_LIMIT_UP = 5.0 # limit up 觸發獲利保護百分比
+PROTECT_LOSS_PER_LIMIT_UP = 3.0 # limit up 獲利保護後的新停損百分比
+
+PROTECT_PROFIT_PER_LIMIT_DOWN = 4.0 # limit down 觸發獲利保護百分比
+PROTECT_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 獲利保護後的新停損百分比
 
 VOLUME_DOWN_HISTORICAL_QUERY_SLEEP_SECONDS = 1.5 # 歷史行情限制 60 次/分鐘；逐檔查詢後保守等待 1.5 秒
 VOLUME_DOWN_EVALUATION_SECOND = 10 # VOLUME_DOWN 於 09:00 + SHORT_VOLUME_SUMMARY_CANDLES 分後的第 N 秒判斷
@@ -2591,6 +2597,10 @@ def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, floa
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
+    if is_limit_down_strategy(state):
+        return PROTECT_LOSS_PER_LIMIT_DOWN, PROTECT_PROFIT_PER_LIMIT_DOWN
+    if is_limit_up_strategy(state):
+        return PROTECT_LOSS_PER_LIMIT_UP, PROTECT_PROFIT_PER_LIMIT_UP
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
 
 
@@ -3244,19 +3254,6 @@ def try_close_position(state: Dict[str, Any], mysdk):
                 print(f"[{state['symbol_name']}] ✅ {strategy_label} 己達平倉時間")
             else:
                 print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
-        return
-
-    if is_independent_limit_strategy(state):
-        sl = reached_stop_to_flat(state)
-        rp = reached_resize_profit(state)
-        strategy_label = state.get("strategy_type", "LIMIT")
-
-        if sl:
-            if close_flat_position(state, mysdk):
-                print(f"[{state['symbol_name']}] ✅ {strategy_label} 已至停損價格 {state['flat_price']}")
-        elif rp:
-            if close_profit_position(state, mysdk):
-                print(f"[{state['symbol_name']}] ✅ {strategy_label} 已至停利價格 {state['profit_price']}")
         return
 
     # 實機特有風控：保本與逐步獲利不納入回測對齊檢查。

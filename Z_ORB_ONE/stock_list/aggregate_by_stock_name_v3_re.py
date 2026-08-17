@@ -5,12 +5,12 @@ from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 
-MAX_LIMIT_UP_PRICE = 200.0
+MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
 LONG_LIMIT_UP_DAYS = [2] # 分入 selected_limit_up_stocks 的實際連續漲停天數
-SHORT_LIMIT_DOWN_DAYS = [] # 分入 selected_limit_down_stocks 的實際連續跌停天數
+SHORT_LIMIT_DOWN_DAYS = [1] # 分入 selected_limit_down_stocks 的實際連續跌停天數
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
@@ -424,9 +424,15 @@ def main() -> None:
         ],
     )
     output_result_path.write_text("".join(updated_lines), encoding="utf-8")
-    selected_stock_records, selected_limit_up_stock_records, selected_limit_down_stock_records = (
-        split_records_by_limit_repeat(repeat_records)
-    )
+    # 一般名單仍須通過價位、ATR、產業與出現次數篩選；符合連續漲跌停天數者則直接從
+    # 來源完整排名資料挑選，優先寫入 LIMIT 名單，不受上述篩選條件限制。
+    selected_stock_records, _, _ = split_records_by_limit_repeat(repeat_records)
+    all_ranked_stock_records = [record for record, _count in ranked_records]
+    (
+        _,
+        selected_limit_up_stock_records,
+        selected_limit_down_stock_records,
+    ) = split_records_by_limit_repeat(all_ranked_stock_records)
     update_selected_stocks_file(
         stock_data_path,
         selected_stock_records,

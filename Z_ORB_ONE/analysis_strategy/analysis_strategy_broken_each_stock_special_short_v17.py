@@ -115,13 +115,13 @@ TRADE_SIDE_LONG = 'LONG'
 ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 
 INCLUDE_FOLLOW_IN_PRINT_STATS = False
-INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_CHANCE_IN_PRINT_STATS = False
 
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
 
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -131,23 +131,23 @@ INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 # 少於此數量視為延遲撮合股票，不納入當沖策略。
 MIN_MINUTE_BARS_BEFORE_0930 = 20
 
-OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_VOLUME_DOWN = 8.0 # volume_down 停利百分比(%)
+OPTIMIZE_LOSS_PER_VOLUME_DOWN = 2.0 # volume_down 停損百分比(%)
 
+OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 9.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 10.0 # limit down 停利百分比(%)
 
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
-OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
 OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
+OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
 
-OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
+OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
 
 FOLLOW_ENTRY_RANGE_END_PERCENT = 15.0 # follow 入場價距昨收到漲停的結束百分比
 FOLLOW_ENTRY_RANGE_START_PERCENT = 5.0 # follow 入場價距昨收到漲停的起始百分比
@@ -3238,12 +3238,32 @@ def evaluate_candidates(
 
         if trade_side == TRADE_SIDE_LONG:
             raw_take_profit_price = entry_price + effective_profit
-            take_profit_price = min(raw_take_profit_price, limit_up_price)
-            stop_loss_price = max(entry_price - effective_stop_loss, limit_down_price)
+            raw_stop_loss_price = entry_price - effective_stop_loss
+            # 作多：停利須至少達標，向上取 tick；停損觸發後以較保守的向下 tick 出場。
+            adjusted_take_profit_price = ceil_price_to_tick(
+                raw_take_profit_price,
+                get_tick_size(raw_take_profit_price),
+            )
+            adjusted_stop_loss_price = floor_price_to_tick(
+                raw_stop_loss_price,
+                get_tick_size(raw_stop_loss_price),
+            )
+            take_profit_price = min(adjusted_take_profit_price, limit_up_price)
+            stop_loss_price = max(adjusted_stop_loss_price, limit_down_price)
         else:
             raw_take_profit_price = entry_price - effective_profit
-            take_profit_price = max(raw_take_profit_price, limit_down_price)
-            stop_loss_price = calculate_stop_loss_price(entry_price, effective_stop_loss, limit_up_price)
+            raw_stop_loss_price = entry_price + effective_stop_loss
+            # 作空：停利須至少達標，向下取 tick；停損觸發後以較保守的向上 tick 回補。
+            adjusted_take_profit_price = floor_price_to_tick(
+                raw_take_profit_price,
+                get_tick_size(raw_take_profit_price),
+            )
+            adjusted_stop_loss_price = ceil_price_to_tick(
+                raw_stop_loss_price,
+                get_tick_size(raw_stop_loss_price),
+            )
+            take_profit_price = max(adjusted_take_profit_price, limit_down_price)
+            stop_loss_price = min(adjusted_stop_loss_price, limit_up_price)
 
         signal = {
             'name': name,
