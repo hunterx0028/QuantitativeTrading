@@ -41,8 +41,8 @@ STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，
 STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
-CHECK_START_LIMIT_DOWN = (9, 40)
-CHECK_START_LIMIT_UP = (9, 40)
+CHECK_START_LIMIT_DOWN = (9, 5)
+CHECK_START_LIMIT_UP = (9, 5)
 
 def normalize_config_paths(config: ConfigParser):
     cert_path = config.get("Cert", "Path", fallback="")
