@@ -4,7 +4,7 @@
 2. VOLUME_DOWN 回測以第 N+1 根分 K open 模擬「條件符合後立刻入場」；實機則在條件成立時用即時價立刻送單。
 3. VOLUME_DOWN 回測會用本日 09:30 前分 K 數量檢查資料完整性，作為無法檢核處置股/當沖資格的替代保守條件；實機可用 API 直接排除處置股與不可當沖標的。
 4. LIMIT_UP / LIMIT_DOWN 回測自行用日 K 驗證連續漲跌停天數；實機只交易當日名單，信任 selected_limit_up_stocks / selected_limit_down_stocks 已由前置流程產生。
-5. 實機 LOWER/FOLLOW/CHANCE 多了 best bid/ask 可成交性保護，回測分 K 無足夠委買委賣資料，因此不納入回測。
+5. 實機 LOWER/FOLLOW 多了 best bid/ask 可成交性保護，回測分 K 無足夠委買委賣資料，因此不納入回測。
 6. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
 
 LOWER 模式成立條件
@@ -16,9 +16,6 @@ FOLLOW 模式成立條件
 1. IX0001 在 09:06～09:16（含）曾發生早盤突破。
 2. 09:06～09:42 期間，IX0001、IX0043 都不能上下穿越。
 3. IX0001、IX0043 均曾在 09:43 前突破各自的 FOLLOW 上漲門檻且在判別模式時仍維持住。
-
-CHANCE 模式成立條件
-1. 不是LOWER也不是FOLLOW時。
 
 LIMIT_UP 策略成立條件
 1. 該股票連漲停符合指定次數
@@ -41,12 +38,6 @@ FOLLOW 模式個股入場條件
 1. 於 STRATEGY_START_FOLLOW～STRATEGY_END_FOLLOW（含）尋找第一根 high 落在「昨收到漲停價」之 FOLLOW_ENTRY_RANGE_START_PERCENT～FOLLOW_ENTRY_RANGE_END_PERCENT 區間內的分 K。
 2. 以上述分 K 的 high 作為做多入場價。
 3. 入場當下 IX0001、IX0043 均仍須維持 FOLLOW，且個股所屬產業指數必須高於 FOLLOW 允許門檻；任一資料不足或條件不符即不入場。
-
-CHANCE 模式個股入場條件
-2. 先以昨低為基準；若本日 09:06（含）以前出現更低的 low，則以下探後的最低 low 作為「有效昨低」。
-3. 若有效昨低再往下一個 tick 已進入「有效昨低到跌停價」的後三分之一區域，當日直接禁止進場。
-4. 於 STRATEGY_START_CHANCE～STRATEGY_END_CHANCE（含）尋找第一根 low 嚴格跌破有效昨低的分 K，並以該根 low 作為放空入場價。
-5. 實際入場價若已進入上述跌停區域，當日直接禁止進場；個股所屬產業指數亦不得高於 CHANCE 允許門檻。
 
 非 LIMIT_UP / LIMIT_DOWN 策略共同入場保護
 1. 入場分 K 之前若當日已觸及漲停或跌停，當日不進場。
@@ -101,25 +92,20 @@ OUTPUT_BUFFER: list[str] = []
 GATE_LOWER_PASSED = 'LOWER_PASSED'
 GATE_FOLLOW_PASSED = 'FOLLOW_PASSED'
 GATE_NOT_PASSED = 'NOT_PASSED'
-GATE_CHANCE_PASSED = 'CHANCE_PASSED'
 GATE_NO_TRADE = 'NO_TRADE'
 GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
 STRATEGY_FOLLOW = 'FOLLOW'
-STRATEGY_CHANCE = 'CHANCE'
 STRATEGY_VOLUME_DOWN = 'VOLUME_DOWN'
 STRATEGY_LIMIT_DOWN = 'LIMIT_DOWN'
 STRATEGY_LIMIT_UP = 'LIMIT_UP'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
-ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 
 INCLUDE_FOLLOW_IN_PRINT_STATS = False
-INCLUDE_CHANCE_IN_PRINT_STATS = False
-
-INCLUDE_LOWER_IN_PRINT_STATS = False
-INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = False
 INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
@@ -143,11 +129,8 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)，預設沿用 chance
-OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)，預設沿用 chance
-
-OPTIMIZE_PROFIT_PER_CHANCE = 5.0 # chance 停利百分比(%)
-OPTIMIZE_LOSS_PER_CHANCE = 2.0 # chance 停損百分比(%)
+OPTIMIZE_PROFIT_PER_FOLLOW = 6.0 # follow 停利百分比(%)
+OPTIMIZE_LOSS_PER_FOLLOW = 2.0 # follow 停損百分比(%)
 
 FOLLOW_ENTRY_RANGE_END_PERCENT = 15.0 # follow 入場價距昨收到漲停的結束百分比
 FOLLOW_ENTRY_RANGE_START_PERCENT = 5.0 # follow 入場價距昨收到漲停的起始百分比
@@ -164,23 +147,20 @@ SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD = 2.0 # 前一日前N分鐘量須大�
 IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.2 # volume_down 入場門檻：IX0001 當下 close 須低於前日最後 close 的百分比
 IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.0 # volume_down 入場門檻：IX0043 當下 close 須低於前日最後 close 的百分比
 
-MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間；也作為 chance 有效昨低緩衝截止，包含此時間
+MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間，包含此時間
 
-STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 16) # IX0001 早盤須先突破任一方向的截止分K棒，包含此時間
+STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 15) # IX0001 早盤須先突破任一方向的截止分K棒，包含此時間
 
 STRATEGY_DECISION = (9, 43) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 
 STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
-STRATEGY_END_FOLLOW = (10, 1) # follow 策略可進場截止分k棒的(時, 分)，預設沿用 chance
-STRATEGY_END_CHANCE = (10, 1) # chance 策略可進場截止分k棒的(時, 分)，包含此時間
+STRATEGY_END_FOLLOW = (10, 1) # follow 策略可進場截止分k棒的(時, 分)
 
 INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
-INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(時, 分)，預設沿用 chance
-INTRADAY_COMPARE_END_CHANCE = (13, 0)  # chance 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_FOLLOW = (13, 0)  # follow 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_VOLUME_DOWN = (13, 0) # volume_down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
@@ -533,16 +513,6 @@ def calculate_stop_loss_amount_by_percent(entry_price: float, stop_loss_percent:
 def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_percent: float) -> float:
     """依入場價與停利百分比計算停利價差。"""
     return entry_price * (take_profit_percent / 100.0)
-
-
-def should_skip_entry_by_limit_down_zone(
-    entry_price: float,
-    true_yesterday_low: float,
-    limit_down_price: float,
-) -> bool:
-    """進場價若低於昨低到跌停三分之一位置，略過本次進場。"""
-    threshold = true_yesterday_low - ((true_yesterday_low - limit_down_price) / 3.0)
-    return entry_price <= threshold
 
 
 def should_skip_entry_by_limit_up(entry_price: float, stop_loss: float, limit_up_price: float) -> bool:
@@ -1529,78 +1499,6 @@ def has_ix0001_early_strategy_breakout(
     return False
 
 
-def has_ix0001_lows_held_above_effective_previous_close_before_decision(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """IX0001 自昨收兩側檢查起始時間至模式判別時間前，所有 low 都嚴格高於有效昨收即回傳 True。"""
-    index_key = 'TWSE:MARKET'
-    bars_by_date = index_minute_bars_by_key.get(index_key, {})
-    effective_previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-    if effective_previous_close is None:
-        return False
-
-    start_hm = (
-        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
-    )
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
-    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    has_required_low = False
-    for bar in today_bars:
-        bar_dt = bar.get('dt')
-        if bar_dt is None:
-            continue
-        bar_hm = bar_dt.hour * 60 + bar_dt.minute
-        if bar_hm < start_hm or bar_hm >= decision_hm:
-            continue
-
-        low = bar.get('low')
-        if low is None:
-            continue
-        has_required_low = True
-        if float(low) <= effective_previous_close:
-            return False
-    return has_required_low
-
-
-def has_ix0001_dropped_below_lower_threshold_before_decision(
-    target_date: date,
-    index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> bool:
-    """IX0001 自開盤至模式判別時間前，low 曾跌破 lower 門檻即回傳 True。"""
-    index_key = 'TWSE:MARKET'
-    bars_by_date = index_minute_bars_by_key.get(index_key, {})
-    previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
-    drop_percent = get_strategy_decision_drop_percent(index_key)
-    if previous_close is None or drop_percent is None:
-        return False
-
-    drop_threshold = previous_close * (1 - drop_percent / 100.0)
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
-    today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    for bar in today_bars:
-        bar_dt = bar.get('dt')
-        if bar_dt is None:
-            continue
-        bar_hm = bar_dt.hour * 60 + bar_dt.minute
-        if bar_hm < 9 * 60 or bar_hm >= decision_hm:
-            continue
-
-        low = bar.get('low')
-        if low is not None and float(low) < drop_threshold:
-            return True
-    return False
-
-
-def get_chance_gate_status(
-    _target_date: date,
-    _index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> str:
-    """回傳 CHANCE gate 狀態。"""
-    return GATE_CHANCE_PASSED
-
-
 def get_strategy_market_decision_gate_status(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
@@ -1616,7 +1514,7 @@ def get_strategy_market_decision_gate_status(
         target_date,
         index_minute_bars_by_key,
     ):
-        return get_chance_gate_status(target_date, index_minute_bars_by_key)
+        return GATE_NO_TRADE
 
     if any(
         has_market_index_crossed_both_sides_of_previous_close(
@@ -1626,7 +1524,7 @@ def get_strategy_market_decision_gate_status(
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ):
-        return get_chance_gate_status(target_date, index_minute_bars_by_key)
+        return GATE_NO_TRADE
 
     lower_details = [
         get_market_index_strategy_decision_gate_detail(
@@ -1650,10 +1548,10 @@ def get_strategy_market_decision_gate_status(
 
     both_ever_dropped = all(break_dt is not None for _, break_dt in lower_details)
     if not both_ever_dropped:
-        return get_chance_gate_status(target_date, index_minute_bars_by_key)
+        return GATE_NO_TRADE
     if all(status == GATE_LOWER_PASSED for status, _ in lower_details):
         return GATE_LOWER_PASSED
-    return get_chance_gate_status(target_date, index_minute_bars_by_key)
+    return GATE_NO_TRADE
 
 
 def is_industry_market_filter_passed(
@@ -1963,74 +1861,6 @@ def scan_entry_signal_lower(
         entry_price = float(bar['low'])
         if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
             continue
-
-        return bar, entry_price
-    return None
-
-
-def scan_entry_signal_chance(
-    today_bars: list,
-    ystats: dict,
-):
-    """
-    chance 作空進場訊號：
-    1) MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 前若跌破昨低，取最低 low 作為有效昨低
-    2) 自 STRATEGY_START_CHANCE ~ STRATEGY_END_CHANCE 監控分K（含起訖）
-    3) 任一根分K low < 有效昨低
-    4) 進場價 = 觸發分K棒 low
-    """
-    buffer_end_hm = (
-        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
-    )
-    start_hm = STRATEGY_START_CHANCE[0] * 60 + STRATEGY_START_CHANCE[1]
-    end_hm = STRATEGY_END_CHANCE[0] * 60 + STRATEGY_END_CHANCE[1]
-    yesterday_low = float(ystats['low'])
-
-    for bar in today_bars:
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        if hm > buffer_end_hm:
-            continue
-        bar_low = bar.get('low')
-        if bar_low is None:
-            continue
-        yesterday_low = min(yesterday_low, float(bar_low))
-
-    entry_tick = get_tick_size(yesterday_low)
-    entry_probe_price = max(yesterday_low - entry_tick, 0.0)
-    _, limit_down_price = calculate_limit_prices(float(ystats['close']))
-    if should_skip_entry_by_limit_down_zone(
-        entry_probe_price,
-        yesterday_low,
-        limit_down_price,
-    ):
-        return ENTRY_BLOCKED
-
-    time_indexed = []
-    for bar in today_bars:
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        if hm < start_hm or hm > end_hm:
-            continue
-        time_indexed.append(bar)
-
-    for bar in time_indexed:
-        bar_low = float(bar['low'])
-        if bar_low >= yesterday_low:
-            continue
-        entry_price = bar_low
-
-        if should_skip_entry_by_limit_down_zone(
-            entry_price,
-            yesterday_low,
-            limit_down_price,
-        ):
-            return ENTRY_BLOCKED
 
         return bar, entry_price
     return None
@@ -2357,8 +2187,6 @@ def should_include_strategy_in_print_stats(strategy_type: str | None) -> bool:
         return INCLUDE_LOWER_IN_PRINT_STATS
     if strategy_type == STRATEGY_FOLLOW:
         return INCLUDE_FOLLOW_IN_PRINT_STATS
-    if strategy_type == STRATEGY_CHANCE:
-        return INCLUDE_CHANCE_IN_PRINT_STATS
     if strategy_type == STRATEGY_VOLUME_DOWN:
         return INCLUDE_VOLUME_DOWN_IN_PRINT_STATS
     if strategy_type == STRATEGY_LIMIT_DOWN:
@@ -2435,7 +2263,6 @@ def print_daily_optimization_results(
     strategy_type_by_gate_status = {
         GATE_LOWER_PASSED: STRATEGY_LOWER,
         GATE_FOLLOW_PASSED: STRATEGY_FOLLOW,
-        GATE_CHANCE_PASSED: STRATEGY_CHANCE,
         GATE_NO_TRADE: STRATEGY_NO_TRADE,
         GATE_DATA_INCOMPLETE: STRATEGY_NO_TRADE,
     }
@@ -2449,16 +2276,10 @@ def print_daily_optimization_results(
         for current_date, gate_status in market_start_gate_cache.items()
         if gate_status == GATE_FOLLOW_PASSED and INCLUDE_FOLLOW_IN_PRINT_STATS
     }
-    chance_gate_date_keys = {
-        current_date.strftime('%Y-%m-%d')
-        for current_date, gate_status in market_start_gate_cache.items()
-        if gate_status == GATE_CHANCE_PASSED and INCLUDE_CHANCE_IN_PRINT_STATS
-    }
     if (
         summary['total'] == 0
         and not lower_gate_date_keys
         and not follow_gate_date_keys
-        and not chance_gate_date_keys
     ):
         print('固定參數下沒有交易結果。')
         return
@@ -2490,14 +2311,13 @@ def print_daily_optimization_results(
                 STRATEGY_NO_TRADE,
             ),
         )
-        for date_key in lower_gate_date_keys | follow_gate_date_keys | chance_gate_date_keys
+        for date_key in lower_gate_date_keys | follow_gate_date_keys
     }
     daily_group_keys = set(grouped_results) | normal_gate_group_keys
     daily_date_keys = {date_key for date_key, _ in daily_group_keys}
     strategy_order = {
         STRATEGY_LOWER: 0,
         STRATEGY_FOLLOW: 0,
-        STRATEGY_CHANCE: 0,
         STRATEGY_VOLUME_DOWN: 1,
         STRATEGY_LIMIT_DOWN: 2,
         STRATEGY_LIMIT_UP: 2,
@@ -2517,7 +2337,6 @@ def print_daily_optimization_results(
             target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
             market_open_text = ''
             if strategy_type in (
-                STRATEGY_CHANCE,
                 STRATEGY_VOLUME_DOWN,
                 STRATEGY_LIMIT_DOWN,
                 STRATEGY_LIMIT_UP,
@@ -2604,9 +2423,7 @@ def print_daily_optimization_results(
         f'LOWER_LOSS_PER={OPTIMIZE_LOSS_PER_LOWER:.1f}%  '
         f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%  '
         f'FOLLOW_LOSS_PER={OPTIMIZE_LOSS_PER_FOLLOW:.1f}%  '
-        f'FOLLOW_PROFIT_PER={OPTIMIZE_PROFIT_PER_FOLLOW:.1f}%  '
-        f'CHANCE_LOSS_PER={OPTIMIZE_LOSS_PER_CHANCE:.1f}%  '
-        f'CHANCE_PROFIT_PER={OPTIMIZE_PROFIT_PER_CHANCE:.1f}%'
+        f'FOLLOW_PROFIT_PER={OPTIMIZE_PROFIT_PER_FOLLOW:.1f}%'
     )
     print(
         f'SHORT_VOLUME_SUMMARY_CANDLES={SHORT_VOLUME_SUMMARY_CANDLES}  '
@@ -2619,7 +2436,6 @@ def print_daily_optimization_results(
     print(
         f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}  '
         f'INCLUDE_FOLLOW_IN_PRINT_STATS={INCLUDE_FOLLOW_IN_PRINT_STATS}  '
-        f'INCLUDE_CHANCE_IN_PRINT_STATS={INCLUDE_CHANCE_IN_PRINT_STATS}  '
         f'INCLUDE_VOLUME_DOWN_IN_PRINT_STATS={INCLUDE_VOLUME_DOWN_IN_PRINT_STATS}  '
         f'INCLUDE_LIMIT_DOWN_IN_PRINT_STATS={INCLUDE_LIMIT_DOWN_IN_PRINT_STATS}  '
         f'INCLUDE_LIMIT_UP_IN_PRINT_STATS={INCLUDE_LIMIT_UP_IN_PRINT_STATS}'
@@ -2644,11 +2460,6 @@ def print_daily_optimization_results(
     print(
         f'FOLLOW進場時間窗={STRATEGY_START_FOLLOW[0]:02d}:{STRATEGY_START_FOLLOW[1]:02d}~{STRATEGY_END_FOLLOW[0]:02d}:{STRATEGY_END_FOLLOW[1]:02d}    '
         f'FOLLOW出場時間窗={INTRADAY_COMPARE_END_FOLLOW[0]:02d}:{INTRADAY_COMPARE_END_FOLLOW[1]:02d}'
-    )
-    print(
-        f'CHANCE進場時間窗={STRATEGY_START_CHANCE[0]:02d}:{STRATEGY_START_CHANCE[1]:02d}~{STRATEGY_END_CHANCE[0]:02d}:{STRATEGY_END_CHANCE[1]:02d}    '
-        f'昨低緩衝截止={MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}    '
-        f'CHANCE出場時間窗={INTRADAY_COMPARE_END_CHANCE[0]:02d}:{INTRADAY_COMPARE_END_CHANCE[1]:02d}'
     )
     print(
         f'LIMIT_DOWN允許的實際連續跌停天數={SHORT_LIMIT_DOWN_DAYS}  '
@@ -2970,28 +2781,18 @@ def find_trade_candidate_on_date(
         )
         intraday_compare_end = INTRADAY_COMPARE_END_FOLLOW
         trade_side = TRADE_SIDE_LONG
-    elif strategy_type == STRATEGY_CHANCE:
-        pair = scan_entry_signal_chance(
-            today_bars,
-            ystats,
-        )
-        intraday_compare_end = INTRADAY_COMPARE_END_CHANCE
-        trade_side = TRADE_SIDE_SHORT
     else:
         return None
     if pair is None:
         return None
-    if pair == ENTRY_BLOCKED:
-        return None
 
     entry_bar, entry_price = pair
     if (
-        strategy_type != STRATEGY_CHANCE
-        and market_reversal_trigger_dt is not None
+        market_reversal_trigger_dt is not None
         and market_reversal_trigger_dt <= entry_bar['dt']
     ):
         return None
-    if strategy_type != STRATEGY_CHANCE and is_market_reversal_blocked_at_entry(
+    if is_market_reversal_blocked_at_entry(
         target_date,
         entry_bar['dt'],
         index_minute_bars_by_key,
@@ -3106,22 +2907,17 @@ def collect_trade_candidates(
             strategy_type = STRATEGY_LOWER
         elif gate_status == GATE_FOLLOW_PASSED:
             strategy_type = STRATEGY_FOLLOW
-        elif gate_status == GATE_CHANCE_PASSED:
-            strategy_type = STRATEGY_CHANCE
         else:
             continue
 
-        if strategy_type == STRATEGY_CHANCE:
-            market_reversal_trigger_dt = None
-        else:
-            reversal_cache_key = (current_date, strategy_type)
-            if reversal_cache_key not in market_reversal_cache:
-                market_reversal_cache[reversal_cache_key] = find_market_reversal_trigger_dt(
-                    current_date,
-                    index_minute_bars_by_key,
-                    strategy_type,
-                )
-            market_reversal_trigger_dt = market_reversal_cache[reversal_cache_key]
+        reversal_cache_key = (current_date, strategy_type)
+        if reversal_cache_key not in market_reversal_cache:
+            market_reversal_cache[reversal_cache_key] = find_market_reversal_trigger_dt(
+                current_date,
+                index_minute_bars_by_key,
+                strategy_type,
+            )
+        market_reversal_trigger_dt = market_reversal_cache[reversal_cache_key]
 
         candidate = find_trade_candidate_on_date(
             stock_item,
@@ -3233,9 +3029,6 @@ def evaluate_candidates(
         elif strategy_type == STRATEGY_FOLLOW:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_FOLLOW
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_FOLLOW
-        elif strategy_type == STRATEGY_CHANCE:
-            optimize_loss_percent = OPTIMIZE_LOSS_PER_CHANCE
-            optimize_profit_percent = OPTIMIZE_PROFIT_PER_CHANCE
         elif strategy_type == STRATEGY_VOLUME_DOWN:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_VOLUME_DOWN
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_VOLUME_DOWN
@@ -3587,10 +3380,8 @@ def main() -> None:
         strategy_decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
         strategy_start_lower_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
         strategy_start_follow_hm = STRATEGY_START_FOLLOW[0] * 60 + STRATEGY_START_FOLLOW[1]
-        strategy_start_chance_hm = STRATEGY_START_CHANCE[0] * 60 + STRATEGY_START_CHANCE[1]
         strategy_end_lower_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
         strategy_end_follow_hm = STRATEGY_END_FOLLOW[0] * 60 + STRATEGY_END_FOLLOW[1]
-        strategy_end_chance_hm = STRATEGY_END_CHANCE[0] * 60 + STRATEGY_END_CHANCE[1]
         if SHORT_VOLUME_SUMMARY_CANDLES <= 0:
             print('[ERROR] SHORT_VOLUME_SUMMARY_CANDLES 必須大於 0', file=sys.stderr)
             sys.exit(1)
@@ -3657,29 +3448,17 @@ def main() -> None:
         if not (0 <= strategy_start_follow_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_START_FOLLOW 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)
-        if not (0 <= strategy_start_chance_hm <= 23 * 60 + 59):
-            print('[ERROR] STRATEGY_START_CHANCE 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
-            sys.exit(1)
         if not (0 <= strategy_end_lower_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_END_LOWER 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)
         if not (0 <= strategy_end_follow_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_END_FOLLOW 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)
-        if not (0 <= strategy_end_chance_hm <= 23 * 60 + 59):
-            print('[ERROR] STRATEGY_END_CHANCE 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
-            sys.exit(1)
         if strategy_start_lower_hm >= strategy_end_lower_hm:
             print('[ERROR] STRATEGY_START_LOWER 必須早於 STRATEGY_END_LOWER', file=sys.stderr)
             sys.exit(1)
         if strategy_start_follow_hm >= strategy_end_follow_hm:
             print('[ERROR] STRATEGY_START_FOLLOW 必須早於 STRATEGY_END_FOLLOW', file=sys.stderr)
-            sys.exit(1)
-        if strategy_start_chance_hm >= strategy_end_chance_hm:
-            print('[ERROR] STRATEGY_START_CHANCE 必須早於 STRATEGY_END_CHANCE', file=sys.stderr)
-            sys.exit(1)
-        if strategy_start_chance_hm < strategy_decision_hm:
-            print('[ERROR] STRATEGY_START_CHANCE 不可早於 STRATEGY_DECISION', file=sys.stderr)
             sys.exit(1)
         if IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER < 0:
             print('[ERROR] IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER 不可小於 0', file=sys.stderr)
