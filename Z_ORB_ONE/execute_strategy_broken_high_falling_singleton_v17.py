@@ -111,8 +111,10 @@ PROTECT_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 獲利保護後的新停損百分
 VOLUME_DOWN_HISTORICAL_QUERY_SLEEP_SECONDS = 1.5 # 歷史行情限制 60 次/分鐘；逐檔查詢後保守等待 1.5 秒
 VOLUME_DOWN_EVALUATION_SECOND = 10 # VOLUME_DOWN 於 09:00 + SHORT_VOLUME_SUMMARY_CANDLES 分後的第 N 秒判斷
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # VOLUME_DOWN 代表小於 9:5 之前的才取
-SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 本日前 N 根量須小於或等於前一日前 N 根量的此倍數
+SHORT_VOLUME_RATIO_THRESHOLD = 0.4 # 本日前 N 根量須小於或等於前一日前 N 根量的此倍數
 SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD = 2.0 # 前一日前 N 根量須大於或等於前前一日前 N 根量的此倍數
+IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.2 # volume_down 入場門檻：IX0001 即時值須低於前日最後 close 的百分比
+IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.0 # volume_down 入場門檻：IX0043 即時值須低於前日最後 close 的百分比
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:10 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
@@ -155,10 +157,10 @@ IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.15 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
-IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.2 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.8 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 2.0 # IX0001 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.5 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數即時值不可高於昨收指數上漲此百分比後的位置
@@ -691,6 +693,10 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError("MIN_MINUTE_BARS_BEFORE_0930 必須大於 0")
     if not (0 <= VOLUME_DOWN_EVALUATION_SECOND <= 59):
         raise ValueError("VOLUME_DOWN_EVALUATION_SECOND 設定錯誤，需介於 0~59")
+    if IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN < 0:
+        raise ValueError("IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN 不可小於 0")
+    if IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN < 0:
+        raise ValueError("IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN 不可小於 0")
 
 
 def get_volume_down_evaluation_time() -> tuple[int, int, int]:
@@ -703,11 +709,18 @@ def get_volume_down_market_index_gate_results() -> list[Dict[str, Any]]:
         index_config = market_previous_close_indices.get(index_key, {})
         previous_close = index_config.get("previous_close")
         last_index = MARKET_INDEX_STATE.get(index_key, {}).get("last_index")
+        drop_percent = (
+            IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN
+            if index_key == "TWSE:MARKET"
+            else IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN
+        )
         result = {
             "index_key": index_key,
             "symbol": index_config.get("symbol"),
             "previous_close": previous_close,
             "last_index": last_index,
+            "drop_percent": drop_percent,
+            "threshold": None,
             "passed": False,
         }
         try:
@@ -717,10 +730,12 @@ def get_volume_down_market_index_gate_results() -> list[Dict[str, Any]]:
             results.append(result)
             continue
 
+        threshold = previous_close_float * (1 - drop_percent / 100.0)
+        result["threshold"] = threshold
         result["passed"] = (
             previous_close_float > 0
             and last_index_float > 0
-            and last_index_float < previous_close_float
+            and last_index_float < threshold
         )
         results.append(result)
     return results
@@ -732,6 +747,8 @@ def format_volume_down_market_index_gate_results(results: list[Dict[str, Any]]) 
             f"{result['index_key']} {result.get('symbol') or ''} "
             f"last_index={format_market_gate_value(result.get('last_index'))} "
             f"previous_close={format_market_gate_value(result.get('previous_close'))} "
+            f"drop_percent={result.get('drop_percent')} "
+            f"threshold={format_market_gate_value(result.get('threshold'))} "
             f"passed={result.get('passed')}"
         )
         for result in results
@@ -1241,7 +1258,7 @@ def evaluate_volume_down_entries(
             if not all(result.get("passed") for result in market_index_gate_results):
                 print(
                     f"[{symbol_name}] VOLUME_DOWN 不成立："
-                    "市場指數未同步低於昨收 "
+                    "市場指數未同步低於各自門檻 "
                     f"{format_volume_down_market_index_gate_results(market_index_gate_results)}，"
                     "繼續等待一般模式"
                 )

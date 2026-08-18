@@ -59,7 +59,7 @@ LIMIT_DOWN 策略個股入場條件
 1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中，當日直接以第一根分 K 的 open 放空進場。
 
 VOLUME_DOWN 策略個股入場條件
-1. 條件成立後，IX0001、IX0043 在檢核當下均須低於各自昨收。
+1. 條件成立後，IX0001、IX0043 在檢核當下均須低於各自昨收指定百分比後的位置。
 2. 直接以本日第 N+1 根分 K 的 open 作為放空入場價；不限制該 open 必須低於昨收。
 """
 
@@ -118,10 +118,10 @@ ENTRY_BLOCKED = 'ENTRY_BLOCKED'
 INCLUDE_FOLLOW_IN_PRINT_STATS = False
 INCLUDE_CHANCE_IN_PRINT_STATS = False
 
-INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_VOLUME_DOWN_IN_PRINT_STATS = True
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -159,8 +159,10 @@ LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停�
 SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 
 SHORT_VOLUME_SUMMARY_CANDLES = 5 # 計算前N分鐘的交易量
-SHORT_VOLUME_RATIO_THRESHOLD = 0.2 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
+SHORT_VOLUME_RATIO_THRESHOLD = 0.4 # 做空縮量門檻：當日前N分鐘量須小於或等於前一日的此倍數。
 SHORT_VOLUME_PREVIOUS_DAY_RATIO_THRESHOLD = 2.0 # 前一日前N分鐘量須大於或等於前前一日的此倍數。
+IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.2 # volume_down 入場門檻：IX0001 當下 close 須低於前日最後 close 的百分比
+IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN = 0.0 # volume_down 入場門檻：IX0043 當下 close 須低於前日最後 close 的百分比
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間；也作為 chance 有效昨低緩衝截止，包含此時間
 
@@ -192,6 +194,7 @@ IX0001_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 2.0 # IX0001 啟動門檻：STRA
 IX0001_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 1.6 # IX0001 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
 IX0043_STRATEGY_DECISION_RAISE_PERCENT_FOLLOW = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前 high 需高於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW = 0.5 # IX0043 回跌失效門檻：突破後 low 不可回到前日最後 close 上方此百分比內
+
 # 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
 INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
 INDUSTRY_MARKET_FILTER_MIN_DOWN_PERCENT = 0 # follow 入場條件成立後，產業指數當下 close 必須嚴格大於昨收指數下跌此百分比後的位置
@@ -1700,7 +1703,7 @@ def are_market_indices_below_previous_close_at_entry(
     entry_dt: datetime,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> bool:
-    """檢查入場當下 IX0001、IX0043 指數 close 是否均低於各自昨收；缺資料視為不通過。"""
+    """檢查入場當下 IX0001、IX0043 是否均低於各自昨收指定百分比；缺資料視為不通過。"""
     for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
         bars_by_date = index_minute_bars_by_key.get(index_key, {})
         previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
@@ -1715,7 +1718,12 @@ def are_market_indices_below_previous_close_at_entry(
         except (TypeError, ValueError):
             return False
 
-        if index_close >= previous_close_value:
+        if index_key == 'TWSE:MARKET':
+            drop_percent = IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN
+        else:
+            drop_percent = IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN
+        threshold = previous_close_value * (1 - drop_percent / 100.0)
+        if index_close >= threshold:
             return False
     return True
 
@@ -3696,6 +3704,12 @@ def main() -> None:
             sys.exit(1)
         if IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW < 0:
             print('[ERROR] IX0043_STRATEGY_DECISION_DECLINE_PERCENT_FOLLOW 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN < 0:
+            print('[ERROR] IX0001_ENTRY_DROP_PERCENT_VOLUME_DOWN 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN < 0:
+            print('[ERROR] IX0043_ENTRY_DROP_PERCENT_VOLUME_DOWN 不可小於 0', file=sys.stderr)
             sys.exit(1)
         best_window_result = evaluate_one_window()
         builtins.print()
