@@ -277,6 +277,15 @@ def replace_top_level_function(source: str, function_name: str, replacement: str
     raise ValueError(f"Cannot find function: {function_name}")
 
 
+def has_top_level_function(source: str, function_name: str) -> bool:
+    tree = ast.parse(source)
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+        for node in tree.body
+    )
+
+
 def replace_once_required(source: str, old: str, new: str, description: str) -> str:
     """Replace one Docker-specific hook, failing instead of silently dropping behavior."""
     occurrences = source.count(old)
@@ -359,11 +368,12 @@ def transform_singleton_to_docker(source: str) -> str:
         count=1,
     )
 
-    source = replace_top_level_function(
-        source,
-        "persist_selected_stocks_to_stock_data",
-        DOCKER_PERSIST_SELECTED_STOCKS,
-    )
+    if has_top_level_function(source, "persist_selected_stocks_to_stock_data"):
+        source = replace_top_level_function(
+            source,
+            "persist_selected_stocks_to_stock_data",
+            DOCKER_PERSIST_SELECTED_STOCKS,
+        )
     source = replace_top_level_function(
         source,
         "persist_entry_mode_to_stock_data",
