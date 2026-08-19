@@ -62,7 +62,7 @@ ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 
 ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
 ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
-OPTIMIZE_PROFIT_PER_LOWER = 6.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 9.0 # limit down 停利百分比(%)
@@ -71,14 +71,17 @@ OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
-PROTECT_PROFIT_PER = 2.5 # 觸發調整停利百分比
-PROTECT_LOSS_PER = 1.5 # 獲利保護後的新停損百分比
+PROTECT_PROFIT_SWITCH_LOWER = False # False 時 lower 不啟動獲利保護；True 維持原本獲利保護
+PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發獲利保護百分比
+PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
 
+PROTECT_PROFIT_SWITCH_LIMIT_UP = False # False 時 limit up 不啟動獲利保護；True 維持原本獲利保護
 PROTECT_PROFIT_PER_LIMIT_UP = 5.0 # limit up 觸發獲利保護百分比
 PROTECT_LOSS_PER_LIMIT_UP = 3.0 # limit up 獲利保護後的新停損百分比
 
-PROTECT_PROFIT_PER_LIMIT_DOWN = 4.0 # limit down 觸發獲利保護百分比
-PROTECT_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 獲利保護後的新停損百分比
+PROTECT_PROFIT_SWITCH_LIMIT_DOWN = False # False 時 limit down 不啟動獲利保護；True 維持原本獲利保護
+PROTECT_PROFIT_PER_LIMIT_DOWN = 4.5 # limit down 觸發獲利保護百分比
+PROTECT_LOSS_PER_LIMIT_DOWN = 2.5 # limit down 獲利保護後的新停損百分比
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
@@ -594,12 +597,15 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
 
-    _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
-    if state.get("side") == TRADE_SIDE_LONG:
-        protect_profit_price = entry_price * (1 + protect_profit_per / 100.0)
+    if is_protect_profit_enabled(state):
+        _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
+        if state.get("side") == TRADE_SIDE_LONG:
+            protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
+        else:
+            protect_profit_text = f"{entry_price * (1 - protect_profit_per / 100.0):.2f}"
     else:
-        protect_profit_price = entry_price * (1 - protect_profit_per / 100.0)
-    print(f"停損：{flat_price:.2f}，保本：{protect_profit_price:.2f}，停利：{profit_price:.2f}")
+        protect_profit_text = "停用"
+    print(f"停損：{flat_price:.2f}，保本：{protect_profit_text}，停利：{profit_price:.2f}")
 
 
 def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
@@ -1829,7 +1835,15 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
         return PROTECT_LOSS_PER_LIMIT_DOWN, PROTECT_PROFIT_PER_LIMIT_DOWN
     if is_limit_up_strategy(state):
         return PROTECT_LOSS_PER_LIMIT_UP, PROTECT_PROFIT_PER_LIMIT_UP
-    return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
+    return PROTECT_LOSS_PER_LOWER, PROTECT_PROFIT_PER_LOWER
+
+
+def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
+    if is_limit_down_strategy(state):
+        return PROTECT_PROFIT_SWITCH_LIMIT_DOWN
+    if is_limit_up_strategy(state):
+        return PROTECT_PROFIT_SWITCH_LIMIT_UP
+    return PROTECT_PROFIT_SWITCH_LOWER
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
@@ -2309,6 +2323,9 @@ def mark_exit_order_pending(state: Dict[str, Any], order_no: str, exit_reason: s
 
 def _protect_profit_stop(state: Dict[str, Any]):
     """獲利達標後，將 flat_price 推進到至少保住指定獲利的位置。"""
+    if not is_protect_profit_enabled(state):
+        return
+
     side = state.get("side")
     if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         return
