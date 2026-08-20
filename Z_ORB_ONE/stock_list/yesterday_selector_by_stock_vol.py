@@ -11,6 +11,9 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR, ROUND_CEILING
 
 ATR_PERIOD = 14
 
+TSE_LIMIT = 200
+OTC_LIMIT = 100
+
 PRICE_RANGE_UP = 300
 PRICE_RANGE_DOWN = 50
 
@@ -21,7 +24,6 @@ OUTPUT_FILE = CURRENT_DIR / "yesterday_selector_result.txt"
 ST_DB_DIR = CURRENT_DIR / "st_db"
 CONFIG_PATH = PROJECT_DIR / "config.ini"
 PRINT_BUFFER: List[str] = []
-
 
 def reset_output_file() -> None:
     PRINT_BUFFER.clear()
@@ -318,9 +320,6 @@ def check_orb_filters_for_symbols(realtime_sdk: EsunMarketdata, symbols) -> List
 
 def get_top_volume_symbols(realtime_sdk):
     rest_stock = realtime_sdk.rest_client.stock
-
-    TSE_LIMIT = 200
-    OTC_LIMIT = 100
 
     """
     取得台股成交量前 N 名股票清單

@@ -41,9 +41,6 @@ STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，
 STRATEGY_START_FOLLOW = (9, 44) # follow 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_CHANCE = (9, 44) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
-CHECK_START_LIMIT_DOWN = (9, 5)
-CHECK_START_LIMIT_UP = (9, 5)
-
 def normalize_config_paths(config: ConfigParser):
     cert_path = config.get("Cert", "Path", fallback="")
     if cert_path and not os.path.isabs(cert_path):
@@ -555,7 +552,7 @@ def main():
             "label": item[0],
             "atr_value": item[7],
             "is_index": False,
-            "strategy_start_times": {CHECK_START_LIMIT_UP},
+            "strategy_start_times": (),
         }
         for item in selected_limit_up_stocks
     )
@@ -565,7 +562,7 @@ def main():
             "label": item[0],
             "atr_value": item[7],
             "is_index": False,
-            "strategy_start_times": {CHECK_START_LIMIT_DOWN},
+            "strategy_start_times": (),
         }
         for item in selected_limit_down_stocks
     )
