@@ -14,7 +14,7 @@ SHORT_LIMIT_DOWN_DAYS = [1] # 分入 selected_limit_down_stocks 的實際連續�
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
-MIN_REPEAT_COUNT = 11 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
+MIN_REPEAT_COUNT = 12 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 EXCLUDED_INDUSTRY_CODES: list[str] = ["17"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"

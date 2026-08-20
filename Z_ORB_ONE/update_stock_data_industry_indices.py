@@ -316,6 +316,18 @@ def selected_industry_keys(stocks: Iterable[StockTuple]) -> List[IndexKey]:
     return keys
 
 
+def selected_industry_map_keys(
+    stocks: Iterable[StockTuple],
+    exchanges: set[str] | None = None,
+) -> List[str]:
+    keys: List[str] = []
+    for exchange, industry_code in selected_industry_keys(stocks):
+        if exchanges is not None and exchange not in exchanges:
+            continue
+        keys.append(f"{exchange}:{industry_code}")
+    return keys
+
+
 def get_index_entry(
     industry_map: Dict[str, Any],
     exchange: str,
@@ -379,8 +391,13 @@ def merge_relevant_indices(
     existing_indices: Dict[str, Dict[str, Any]],
     refreshed_indices: Dict[str, Dict[str, Any]],
     target_keys: Iterable[str],
+    preserved_existing_keys: Iterable[str] = (),
 ) -> Dict[str, Dict[str, Any]]:
-    relevant_keys = set(target_keys) | set(RESERVE_MARKET_INDEX_KEYS)
+    relevant_keys = (
+        set(target_keys)
+        | set(preserved_existing_keys)
+        | set(RESERVE_MARKET_INDEX_KEYS)
+    )
     result: Dict[str, Dict[str, Any]] = {}
 
     for map_key in sorted(relevant_keys):
@@ -390,6 +407,26 @@ def merge_relevant_indices(
             result[map_key] = existing_indices[map_key]
 
     return result
+
+
+def build_targets_from_existing_indices(
+    existing_indices: Dict[str, Dict[str, Any]],
+    map_keys: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    targets: Dict[str, Dict[str, Any]] = {}
+    for map_key in map_keys:
+        existing_index = existing_indices.get(map_key)
+        if not existing_index or not existing_index.get("symbol"):
+            continue
+        targets[map_key] = {
+            "exchange": existing_index.get("exchange"),
+            "industry_code": existing_index.get("industry_code"),
+            "industry_name": existing_index.get("industry_name"),
+            "symbol": existing_index.get("symbol"),
+            "name": existing_index.get("name"),
+            "source": existing_index.get("source", "historical.candles"),
+        }
+    return targets
 
 
 def parse_api_date(value: str | None) -> date | None:
@@ -632,6 +669,34 @@ def print_missing_stocks(missing_stocks: Dict[IndexKey, List[str]]) -> None:
         log(f"  {exchange}:{industry_code} -> {preview}")
 
 
+def get_empty_index_data_exchanges(
+    twse_indices: Dict[str, Any],
+    tpex_indices: Dict[str, Any],
+) -> List[str]:
+    empty_exchanges: List[str] = []
+    if twse_indices.get("data") == []:
+        empty_exchanges.append("TWSE")
+    if tpex_indices.get("data") == []:
+        empty_exchanges.append("TPEX")
+    return empty_exchanges
+
+
+def log_index_data_refresh_mode(
+    exchange: str,
+    indices: Dict[str, Any],
+    empty_index_data_exchanges: Iterable[str],
+) -> None:
+    data_count = len(indices.get("data", []))
+    if exchange in empty_index_data_exchanges:
+        log(
+            f"[WARN] {exchange} 即時取回指數 JSON data 為空，"
+            "後續將留用候選股票命中的既有產業別指數資料"
+        )
+        return
+
+    log(f"[INFO] {exchange} 使用即時取回指數 JSON 更新產業類股對應，data_count={data_count}")
+
+
 def refresh_industry_map_files(
     sdk: EsunMarketdata,
     twse_output: Path,
@@ -648,6 +713,9 @@ def refresh_industry_map_files(
     write_json(tpex_output.resolve(), tpex_indices)
 
     industry_map = build_industry_index_map(twse_indices, tpex_indices)
+    empty_index_data_exchanges = get_empty_index_data_exchanges(twse_indices, tpex_indices)
+    if empty_index_data_exchanges:
+        industry_map["empty_index_data_exchanges"] = empty_index_data_exchanges
     write_json(industry_map_output.resolve(), industry_map)
 
     log(f"[INFO] 已寫入 {twse_output.resolve()}")
@@ -655,6 +723,13 @@ def refresh_industry_map_files(
     log(f"[INFO] 已寫入 {industry_map_output.resolve()}")
     log(f"[INFO] TWSE 指數數量: {len(twse_indices.get('data', []))}")
     log(f"[INFO] TPEx 指數數量: {len(tpex_indices.get('data', []))}")
+    log_index_data_refresh_mode("TWSE", twse_indices, empty_index_data_exchanges)
+    log_index_data_refresh_mode("TPEX", tpex_indices, empty_index_data_exchanges)
+    if empty_index_data_exchanges:
+        log(
+            "[WARN] 指數清單 data 為空，將保留候選股票命中的既有產業別資料: "
+            + ", ".join(empty_index_data_exchanges)
+        )
     print_industry_map_summary(industry_map)
     return industry_map
 
@@ -740,6 +815,26 @@ def main() -> int:
             )
 
         targets, missing_stocks = build_index_targets(target_stocks, industry_map)
+        empty_index_exchanges = set(industry_map.get("empty_index_data_exchanges") or [])
+        preserved_existing_keys = selected_industry_map_keys(
+            target_stocks,
+            empty_index_exchanges,
+        )
+        fallback_targets = build_targets_from_existing_indices(
+            existing_indices,
+            preserved_existing_keys,
+        )
+        if fallback_targets:
+            targets.update(fallback_targets)
+            missing_stocks = {
+                key: names
+                for key, names in missing_stocks.items()
+                if f"{key[0]}:{key[1]}" not in fallback_targets
+            }
+            log(
+                "[WARN] 即時指數清單無資料，改用既有 symbol 更新候選股票產業別: "
+                + ", ".join(sorted(fallback_targets))
+            )
         if not targets:
             raise ValueError("候選股票沒有任何可更新的產業類股指數。")
 
@@ -775,7 +870,17 @@ def main() -> int:
             if map_key in index_state
         }
         refreshed_indices = build_market_previous_close_indices(received_targets, index_state)
-        updated_indices = merge_relevant_indices(existing_indices, refreshed_indices, targets)
+        if preserved_existing_keys:
+            log(
+                "[WARN] 既有候選股票產業別已納入更新/保留範圍: "
+                + ", ".join(sorted(preserved_existing_keys))
+            )
+        updated_indices = merge_relevant_indices(
+            existing_indices,
+            refreshed_indices,
+            targets,
+            preserved_existing_keys,
+        )
 
         log(json.dumps(updated_indices, ensure_ascii=False, indent=2))
         if args.dry_run:
