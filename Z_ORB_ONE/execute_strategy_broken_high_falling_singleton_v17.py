@@ -86,9 +86,9 @@ PROTECT_LOSS_PER_LIMIT_DOWN = 2.5 # limit down 獲利保護後的新停損百分
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6)  # 指數位於昨收兩側的 NO_TRADE 檢查起始時間（含）
-STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 15)  # IX0001 早盤須先向下突破 LOWER 門檻的截止時間（含）
-STRATEGY_DECISION = (9, 43)  # 市場模式判斷截止時間，不含此時間
-ENTRY_CHECK_START_TIME_LOWER = (9, 44)  # lower 進場檢核開始時間（含）
+STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21)  # IX0001 早盤須先向下突破 LOWER 門檻的截止時間（含）
+STRATEGY_DECISION = (9, 31)  # 市場模式判斷截止時間，不含此時間
+ENTRY_CHECK_START_TIME_LOWER = (9, 32)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 
 FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間

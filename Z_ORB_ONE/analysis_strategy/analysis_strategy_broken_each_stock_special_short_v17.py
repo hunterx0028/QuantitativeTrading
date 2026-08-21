@@ -106,8 +106,8 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 
-LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
-SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
+LONG_LIMIT_UP_DAYS = [99] # limit up 策略允許的「實際」連續收漲停天數
+SHORT_LIMIT_DOWN_DAYS = [99] # limit down 策略允許的「實際」連續收跌停天數
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間，包含此時間
 STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 15) # IX0001 早盤須先向下突破 LOWER 門檻的截止分K棒，包含此時間
