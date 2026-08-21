@@ -36,9 +36,9 @@ from Z_ORB_ONE.stock_data import (
 )
 
 
-SPECIFIED_DATE = "20260813"  # YYYYMMDD；空字串代表台北時區今日
+SPECIFIED_DATE = ""  # YYYYMMDD；空字串代表台北時區今日
 DISPLAY_INDEX_CODES = ["IX0001", "IX0043"]  # 依序以分頁顯示上市、上櫃指數
-DISPLAY_STOCK_CODES = ["6173"]  # 要額外顯示的 4 位數股票代碼；空字串會被忽略，等同空陣列
+DISPLAY_STOCK_CODES = [""]  # 要額外顯示的 4 位數股票代碼；空字串會被忽略，等同空陣列
 
 
 def normalize_stock_code(stock_code: str) -> str:
