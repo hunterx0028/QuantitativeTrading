@@ -110,9 +110,9 @@ LONG_LIMIT_UP_DAYS = [99] # limit up 策略允許的「實際」連續收漲停�
 SHORT_LIMIT_DOWN_DAYS = [99] # limit down 策略允許的「實際」連續收跌停天數
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間，包含此時間
-STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 15) # IX0001 早盤須先向下突破 LOWER 門檻的截止分K棒，包含此時間
-STRATEGY_DECISION = (9, 43) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
-STRATEGY_START_LOWER = (9, 44) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21) # IX0001 早盤須先向下突破 LOWER 門檻的截止分K棒，包含此時間
+STRATEGY_DECISION = (9, 31) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
+STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
 INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
