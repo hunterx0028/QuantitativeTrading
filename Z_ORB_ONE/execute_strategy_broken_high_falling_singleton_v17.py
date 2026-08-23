@@ -59,8 +59,8 @@ TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
-ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
-ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
+ENABLE_LIMIT_UP_STRATEGY = False  # False 時，selected_limit_up_stocks 會強制視為空陣列
+ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
@@ -101,6 +101,7 @@ ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
@@ -580,6 +581,12 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 STRATEGY_DECISION"
         )
+    if LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < 0:
+        raise ValueError(
+            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0"
+        )
+
+
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
     mode = get_current_entry_mode() if entry_mode is None else entry_mode
     if mode == ENTRY_MODE_NO_TRADE:
@@ -1168,7 +1175,68 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
     return result
 
 
-def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
+def calculate_percent(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return (numerator / denominator) * 100.0
+
+
+def summarize_lower_strategy_decision_candidates(
+    states: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    candidate_count = 0
+    decline_count = 0
+    data_missing_count = 0
+
+    for state in states.values():
+        if is_independent_strategy(state):
+            continue
+        candidate_count += 1
+
+        try:
+            yesterday_close = float(state.get("yesterday_close_price"))
+            limit_down = float(state.get("limit_down_price"))
+            last_price = float(state.get("last_price"))
+        except (TypeError, ValueError):
+            data_missing_count += 1
+            continue
+
+        if yesterday_close <= 0 or limit_down <= 0 or last_price <= 0:
+            data_missing_count += 1
+            continue
+
+        entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+            yesterday_close,
+            limit_down,
+            LOWER_ENTRY_RANGE_START_PERCENT,
+            LOWER_ENTRY_RANGE_END_PERCENT,
+        )
+        if is_price_in_entry_range(last_price, entry_lower_bound, entry_upper_bound):
+            decline_count += 1
+
+    decline_percent = calculate_percent(decline_count, candidate_count)
+    return {
+        "candidate_count": candidate_count,
+        "decline_count": decline_count,
+        "decline_percent": decline_percent,
+        "data_missing_count": data_missing_count,
+        "threshold": LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
+        "passed": decline_percent > LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
+    }
+
+
+def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
+    return (
+        f"候選={summary.get('candidate_count', 0)} "
+        f"下降={summary.get('decline_count', 0)} "
+        f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}% "
+        f"threshold={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}%"
+    )
+
+
+def decide_entry_mode_by_market_gate(
+    states: Dict[str, Dict[str, Any]],
+) -> tuple[int, list[Dict[str, Any]]]:
     gate_results = [
         get_market_strategy_decision_gate_result(index_key)
         for index_key in MARKET_GATE_INDEX_KEYS
@@ -1221,6 +1289,14 @@ def decide_entry_mode_by_market_gate() -> tuple[int, list[Dict[str, Any]]]:
     lower_mode_passed = all(result["lower_passed"] for result in gate_results)
 
     if lower_mode_passed:
+        lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
+        if not lower_decision_summary["passed"]:
+            print(
+                "[MODE] LOWER 個股池下降比例不足："
+                f"{format_lower_decision_summary(lower_decision_summary)}，"
+                "判定為 NO_TRADE"
+            )
+            return ENTRY_MODE_NO_TRADE, gate_results
         return ENTRY_MODE_LOWER, gate_results
     return fallback_no_trade("LOWER 未成立")
 
@@ -1272,9 +1348,15 @@ def format_market_gate_age(value: Any) -> str:
         return str(value)
 
 
-def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]]) -> None:
+def print_entry_mode_decision(
+    entry_mode: int,
+    gate_results: list[Dict[str, Any]],
+    states: Dict[str, Dict[str, Any]],
+) -> None:
     mode_text = get_entry_mode_text(entry_mode)
     print(f"[MODE] STRATEGY_DECISION 模式判斷：{mode_text}")
+    lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
+    print(f"[MODE] LOWER 個股池：{format_lower_decision_summary(lower_decision_summary)}")
     for result in gate_results:
         if result["index_key"] != "TWSE:MARKET":
             continue
@@ -2899,9 +2981,9 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             print(f"⏰ 模式判斷時間！目前時間：{now_local.strftime('%H:%M:%S')}")
             strategy_decision_announced = True
             if not entry_mode_decided:
-                entry_mode, gate_results = decide_entry_mode_by_market_gate()
+                entry_mode, gate_results = decide_entry_mode_by_market_gate(states)
                 apply_entry_mode_to_states(states, entry_mode)
-                print_entry_mode_decision(entry_mode, gate_results)
+                print_entry_mode_decision(entry_mode, gate_results, states)
                 entry_mode_decided = True
                 if entry_mode == ENTRY_MODE_LOWER and not ENABLE_ENTRY_MODE_LOWER:
                     print(
