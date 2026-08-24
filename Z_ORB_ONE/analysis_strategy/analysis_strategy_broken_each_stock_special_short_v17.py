@@ -28,10 +28,14 @@ LOWER 模式個股入場條件
 2. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
-1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中，當日直接以第一根分 K 的 open 做多進場。
+1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中。
+2. 當日指定時間後首根分 K 的前一根 close，須落在「昨收到漲停價」之 LIMIT_UP_ENTRY_RANGE_START_PERCENT～LIMIT_UP_ENTRY_RANGE_END_PERCENT 區間內。
+3. 以上述指定時間後首根分 K 的 open 做多進場。
 
 LIMIT_DOWN 策略個股入場條件
-1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中，當日直接以第一根分 K 的 open 放空進場。
+1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中。
+2. 當日指定時間後首根分 K 的前一根 close，須落在「昨收到跌停價」之 LIMIT_DOWN_ENTRY_RANGE_START_PERCENT～LIMIT_DOWN_ENTRY_RANGE_END_PERCENT 區間內。
+3. 以上述指定時間後首根分 K 的 open 放空進場。
 
 """
 
@@ -83,8 +87,8 @@ TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
 INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -97,18 +101,25 @@ MIN_MINUTE_BARS_BEFORE_0930 = 20
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 9.0 # limit down 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 7.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
-LONG_LIMIT_UP_DAYS = [99] # limit up 策略允許的「實際」連續收漲停天數
-SHORT_LIMIT_DOWN_DAYS = [99] # limit down 策略允許的「實際」連續收跌停天數
+LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
+LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
+LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
+LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 使用此時間後首根分 K open 入場
+
+SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
+LIMIT_DOWN_ENTRY_RANGE_START_PERCENT = 10.0 # limit down 入場價距昨收到跌停的起始百分比，可以為 10
+LIMIT_DOWN_ENTRY_RANGE_END_PERCENT = 60.0 # limit down 入場價距昨收到跌停的結束百分比，可以為 60
+LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 使用此時間後首根分 K open 入場
 
 MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間，包含此時間
 STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21) # IX0001 早盤須先向下突破 LOWER 門檻的截止分K棒，包含此時間
@@ -1432,6 +1443,37 @@ def find_first_bar(today_bars: list):
     return first_bar, first_idx
 
 
+def find_first_bar_at_or_after_time(today_bars: list, target_time: tuple[int, int]):
+    """找指定時間後最早的分 K；不存在回傳 (None, -1)。"""
+    target_minutes = target_time[0] * 60 + target_time[1]
+    best_idx = -1
+    best_bar = None
+    best_dt = None
+    for idx, bar in enumerate(today_bars):
+        dtv = bar.get('dt')
+        if dtv is None:
+            continue
+        bar_minutes = dtv.hour * 60 + dtv.minute
+        if bar_minutes < target_minutes:
+            continue
+        if best_dt is None or dtv < best_dt:
+            best_dt = dtv
+            best_idx = idx
+            best_bar = bar
+    if best_bar is None:
+        return None, -1
+    return best_bar, best_idx
+
+
+def find_previous_bar_with_close(today_bars: list, entry_idx: int):
+    """從入場 K 往前找第一根具備 close 的分 K；不存在回傳 None。"""
+    for idx in range(entry_idx - 1, -1, -1):
+        bar = today_bars[idx]
+        if bar.get('close') is not None:
+            return bar
+    return None
+
+
 def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
     """09:30 前分 K 少於設定根數者視為延遲撮合股票，排除當日交易。"""
     before_0930_count = sum(
@@ -1888,20 +1930,6 @@ def print_daily_optimization_results(
                     f'下降={decline_count}  '
                     f'{decline_percent:.2f}%  '
                 )
-            if strategy_type in (
-                STRATEGY_LIMIT_DOWN,
-                STRATEGY_LIMIT_UP,
-            ):
-                entry_dt_values = [row[2] for row in day_rows if row[2] is not None]
-                market_open_entry_dt = min(entry_dt_values) if entry_dt_values else None
-                market_open_text = (
-                    build_market_open_summary_at_entry(
-                        target_date,
-                        market_open_entry_dt,
-                        index_minute_bars_by_key,
-                    )
-                    + '  '
-                )
             print(
                 f'{format_date_with_weekday(date_key)} '
                 f'模式={strategy_type}  '
@@ -1969,6 +1997,12 @@ def print_daily_optimization_results(
         f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%'
     )
     print(
+        f'LIMIT_UP_ENTRY_RANGE={LIMIT_UP_ENTRY_RANGE_START_PERCENT:.1f}%~{LIMIT_UP_ENTRY_RANGE_END_PERCENT:.1f}%'
+    )
+    print(
+        f'LIMIT_DOWN_ENTRY_RANGE={LIMIT_DOWN_ENTRY_RANGE_START_PERCENT:.1f}%~{LIMIT_DOWN_ENTRY_RANGE_END_PERCENT:.1f}%'
+    )
+    print(
         f'MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
         f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:'
         f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}  '
@@ -1983,12 +2017,14 @@ def print_daily_optimization_results(
     )
     print(
         f'LIMIT_DOWN允許的實際連續跌停天數={SHORT_LIMIT_DOWN_DAYS}  '
-        f'LIMIT_DOWN進場=第一根分K open    '
+        f'LIMIT_DOWN進場=指定時間後首根分K open  '
+        f'LIMIT_DOWN_ENTRY_TIME={LIMIT_DOWN_ENTRY_TIME[0]:02d}:{LIMIT_DOWN_ENTRY_TIME[1]:02d}    '
         f'LIMIT_DOWN出場時間窗={INTRADAY_COMPARE_END_LIMIT_DOWN[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_DOWN[1]:02d}'
     )
     print(
         f'LIMIT_UP允許的實際連續漲停天數={LONG_LIMIT_UP_DAYS}  '
-        f'LIMIT_UP進場=第一根分K open    '
+        f'LIMIT_UP進場=指定時間後首根分K open  '
+        f'LIMIT_UP_ENTRY_TIME={LIMIT_UP_ENTRY_TIME[0]:02d}:{LIMIT_UP_ENTRY_TIME[1]:02d}    '
         f'LIMIT_UP出場時間窗={INTRADAY_COMPARE_END_LIMIT_UP[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_UP[1]:02d}'
     )
 
@@ -2042,24 +2078,43 @@ def find_limit_candidate_on_date(
     previous_close = float(ystats['close'])
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
-    first_bar, _ = find_first_bar(today_ordered)
-    pair = None
-
     if strategy_type == STRATEGY_LIMIT_UP:
-        if first_bar is not None and first_bar.get('open') is not None:
-            pair = first_bar, float(first_bar['open'])
+        entry_bar, entry_idx = find_first_bar_at_or_after_time(today_ordered, LIMIT_UP_ENTRY_TIME)
+        previous_entry_bar = find_previous_bar_with_close(today_ordered, entry_idx)
+        if previous_entry_bar is None:
+            return None
+        entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+            previous_close,
+            limit_up_price,
+            LIMIT_UP_ENTRY_RANGE_START_PERCENT,
+            LIMIT_UP_ENTRY_RANGE_END_PERCENT,
+        )
+        previous_entry_close = float(previous_entry_bar['close'])
+        if not is_price_in_entry_range(previous_entry_close, entry_lower_bound, entry_upper_bound):
+            return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_UP
         trade_side = TRADE_SIDE_LONG
     else:
-        if first_bar is not None and first_bar.get('open') is not None:
-            pair = first_bar, float(first_bar['open'])
+        entry_bar, entry_idx = find_first_bar_at_or_after_time(today_ordered, LIMIT_DOWN_ENTRY_TIME)
+        previous_entry_bar = find_previous_bar_with_close(today_ordered, entry_idx)
+        if previous_entry_bar is None:
+            return None
+        entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+            previous_close,
+            limit_down_price,
+            LIMIT_DOWN_ENTRY_RANGE_START_PERCENT,
+            LIMIT_DOWN_ENTRY_RANGE_END_PERCENT,
+        )
+        previous_entry_close = float(previous_entry_bar['close'])
+        if not is_price_in_entry_range(previous_entry_close, entry_lower_bound, entry_upper_bound):
+            return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_DOWN
         trade_side = TRADE_SIDE_SHORT
 
-    if pair is None:
+    if entry_bar is None or entry_bar.get('open') is None:
         return None
 
-    entry_bar, entry_price = pair
+    entry_price = float(entry_bar['open'])
     candidate = build_trade_candidate(
         stock_name,
         get_stock_industry_code(stock_item),
@@ -2487,6 +2542,8 @@ def main() -> None:
         args = parse_args()
         raw_stock_list = STOCK_LIST or selected_stocks
         stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
+        limit_up_stock_list_for_data = filter_stocks_by_excluded_industries(selected_limit_up_stocks)
+        limit_down_stock_list_for_data = filter_stocks_by_excluded_industries(selected_limit_down_stocks)
         limit_up_stock_list = filter_stocks_by_excluded_industries(
             selected_limit_up_stocks if INCLUDE_LIMIT_UP_IN_PRINT_STATS else []
         )
@@ -2495,8 +2552,8 @@ def main() -> None:
         )
         analysis_stock_list = dedupe_stock_list([
             stock_list,
-            limit_up_stock_list,
-            limit_down_stock_list,
+            limit_up_stock_list_for_data,
+            limit_down_stock_list_for_data,
         ])
         ensure_backtest_industry_index_metadata(analysis_stock_list)
         excluded_stock_count = len(raw_stock_list) - len(stock_list)
@@ -2662,6 +2719,28 @@ def main() -> None:
             or len(set(LONG_LIMIT_UP_DAYS)) != len(LONG_LIMIT_UP_DAYS)
         ):
             print('[ERROR] LONG_LIMIT_UP_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
+            sys.exit(1)
+        if (
+            not isinstance(LIMIT_UP_ENTRY_TIME, tuple)
+            or len(LIMIT_UP_ENTRY_TIME) != 2
+            or any(type(value) is not int for value in LIMIT_UP_ENTRY_TIME)
+        ):
+            print('[ERROR] LIMIT_UP_ENTRY_TIME 必須是 (時, 分) tuple', file=sys.stderr)
+            sys.exit(1)
+        limit_up_entry_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
+        if not (0 <= limit_up_entry_hm <= 23 * 60 + 59):
+            print('[ERROR] LIMIT_UP_ENTRY_TIME 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
+            sys.exit(1)
+        if (
+            not isinstance(LIMIT_DOWN_ENTRY_TIME, tuple)
+            or len(LIMIT_DOWN_ENTRY_TIME) != 2
+            or any(type(value) is not int for value in LIMIT_DOWN_ENTRY_TIME)
+        ):
+            print('[ERROR] LIMIT_DOWN_ENTRY_TIME 必須是 (時, 分) tuple', file=sys.stderr)
+            sys.exit(1)
+        limit_down_entry_hm = LIMIT_DOWN_ENTRY_TIME[0] * 60 + LIMIT_DOWN_ENTRY_TIME[1]
+        if not (0 <= limit_down_entry_hm <= 23 * 60 + 59):
+            print('[ERROR] LIMIT_DOWN_ENTRY_TIME 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)
         if not (0 <= strategy_decision_hm <= 23 * 60 + 59):
             print('[ERROR] STRATEGY_DECISION 設定錯誤，需介於 00:00~23:59', file=sys.stderr)

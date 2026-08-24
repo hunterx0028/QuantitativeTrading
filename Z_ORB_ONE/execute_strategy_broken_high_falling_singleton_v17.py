@@ -59,16 +59,16 @@ TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，STRATEGY_DECISION 判定為 LOWER 後立即結束程序
-ENABLE_LIMIT_UP_STRATEGY = False  # False 時，selected_limit_up_stocks 會強制視為空陣列
-ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
+ENABLE_LIMIT_UP_STRATEGY = True  # False 時，selected_limit_up_stocks 會強制視為空陣列
+ENABLE_LIMIT_DOWN_STRATEGY = True  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 9.0 # limit down 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 7.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 10.0 # limit up 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 PROTECT_PROFIT_SWITCH_LOWER = False # False 時 lower 不啟動獲利保護；True 維持原本獲利保護
@@ -102,6 +102,14 @@ ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+
+LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
+LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
+LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 使用此時間後首輪 quote lastPrice 檢查入場
+
+LIMIT_DOWN_ENTRY_RANGE_START_PERCENT = 10.0 # limit down 入場價距昨收到跌停的起始百分比，可以為 10
+LIMIT_DOWN_ENTRY_RANGE_END_PERCENT = 60.0 # limit down 入場價距昨收到跌停的結束百分比，可以為 60
+LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 使用此時間後首輪 quote lastPrice 檢查入場
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
@@ -550,6 +558,19 @@ def wait_until_main_start_time() -> None:
     print(f"⏰ 主程序開始執行！目前時間：{now_tpe().strftime('%H:%M:%S')}")
 
 
+def time_tuple_to_minutes(value: tuple[int, int], name: str) -> int:
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(type(part) is not int for part in value)
+    ):
+        raise ValueError(f"{name} 必須是 (時, 分) tuple")
+    minutes = value[0] * 60 + value[1]
+    if not (0 <= minutes <= 23 * 60 + 59):
+        raise ValueError(f"{name} 設定錯誤，需介於 00:00~23:59")
+    return minutes
+
+
 def validate_market_reversal_time_config() -> None:
     early_breakout_deadline_hm = (
         STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
@@ -585,6 +606,8 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0"
         )
+    time_tuple_to_minutes(LIMIT_UP_ENTRY_TIME, "LIMIT_UP_ENTRY_TIME")
+    time_tuple_to_minutes(LIMIT_DOWN_ENTRY_TIME, "LIMIT_DOWN_ENTRY_TIME")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -1793,6 +1816,7 @@ def build_initial_state(
         "side": "",  # 'SHORT' or 'LONG'
         "entry_price": 0,
         "entry_time": None,
+        "limit_entry_checked": False, # limit up/down 達指定時間後是否已檢查第一輪有效 quote
         # 已知限制：目前實際只下單一張並假設完整進出；部分成交、殘量、拆單平倉留待後續版本處理。
         "entry_order_pending": False,
         "entry_order_no": "", # 入場委託書號
@@ -1959,6 +1983,11 @@ def realtime_quote_time_reached() -> bool:
     return (t.hour, t.minute) >= REALTIME_QUOTE_START_TIME
 
 
+def time_reached(target_time: tuple[int, int]) -> bool:
+    t = now_tpe()
+    return (t.hour, t.minute) >= target_time
+
+
 # ============ 訊號與狀態邏輯 ============
 def check_open_status(state: Dict[str, Any]) -> bool:
     open_pass = False
@@ -2065,36 +2094,90 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
 
 def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
     """
-    limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認，直接以即時 quote openPrice 作空。
+    limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認。
+    指定時間後首輪 quote lastPrice 落在昨收到跌停區間內，即以當下 lastPrice 作空。
     """
-    open_price = state.get("open_price")
+    if not time_reached(LIMIT_DOWN_ENTRY_TIME):
+        return False
+    if state.get("limit_entry_checked"):
+        return False
+
+    yesterday_close_price = state.get("yesterday_close_price")
+    limit_down_price = state.get("limit_down_price")
+    last_price = state.get("last_price")
     try:
-        open_px = float(open_price)
+        yesterday_close = float(yesterday_close_price)
+        limit_down = float(limit_down_price)
+        last_px = float(last_price)
     except (TypeError, ValueError):
         return False
 
-    if open_px <= 0:
+    if yesterday_close <= 0 or limit_down <= 0 or last_px <= 0:
         return False
 
-    state["entry_trigger_price"] = open_px
+    state["limit_entry_checked"] = True
+
+    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+        yesterday_close,
+        limit_down,
+        LIMIT_DOWN_ENTRY_RANGE_START_PERCENT,
+        LIMIT_DOWN_ENTRY_RANGE_END_PERCENT,
+    )
+    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
+        print(
+            f"[{state['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} "
+            f"LIMIT_DOWN 首輪 quote 未落入入場區間，今日不進場 "
+            f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
+        )
+        state["exit_reason"] = "limit_entry_range_not_matched"
+        return 'BLOCKED'
+
+    state["entry_trigger_price"] = last_px
     state["side"] = TRADE_SIDE_SHORT
     return True
 
 
 def entry_limit_up_price_check(state: Dict[str, Any]) -> bool | str:
     """
-    limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認，直接以即時 quote openPrice 作多。
+    limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認。
+    指定時間後首輪 quote lastPrice 落在昨收到漲停區間內，即以當下 lastPrice 作多。
     """
-    open_price = state.get("open_price")
+    if not time_reached(LIMIT_UP_ENTRY_TIME):
+        return False
+    if state.get("limit_entry_checked"):
+        return False
+
+    yesterday_close_price = state.get("yesterday_close_price")
+    limit_up_price = state.get("limit_up_price")
+    last_price = state.get("last_price")
     try:
-        open_px = float(open_price)
+        yesterday_close = float(yesterday_close_price)
+        limit_up = float(limit_up_price)
+        last_px = float(last_price)
     except (TypeError, ValueError):
         return False
 
-    if open_px <= 0:
+    if yesterday_close <= 0 or limit_up <= 0 or last_px <= 0:
         return False
 
-    state["entry_trigger_price"] = open_px
+    state["limit_entry_checked"] = True
+
+    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
+        yesterday_close,
+        limit_up,
+        LIMIT_UP_ENTRY_RANGE_START_PERCENT,
+        LIMIT_UP_ENTRY_RANGE_END_PERCENT,
+    )
+    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
+        print(
+            f"[{state['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} "
+            f"LIMIT_UP 首輪 quote 未落入入場區間，今日不進場 "
+            f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
+        )
+        state["exit_reason"] = "limit_entry_range_not_matched"
+        return 'BLOCKED'
+
+    state["entry_trigger_price"] = last_px
     state["side"] = TRADE_SIDE_LONG
     return True
 
@@ -2130,7 +2213,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
     entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：trigger price
     qty = state.get("qty", 1)
 
-    # LIMIT_UP / LIMIT_DOWN 為刻意預掛漲跌停價的獨立策略，不套用此入場排除。
+    # LIMIT_UP / LIMIT_DOWN 為獨立策略，不套用此入場排除。
     # 其餘策略若當日曾觸及任一漲跌停，則取消當日交易。
     if not is_independent_limit_strategy(state):
         try:
@@ -2235,6 +2318,11 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
 
 def try_place_preopen_limit_order(state: Dict[str, Any], mysdk) -> bool:
+    print(f"[{state.get('symbol_name')}] LIMIT 預掛流程已停用，改由指定時間後即時 quote 觸發")
+    return False
+
+
+def try_place_preopen_limit_order_legacy(state: Dict[str, Any], mysdk) -> bool:
     if not check_open_status(state):
         return False
 
@@ -3229,7 +3317,7 @@ if __name__ == "__main__":
         ACTIVE_ORDER_STATES.update(states)
 
         trade_report_thread = start_trade_report_stream(sdk)
-        time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線，再送出預掛單
+        time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線
         if trade_report_thread.is_alive():
             trade_log("TRADE_WS_THREAD_OK", thread=trade_report_thread.name)
         else:
@@ -3239,8 +3327,6 @@ if __name__ == "__main__":
                 thread=trade_report_thread.name,
                 reason="thread_not_alive_after_start",
             )
-        place_preopen_limit_orders(states, sdk)
-
         # 對齊到下一個 5 秒邊界，避免第一輪跨分鐘造成額外更新
         align_now = now_tpe()
         align_next = ceil_next_interval(align_now, 5)
