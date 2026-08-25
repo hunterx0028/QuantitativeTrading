@@ -105,11 +105,13 @@ LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # STRATEGY_DECISION 時落入 lo
 
 LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
 LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
-LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 使用此時間後首輪 quote lastPrice 檢查入場
+LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
+LIMIT_UP_LEAVE_TIME = (9, 6) # limit up 最晚嘗試進場時間，包含此時間點
 
 LIMIT_DOWN_ENTRY_RANGE_START_PERCENT = 10.0 # limit down 入場價距昨收到跌停的起始百分比，可以為 10
 LIMIT_DOWN_ENTRY_RANGE_END_PERCENT = 60.0 # limit down 入場價距昨收到跌停的結束百分比，可以為 60
-LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 使用此時間後首輪 quote lastPrice 檢查入場
+LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 開始嘗試進場時間，包含此時間點
+LIMIT_DOWN_LEAVE_TIME = (9, 19) # limit down 最晚嘗試進場時間，包含此時間點
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前（不含此時間）low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
@@ -606,8 +608,14 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0"
         )
-    time_tuple_to_minutes(LIMIT_UP_ENTRY_TIME, "LIMIT_UP_ENTRY_TIME")
-    time_tuple_to_minutes(LIMIT_DOWN_ENTRY_TIME, "LIMIT_DOWN_ENTRY_TIME")
+    limit_up_entry_hm = time_tuple_to_minutes(LIMIT_UP_ENTRY_TIME, "LIMIT_UP_ENTRY_TIME")
+    limit_up_leave_hm = time_tuple_to_minutes(LIMIT_UP_LEAVE_TIME, "LIMIT_UP_LEAVE_TIME")
+    if limit_up_leave_hm < limit_up_entry_hm:
+        raise ValueError("LIMIT_UP_LEAVE_TIME 不可早於 LIMIT_UP_ENTRY_TIME")
+    limit_down_entry_hm = time_tuple_to_minutes(LIMIT_DOWN_ENTRY_TIME, "LIMIT_DOWN_ENTRY_TIME")
+    limit_down_leave_hm = time_tuple_to_minutes(LIMIT_DOWN_LEAVE_TIME, "LIMIT_DOWN_LEAVE_TIME")
+    if limit_down_leave_hm < limit_down_entry_hm:
+        raise ValueError("LIMIT_DOWN_LEAVE_TIME 不可早於 LIMIT_DOWN_ENTRY_TIME")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -1598,6 +1606,50 @@ def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
     return True
 
 
+def limit_industry_market_filter_pass(state: Dict[str, Any], strategy_type: str) -> bool:
+    """以當下最新且未逾時的產業指數檢查 limit 策略進場方向。"""
+    market_key = state.get("market_index_key")
+    if not market_key:
+        market_key = get_market_key_for_symbol(
+            state.get("symbol_code_with_suf", ""),
+            state.get("industry_code", ""),
+        )
+
+    index_config = market_previous_close_indices.get(market_key, {})
+    previous_close = index_config.get("previous_close")
+    last_index_float, _age_seconds, stale_reason = get_fresh_market_index_value(market_key)
+    if last_index_float is None:
+        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網等待 {market_key} 指數資料：{stale_reason}")
+        return False
+
+    try:
+        previous_close_float = float(previous_close)
+    except (TypeError, ValueError):
+        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        return False
+    if previous_close_float <= 0:
+        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
+        return False
+
+    if strategy_type == STRATEGY_LIMIT_UP:
+        passed = last_index_float >= previous_close_float
+        required_direction = ">="
+    elif strategy_type == STRATEGY_LIMIT_DOWN:
+        passed = last_index_float <= previous_close_float
+        required_direction = "<="
+    else:
+        return False
+
+    if not passed:
+        index_name = index_config.get("name", "")
+        print(
+            f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網未通過：{market_key} {index_name} "
+            f"指數 {last_index_float:.2f} 需 {required_direction} 昨收 {previous_close_float:.2f}"
+        )
+        return False
+    return True
+
+
 
 
 def format_industry_market_filter_pass_text(state: Dict[str, Any]) -> str:
@@ -1816,7 +1868,6 @@ def build_initial_state(
         "side": "",  # 'SHORT' or 'LONG'
         "entry_price": 0,
         "entry_time": None,
-        "limit_entry_checked": False, # limit up/down 達指定時間後是否已檢查第一輪有效 quote
         # 已知限制：目前實際只下單一張並假設完整進出；部分成交、殘量、拆單平倉留待後續版本處理。
         "entry_order_pending": False,
         "entry_order_no": "", # 入場委託書號
@@ -2003,9 +2054,9 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if is_limit_down_strategy(state):
-        return FORCE_CLOSE_TIME_LIMIT_DOWN
+        return LIMIT_DOWN_LEAVE_TIME
     if is_limit_up_strategy(state):
-        return FORCE_CLOSE_TIME_LIMIT_UP
+        return LIMIT_UP_LEAVE_TIME
     if is_lower_mode():
         return ENTRY_CHECK_END_TIME_LOWER
     return STRATEGY_DECISION
@@ -2020,8 +2071,8 @@ def get_entry_check_start_time() -> tuple[int, int]:
 def get_latest_entry_check_end_time() -> tuple[int, int]:
     return max(
         ENTRY_CHECK_END_TIME_LOWER,
-        FORCE_CLOSE_TIME_LIMIT_DOWN,
-        FORCE_CLOSE_TIME_LIMIT_UP,
+        LIMIT_DOWN_LEAVE_TIME,
+        LIMIT_UP_LEAVE_TIME,
     )
 
 
@@ -2095,12 +2146,15 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
 def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
     """
     limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認。
-    指定時間後首輪 quote lastPrice 落在昨收到跌停區間內，即以當下 lastPrice 作空。
+    時間窗內 quote lastPrice 落在區間，且即時產業指數不高於昨收時作空。
     """
-    if not time_reached(LIMIT_DOWN_ENTRY_TIME):
+    now_local = now_tpe()
+    now_hm = (now_local.hour, now_local.minute)
+    if now_hm < LIMIT_DOWN_ENTRY_TIME:
         return False
-    if state.get("limit_entry_checked"):
-        return False
+    if now_hm > LIMIT_DOWN_LEAVE_TIME:
+        state["exit_reason"] = "limit_entry_window_expired"
+        return 'BLOCKED'
 
     yesterday_close_price = state.get("yesterday_close_price")
     limit_down_price = state.get("limit_down_price")
@@ -2115,8 +2169,6 @@ def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
     if yesterday_close <= 0 or limit_down <= 0 or last_px <= 0:
         return False
 
-    state["limit_entry_checked"] = True
-
     entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
         yesterday_close,
         limit_down,
@@ -2125,12 +2177,14 @@ def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
     )
     if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
         print(
-            f"[{state['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} "
-            f"LIMIT_DOWN 首輪 quote 未落入入場區間，今日不進場 "
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"LIMIT_DOWN quote 未落入入場區間，等待下一輪 "
             f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
         )
-        state["exit_reason"] = "limit_entry_range_not_matched"
-        return 'BLOCKED'
+        return False
+
+    if not limit_industry_market_filter_pass(state, STRATEGY_LIMIT_DOWN):
+        return False
 
     state["entry_trigger_price"] = last_px
     state["side"] = TRADE_SIDE_SHORT
@@ -2140,12 +2194,15 @@ def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
 def entry_limit_up_price_check(state: Dict[str, Any]) -> bool | str:
     """
     limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認。
-    指定時間後首輪 quote lastPrice 落在昨收到漲停區間內，即以當下 lastPrice 作多。
+    時間窗內 quote lastPrice 落在區間，且即時產業指數不低於昨收時作多。
     """
-    if not time_reached(LIMIT_UP_ENTRY_TIME):
+    now_local = now_tpe()
+    now_hm = (now_local.hour, now_local.minute)
+    if now_hm < LIMIT_UP_ENTRY_TIME:
         return False
-    if state.get("limit_entry_checked"):
-        return False
+    if now_hm > LIMIT_UP_LEAVE_TIME:
+        state["exit_reason"] = "limit_entry_window_expired"
+        return 'BLOCKED'
 
     yesterday_close_price = state.get("yesterday_close_price")
     limit_up_price = state.get("limit_up_price")
@@ -2160,8 +2217,6 @@ def entry_limit_up_price_check(state: Dict[str, Any]) -> bool | str:
     if yesterday_close <= 0 or limit_up <= 0 or last_px <= 0:
         return False
 
-    state["limit_entry_checked"] = True
-
     entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
         yesterday_close,
         limit_up,
@@ -2170,12 +2225,14 @@ def entry_limit_up_price_check(state: Dict[str, Any]) -> bool | str:
     )
     if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
         print(
-            f"[{state['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} "
-            f"LIMIT_UP 首輪 quote 未落入入場區間，今日不進場 "
+            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
+            f"LIMIT_UP quote 未落入入場區間，等待下一輪 "
             f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
         )
-        state["exit_reason"] = "limit_entry_range_not_matched"
-        return 'BLOCKED'
+        return False
+
+    if not limit_industry_market_filter_pass(state, STRATEGY_LIMIT_UP):
+        return False
 
     state["entry_trigger_price"] = last_px
     state["side"] = TRADE_SIDE_LONG
@@ -3192,6 +3249,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         and (not st.get("entry_order_pending"))
                         and (not st.get("exit_order_pending"))
                         ):
+                        if is_independent_limit_strategy(st):
+                            st["exit_reason"] = "limit_entry_window_expired"
                         st["traded"] = True
                         st["entry_time"] = now_tpe().isoformat()
                         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
