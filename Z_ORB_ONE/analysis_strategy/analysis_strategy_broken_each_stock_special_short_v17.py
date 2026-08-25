@@ -23,9 +23,11 @@ LOWER 模式個股入場條件
 2. 以上述分 K 的 low 作為放空入場價。
 3. 入場當下 IX0001、IX0043 均仍須維持 LOWER；若個股所屬產業指數未通過，繼續檢查後續分 K。
 
-非 LIMIT_UP / LIMIT_DOWN 策略共同入場保護
+三種模式共同入場保護
 1. 入場分 K 之前若當日已觸及漲停或跌停，當日不進場。
-2. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
+
+非 LIMIT_UP / LIMIT_DOWN 策略額外入場保護
+1. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
 1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中。
@@ -76,7 +78,6 @@ EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each
 OUTPUT_BUFFER: list[str] = []
 DAILY_CANDLE_DATA_ISSUES: set[tuple[str, str, str]] = set()
 GATE_LOWER_PASSED = 'LOWER_PASSED'
-GATE_NOT_PASSED = 'NOT_PASSED'
 GATE_NO_TRADE = 'NO_TRADE'
 GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
@@ -109,7 +110,7 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
@@ -123,9 +124,9 @@ LIMIT_DOWN_ENTRY_RANGE_END_PERCENT = 60.0 # limit down 入場價距昨收到跌�
 LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 開始嘗試進場時間，包含此時間點
 LIMIT_DOWN_LEAVE_TIME = (9, 19) # limit down 最晚嘗試進場時間，包含此時間點
 
-MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # 指數昨收兩側檢查起始時間，包含此時間
-STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21) # IX0001 早盤須先向下突破 LOWER 門檻的截止分K棒，包含此時間
-STRATEGY_DECISION = (9, 31) # 市場模式判斷截止分K棒的(時, 分)，不包含此時間
+LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
+LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21) # IX0001/IX0043 早盤須先向下突破各自 LOWER 門檻的截止分K棒，包含此時間
+LOWER_STRATEGY_DECISION = (9, 31) # LOWER 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
@@ -133,13 +134,14 @@ INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(�
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
 
-IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：LOWER_STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
-IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：LOWER_STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-# 產業盤勢過濾：原策略入場條件成立後，產業指數當下價格不可與策略方向相反。
-INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT = 0 # lower 入場條件成立後，產業指數當下 close 不可高於昨收指數上漲此百分比後的位置
+# 產業盤勢過濾：作空須嚴格低於昨收下跌門檻，作多須嚴格高於昨收上漲門檻。
+INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER / LIMIT_DOWN 作空：產業指數需低於昨收下跌此百分比的門檻
+INDUSTRY_MARKET_FILTER_LONG_PERCENT = 0 # LIMIT_UP 作多：產業指數需高於昨收上漲此百分比的門檻
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -857,9 +859,9 @@ def find_strategy_decision_threshold_break(
     target_date: date,
     threshold: float,
 ) -> tuple[float, datetime] | None:
-    """找出 STRATEGY_DECISION 前第一個 low 跌破 threshold 的分K。"""
+    """找出 LOWER_STRATEGY_DECISION 前第一個 low 跌破 threshold 的分K。"""
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
     valid_bars = [
         bar
         for bar in today_bars
@@ -881,9 +883,9 @@ def find_strategy_decision_rebound_to_threshold(
     break_dt: datetime,
     rebound_threshold: float,
 ) -> tuple[float, datetime] | None:
-    """找出跌破後下一根起到 STRATEGY_DECISION 前第一個 high >= 反彈門檻的分K。"""
+    """找出跌破後下一根起到 LOWER_STRATEGY_DECISION 前第一個 high >= 反彈門檻的分K。"""
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
     valid_bars = [
         bar
         for bar in today_bars
@@ -1045,11 +1047,11 @@ def has_market_index_crossed_both_sides_of_previous_close(
     if previous_close is None:
         return False
 
-    reversal_start_hm = (
-        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    lower_market_previous_close_reversal_start_hm = (
+        LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
     )
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
     has_traded_above = False
     has_traded_below = False
@@ -1059,7 +1061,7 @@ def has_market_index_crossed_both_sides_of_previous_close(
         if bar_dt is None:
             continue
         bar_hm = bar_dt.hour * 60 + bar_dt.minute
-        if bar_hm < reversal_start_hm or bar_hm >= decision_hm:
+        if bar_hm < lower_market_previous_close_reversal_start_hm or bar_hm >= decision_hm:
             continue
 
         high = bar.get('high')
@@ -1079,7 +1081,7 @@ def has_complete_market_decision_data(
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> bool:
     """兩個市場指數在模式判斷區間內都需具備完整 OHLC 分 K，否則本日不交易。"""
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
     for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
         bars_by_date = index_minute_bars_by_key.get(index_key, {})
         if get_previous_trading_day_last_close(bars_by_date, target_date) is None:
@@ -1106,29 +1108,27 @@ def has_complete_market_decision_data(
 
 
 
-def get_market_index_strategy_decision_gate_detail(
+def is_market_index_rebound_level_maintained_at_strategy_decision(
     index_key: str,
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
-) -> tuple[str, datetime | None]:
-    """依是否曾跌破及決策時間前最後 close 回傳單一指數的 lower 狀態。"""
-    drop_percent = get_strategy_decision_drop_percent(index_key)
+) -> bool:
+    """決策時間前最後 close 仍低於指數的反彈失效門檻時回傳 True。"""
     rebound_percent = get_strategy_decision_rebound_percent(index_key)
-    if drop_percent is None or rebound_percent is None:
-        return GATE_NOT_PASSED, None
+    if rebound_percent is None:
+        return False
 
     bars_by_date = index_minute_bars_by_key.get(index_key, {})
     if not bars_by_date:
-        return GATE_NOT_PASSED, None
+        return False
 
     previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
     if previous_close is None:
-        return GATE_NOT_PASSED, None
+        return False
 
-    threshold = previous_close * (1 - drop_percent / 100.0)
     rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
     valid_bars = [
         bar
         for bar in today_bars
@@ -1138,27 +1138,18 @@ def get_market_index_strategy_decision_gate_detail(
     sorted_bars = sorted(valid_bars, key=lambda item: item['dt'])
     close_bars = [bar for bar in sorted_bars if bar.get('close') is not None]
     if not close_bars:
-        return GATE_NOT_PASSED, None
-
-    break_bars = [
-        bar for bar in sorted_bars
-        if bar.get('low') is not None and float(bar['low']) < threshold
-    ]
-    if not break_bars:
-        return GATE_NOT_PASSED, None
+        return False
 
     final_close = float(close_bars[-1]['close'])
-    if final_close < rebound_threshold:
-        return GATE_LOWER_PASSED, break_bars[0]['dt']
-    return GATE_NOT_PASSED, break_bars[0]['dt']
+    return final_close < rebound_threshold
 
 
-def has_ix0001_early_lower_breakout(
+def has_market_index_early_lower_breakout(
+    index_key: str,
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> bool:
-    """IX0001 在早盤截止時間（含）前曾嚴格向下突破 LOWER 門檻即回傳 True。"""
-    index_key = 'TWSE:MARKET'
+    """指數在早盤截止時間（含）前曾嚴格向下突破各自 LOWER 門檻即回傳 True。"""
     bars_by_date = index_minute_bars_by_key.get(index_key, {})
     previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
     if previous_close is None:
@@ -1170,12 +1161,12 @@ def has_ix0001_early_lower_breakout(
 
     drop_threshold = previous_close * (1 - drop_percent / 100.0)
     start_hm = (
-        MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+        LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
     )
     deadline_hm = (
-        STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
-        + STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
+        LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
+        + LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
     )
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
     for bar in today_bars:
@@ -1198,16 +1189,20 @@ def get_strategy_market_decision_gate_status(
     minute_bars_by_symbol: dict[str, dict[str, list]],
     stock_list: list[tuple],
 ) -> str:
-    """依兩指數歷史觸發與 STRATEGY_DECISION 前最後 close 決定最終模式。"""
+    """依兩指數早盤跌破與 LOWER_STRATEGY_DECISION 前反彈水準決定最終模式。"""
     if not has_complete_market_decision_data(
         target_date,
         index_minute_bars_by_key,
     ):
         return GATE_DATA_INCOMPLETE
 
-    if not has_ix0001_early_lower_breakout(
-        target_date,
-        index_minute_bars_by_key,
+    if not all(
+        has_market_index_early_lower_breakout(
+            index_key,
+            target_date,
+            index_minute_bars_by_key,
+        )
+        for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ):
         return GATE_NO_TRADE
 
@@ -1221,28 +1216,25 @@ def get_strategy_market_decision_gate_status(
     ):
         return GATE_NO_TRADE
 
-    lower_details = [
-        get_market_index_strategy_decision_gate_detail(
+    if not all(
+        is_market_index_rebound_level_maintained_at_strategy_decision(
             index_key,
             target_date,
             index_minute_bars_by_key,
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
-    ]
-    both_ever_dropped = all(break_dt is not None for _, break_dt in lower_details)
-    if not both_ever_dropped:
+    ):
         return GATE_NO_TRADE
-    if all(status == GATE_LOWER_PASSED for status, _ in lower_details):
-        candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
-            stock_list,
-            target_date,
-            minute_bars_by_symbol,
-        )
-        decline_percent = calculate_percent(decline_count, candidate_count)
-        if decline_percent <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:
-            return GATE_NO_TRADE
-        return GATE_LOWER_PASSED
-    return GATE_NO_TRADE
+
+    candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
+        stock_list,
+        target_date,
+        minute_bars_by_symbol,
+    )
+    decline_percent = calculate_percent(decline_count, candidate_count)
+    if decline_percent <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:
+        return GATE_NO_TRADE
+    return GATE_LOWER_PASSED
 
 
 def is_industry_market_filter_passed(
@@ -1252,7 +1244,7 @@ def is_industry_market_filter_passed(
     index_minute_bars_by_key: dict[str, dict[str, list]],
     strategy_type: str,
 ) -> bool:
-    """依策略方向檢查 entry 當下產業指數與前一營業日收盤價的相對位置。"""
+    """LOWER 入場前，產業指數前一根已完成分 K 須嚴格低於作空門檻。"""
     index_key = get_industry_index_key(stock_item)
     if index_key is None:
         return False
@@ -1267,22 +1259,29 @@ def is_industry_market_filter_passed(
 
     today_key = target_date.strftime('%Y-%m-%d')
     today_index_bars = index_bars_by_date.get(today_key, [])
-    if not today_index_bars:
-        return False
-
-    entry_index_bar = find_bar_at_or_before(today_index_bars, entry_dt)
-    if entry_index_bar is None:
+    completed_bars = sorted(
+        (
+            bar
+            for bar in today_index_bars
+            if bar.get('dt') is not None
+            and bar['dt'] < entry_dt
+            and bar.get('close') is not None
+        ),
+        key=lambda bar: bar['dt'],
+    )
+    if not completed_bars:
         return False
 
     try:
-        entry_index_close = float(entry_index_bar['close'])
-    except (KeyError, TypeError, ValueError):
+        industry_close = float(completed_bars[-1]['close'])
+        previous_reference = float(previous_reference)
+    except (TypeError, ValueError):
         return False
 
     if strategy_type != STRATEGY_LOWER:
         return False
-    threshold = previous_reference * (1 + INDUSTRY_MARKET_FILTER_MAX_UP_PERCENT / 100.0)
-    return entry_index_close < threshold
+    threshold = previous_reference * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
+    return industry_close < threshold
 
 
 def is_limit_industry_market_filter_passed(
@@ -1292,7 +1291,7 @@ def is_limit_industry_market_filter_passed(
     index_minute_bars_by_key: dict[str, dict[str, list]],
     strategy_type: str,
 ) -> bool:
-    """LIMIT 進場前，產業指數前一根已完成分 K 不可與交易方向相反。"""
+    """LIMIT 進場前，產業指數前一根已完成分 K 須嚴格突破交易方向門檻。"""
     index_key = get_industry_index_key(stock_item)
     if index_key is None:
         return False
@@ -1326,9 +1325,11 @@ def is_limit_industry_market_filter_passed(
     except (TypeError, ValueError):
         return False
     if strategy_type == STRATEGY_LIMIT_DOWN:
-        return industry_close <= previous_reference
+        threshold = previous_reference * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
+        return industry_close < threshold
     if strategy_type == STRATEGY_LIMIT_UP:
-        return industry_close >= previous_reference
+        threshold = previous_reference * (1 + INDUSTRY_MARKET_FILTER_LONG_PERCENT / 100.0)
+        return industry_close > threshold
     return False
 
 
@@ -1542,7 +1543,7 @@ def iter_entry_signal_lower_candidates(
     作空進場候選訊號：
     1) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
     2) 逐根回傳 low 落在入場區間的 K 棒
-    3) 候選進場價 = 進場分K棒 low
+    3) 候選進場價 = 進場分 K 棒 open
     """
     start_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
     end_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
@@ -1565,16 +1566,17 @@ def iter_entry_signal_lower_candidates(
     indexed_bars.sort(key=lambda item: item[1]['dt'])
 
     for original_idx, bar, hm in indexed_bars:
-        if bar.get('low') is None:
+        if bar.get('low') is None or bar.get('open') is None:
             continue
 
         if not (start_hm <= hm <= end_hm):
             continue
 
-        entry_price = float(bar['low'])
-        if not is_price_in_entry_range(entry_price, entry_lower_bound, entry_upper_bound):
+        signal_price = float(bar['low'])
+        if not is_price_in_entry_range(signal_price, entry_lower_bound, entry_upper_bound):
             continue
 
+        entry_price = float(bar['open'])
         yield bar, entry_price
 
 
@@ -1826,8 +1828,8 @@ def summarize_lower_strategy_decision_candidates(
         target_date.year,
         target_date.month,
         target_date.day,
-        STRATEGY_DECISION[0],
-        STRATEGY_DECISION[1],
+        LOWER_STRATEGY_DECISION[0],
+        LOWER_STRATEGY_DECISION[1],
     )
 
     for stock_item in stock_list:
@@ -2052,13 +2054,13 @@ def print_daily_optimization_results(
         f'LIMIT_DOWN_ENTRY_RANGE={LIMIT_DOWN_ENTRY_RANGE_START_PERCENT:.1f}%~{LIMIT_DOWN_ENTRY_RANGE_END_PERCENT:.1f}%'
     )
     print(
-        f'MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
-        f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:'
-        f'{MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}  '
-        f'STRATEGY_EARLY_BREAKOUT_DEADLINE='
-        f'{STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:'
-        f'{STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d}  '
-        f'STRATEGY_DECISION={STRATEGY_DECISION[0]:02d}:{STRATEGY_DECISION[1]:02d}'
+        f'LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME='
+        f'{LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:'
+        f'{LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}  '
+        f'LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE='
+        f'{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:'
+        f'{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d}  '
+        f'LOWER_STRATEGY_DECISION={LOWER_STRATEGY_DECISION[0]:02d}:{LOWER_STRATEGY_DECISION[1]:02d}'
     )
     print(
         f'LOWER進場時間窗={STRATEGY_START_LOWER[0]:02d}:{STRATEGY_START_LOWER[1]:02d}~{STRATEGY_END_LOWER[0]:02d}:{STRATEGY_END_LOWER[1]:02d}    '
@@ -2466,15 +2468,18 @@ def evaluate_candidates(
 
         effective_stop_loss = calculate_stop_loss_amount_by_percent(entry_price, optimize_loss_percent)
         effective_profit = calculate_take_profit_amount_by_percent(entry_price, optimize_profit_percent)
+        # 三種模式一致：只檢查入場分 K 之前的歷史 K 棒；若當日已曾觸及
+        # 任一漲跌停，當日不進場。刻意不含 entry_idx，避免使用入場後資訊。
+        if has_limit_price_touched_before_entry(
+            high_values,
+            low_values,
+            entry_idx,
+            limit_up_price,
+            limit_down_price,
+        ):
+            continue
+
         if not is_independent_limit_strategy(strategy_type):
-            if has_limit_price_touched_before_entry(
-                high_values,
-                low_values,
-                entry_idx,
-                limit_up_price,
-                limit_down_price,
-            ):
-                continue
             if trade_side == TRADE_SIDE_LONG and should_skip_entry_by_limit_down(
                 entry_price,
                 effective_stop_loss,
@@ -2789,15 +2794,15 @@ def main() -> None:
                 'market_start_gate_cache': market_start_gate_cache,
             }
 
-        market_reversal_start_hm = (
-            MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-            + MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+        lower_market_previous_close_reversal_start_hm = (
+            LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+            + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
         )
-        early_breakout_deadline_hm = (
-            STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
-            + STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
+        lower_strategy_early_breakout_deadline_hm = (
+            LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
+            + LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
         )
-        strategy_decision_hm = STRATEGY_DECISION[0] * 60 + STRATEGY_DECISION[1]
+        lower_strategy_decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
         strategy_start_lower_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
         strategy_end_lower_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
         if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
@@ -2867,37 +2872,37 @@ def main() -> None:
         if limit_down_leave_hm < limit_down_entry_hm:
             print('[ERROR] LIMIT_DOWN_LEAVE_TIME 不可早於 LIMIT_DOWN_ENTRY_TIME', file=sys.stderr)
             sys.exit(1)
-        if not (0 <= strategy_decision_hm <= 23 * 60 + 59):
-            print('[ERROR] STRATEGY_DECISION 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
+        if not (0 <= lower_strategy_decision_hm <= 23 * 60 + 59):
+            print('[ERROR] LOWER_STRATEGY_DECISION 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
             sys.exit(1)
-        if not (0 <= market_reversal_start_hm <= 23 * 60 + 59):
+        if not (0 <= lower_market_previous_close_reversal_start_hm <= 23 * 60 + 59):
             print(
-                '[ERROR] MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 設定錯誤，需介於 00:00~23:59',
+                '[ERROR] LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 設定錯誤，需介於 00:00~23:59',
                 file=sys.stderr,
             )
             sys.exit(1)
-        if not (0 <= early_breakout_deadline_hm <= 23 * 60 + 59):
+        if not (0 <= lower_strategy_early_breakout_deadline_hm <= 23 * 60 + 59):
             print(
-                '[ERROR] STRATEGY_EARLY_BREAKOUT_DEADLINE 設定錯誤，需介於 00:00~23:59',
+                '[ERROR] LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE 設定錯誤，需介於 00:00~23:59',
                 file=sys.stderr,
             )
             sys.exit(1)
-        if early_breakout_deadline_hm >= strategy_decision_hm:
+        if lower_strategy_early_breakout_deadline_hm >= lower_strategy_decision_hm:
             print(
-                '[ERROR] STRATEGY_EARLY_BREAKOUT_DEADLINE 必須早於 STRATEGY_DECISION',
+                '[ERROR] LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE 必須早於 LOWER_STRATEGY_DECISION',
                 file=sys.stderr,
             )
             sys.exit(1)
-        if market_reversal_start_hm > early_breakout_deadline_hm:
+        if lower_market_previous_close_reversal_start_hm > lower_strategy_early_breakout_deadline_hm:
             print(
-                '[ERROR] MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME '
-                '不可晚於 STRATEGY_EARLY_BREAKOUT_DEADLINE',
+                '[ERROR] LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME '
+                '不可晚於 LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE',
                 file=sys.stderr,
             )
             sys.exit(1)
-        if market_reversal_start_hm >= strategy_decision_hm:
+        if lower_market_previous_close_reversal_start_hm >= lower_strategy_decision_hm:
             print(
-                '[ERROR] MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 STRATEGY_DECISION',
+                '[ERROR] LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 LOWER_STRATEGY_DECISION',
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -2924,6 +2929,12 @@ def main() -> None:
             sys.exit(1)
         if LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < 0:
             print('[ERROR] LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
+            print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)
+            sys.exit(1)
+        if INDUSTRY_MARKET_FILTER_LONG_PERCENT < 0:
+            print('[ERROR] INDUSTRY_MARKET_FILTER_LONG_PERCENT 不可小於 0', file=sys.stderr)
             sys.exit(1)
         best_window_result = evaluate_one_window()
         builtins.print()
