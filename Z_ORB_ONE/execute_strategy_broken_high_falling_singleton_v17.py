@@ -135,6 +135,8 @@ ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免�
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 預掛單於開盤前不可能成交，09:00 前不查委託結果
 ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS = 60.0  # AGR0005 後依券商指示暫停查詢
 MARKET_INDEX_STALE_SECONDS = 30.0  # 市場/產業指數 websocket 超過此秒數未更新時，入場判斷保守視為資料不足
+MARKET_WS_DIAGNOSTIC_STALE_SECONDS = 15.0  # 僅診斷：09:00 後整條指數 websocket 無更新達此秒數時記錄一次
+MARKET_WS_DIAGNOSTIC_START_TIME = (9, 0)
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
@@ -144,6 +146,10 @@ SEEN_DEALT_REPORT_KEYS: set[tuple[str, str]] = set()
 ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = 0.0
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
+MARKET_WS_MESSAGE_COUNT = 0
+MARKET_WS_LAST_MESSAGE_AT: Optional[str] = None
+MARKET_WS_CONNECTED_AT: Optional[str] = None
+MARKET_WS_STALE_DIAGNOSTIC_EMITTED = False
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
 MARKET_REVERSAL_STOP_EVENT = threading.Event()
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
@@ -1520,7 +1526,60 @@ def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: in
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
 
 
+def log_market_ws_stale_diagnostic_once(now_local: datetime) -> None:
+    """整條指數行情無更新達門檻時記錄一次；不重連、不改變交易判斷。"""
+    global MARKET_WS_STALE_DIAGNOSTIC_EMITTED
+
+    if (now_local.hour, now_local.minute) < MARKET_WS_DIAGNOSTIC_START_TIME:
+        return
+    reference_time = MARKET_WS_LAST_MESSAGE_AT or MARKET_WS_CONNECTED_AT
+    if not reference_time:
+        return
+    try:
+        reference_dt = datetime.fromisoformat(reference_time)
+    except ValueError:
+        return
+    if reference_dt.tzinfo is None:
+        reference_dt = TZ.localize(reference_dt)
+    diagnostic_start_dt = now_local.replace(
+        hour=MARKET_WS_DIAGNOSTIC_START_TIME[0],
+        minute=MARKET_WS_DIAGNOSTIC_START_TIME[1],
+        second=0,
+        microsecond=0,
+    )
+    if reference_dt < diagnostic_start_dt:
+        reference_dt = diagnostic_start_dt
+    age_seconds = (now_local - reference_dt).total_seconds()
+    if age_seconds < MARKET_WS_DIAGNOSTIC_STALE_SECONDS:
+        MARKET_WS_STALE_DIAGNOSTIC_EMITTED = False
+        return
+    if MARKET_WS_STALE_DIAGNOSTIC_EMITTED:
+        return
+
+    MARKET_WS_STALE_DIAGNOSTIC_EMITTED = True
+    gate_snapshot = {
+        index_key: {
+            "last_index": MARKET_INDEX_STATE.get(index_key, {}).get("last_index"),
+            "last_updated": MARKET_INDEX_STATE.get(index_key, {}).get("last_updated"),
+        }
+        for index_key in MARKET_GATE_INDEX_KEYS
+    }
+    trade_log(
+        "MARKET_WS_STALE_DIAGNOSTIC",
+        error=True,
+        threshold_seconds=MARKET_WS_DIAGNOSTIC_STALE_SECONDS,
+        age_seconds=f"{age_seconds:.1f}",
+        message_count=MARKET_WS_MESSAGE_COUNT,
+        last_message_at=MARKET_WS_LAST_MESSAGE_AT,
+        connected_at=MARKET_WS_CONNECTED_AT,
+        gate_snapshot=repr(gate_snapshot),
+        action="diagnostic_only_no_reconnect",
+    )
+
+
 def start_market_index_stream(realtime_sdk: EsunMarketdata):
+    global MARKET_WS_CONNECTED_AT
+
     symbol_to_market_key = {
         str(info.get("symbol", "")): market_key
         for market_key, info in market_previous_close_indices.items()
@@ -1531,6 +1590,8 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
         return None
 
     def handle_message(message):
+        global MARKET_WS_MESSAGE_COUNT, MARKET_WS_LAST_MESSAGE_AT
+
         try:
             payload = json.loads(message) if isinstance(message, str) else message
             data = payload.get("data", payload) if isinstance(payload, dict) else {}
@@ -1549,6 +1610,8 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
             market_state["last_index"] = index_float
             market_state["time"] = data.get("time")
             market_state["last_updated"] = now_tpe().isoformat()
+            MARKET_WS_MESSAGE_COUNT += 1
+            MARKET_WS_LAST_MESSAGE_AT = market_state["last_updated"]
             update_market_strategy_decision_gate_state(market_key, index_float, data.get("time"))
             update_position_market_reversal_state(market_key, index_float, data.get("time"))
         except Exception as e:
@@ -1560,11 +1623,24 @@ def start_market_index_stream(realtime_sdk: EsunMarketdata):
                 raw=repr(message),
             )
 
+    def handle_connect(*args):
+        trade_log("MARKET_WS_CONNECTED", callback_args=repr(args))
+
+    def handle_disconnect(*args):
+        trade_log("MARKET_WS_DISCONNECTED", error=True, callback_args=repr(args))
+
+    def handle_error(*args):
+        trade_log("MARKET_WS_CALLBACK_ERROR", error=True, callback_args=repr(args))
+
     try:
         stock_ws = realtime_sdk.websocket_client.stock
         stock_ws.on("message", handle_message)
+        stock_ws.on("connect", handle_connect)
+        stock_ws.on("disconnect", handle_disconnect)
+        stock_ws.on("error", handle_error)
         trade_log("MARKET_WS_CONNECTING", channel="indices", symbols=",".join(symbol_to_market_key.keys()))
         stock_ws.connect()
+        MARKET_WS_CONNECTED_AT = now_tpe().isoformat()
         for index_symbol in symbol_to_market_key:
             market_key = symbol_to_market_key[index_symbol]
             index_config = market_previous_close_indices.get(market_key, {})
@@ -3245,6 +3321,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 return
 
         now_local = now_tpe()
+        log_market_ws_stale_diagnostic_once(now_local)
         if (
             not realtime_quote_start_announced
             and (now_local.hour, now_local.minute) >= REALTIME_QUOTE_START_TIME

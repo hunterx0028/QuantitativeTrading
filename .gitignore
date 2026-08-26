@@ -8,7 +8,7 @@ __pycache__/
 /Z_ORB_ONE/daily_report/pdf_folder/
 /Z_ORB_ONE/stock_state/
 /Z_ORB_ONE/stock_list/st_db/
-T122260516_20260828.p12
+*.p12
 *_result.txt
 *_result_re.txt
 *.whl

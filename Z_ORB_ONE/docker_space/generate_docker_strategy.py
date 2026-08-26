@@ -30,7 +30,7 @@ market_previous_close_indices = {}
 REQUIRED_RUNTIME_FILES = (
     "config.ini",
     "stock_data.py",
-    "T122260516_20260828.p12",
+    "T122260516_20270828.p12",
 )
 
 
