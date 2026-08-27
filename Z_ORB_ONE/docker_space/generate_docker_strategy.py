@@ -30,8 +30,31 @@ market_previous_close_indices = {}
 REQUIRED_RUNTIME_FILES = (
     "config.ini",
     "stock_data.py",
-    "T122260516_20270828.p12",
 )
+DEFAULT_CERT_FILE = "T122260516_20270828.p12"
+
+
+def normalize_runtime_relative_path(path_value: str) -> str:
+    relative_path = str(path_value or "").strip().replace("\\\\", "/")
+    if not relative_path:
+        raise RuntimeError("Empty runtime file path")
+
+    normalized_path = os.path.normpath(relative_path)
+    if os.path.isabs(normalized_path) or normalized_path == ".." or normalized_path.startswith(f"..{os.sep}"):
+        raise RuntimeError(f"Runtime file path must stay under BASE_DIR: {path_value!r}")
+    return normalized_path
+
+
+def get_cert_runtime_file() -> str:
+    config_path = os.path.join(BASE_DIR, "config.ini")
+    if not os.path.exists(config_path):
+        return DEFAULT_CERT_FILE
+
+    runtime_config = ConfigParser()
+    runtime_config.read(config_path)
+    return normalize_runtime_relative_path(
+        runtime_config.get("Cert", "Path", fallback=DEFAULT_CERT_FILE)
+    )
 
 
 def is_truthy_env(name: str, default: str = "false") -> bool:
@@ -50,26 +73,39 @@ def should_download_from_s3() -> bool:
         return is_truthy_env("QUANT_DOWNLOAD_FROM_S3")
 
     running_in_aws = bool(os.getenv("AWS_EXECUTION_ENV") or os.getenv("ECS_CONTAINER_METADATA_URI_V4"))
-    missing_file = any(not os.path.exists(os.path.join(BASE_DIR, fname)) for fname in REQUIRED_RUNTIME_FILES)
+    runtime_files = list(REQUIRED_RUNTIME_FILES)
+    if os.path.exists(os.path.join(BASE_DIR, "config.ini")):
+        runtime_files.append(get_cert_runtime_file())
+    else:
+        runtime_files.append(DEFAULT_CERT_FILE)
+    missing_file = any(not os.path.exists(os.path.join(BASE_DIR, fname)) for fname in runtime_files)
     return running_in_aws or missing_file
 
 
+def download_one_runtime_file_from_s3(fname: str) -> None:
+    runtime_path = normalize_runtime_relative_path(fname)
+    s3_path = runtime_path.replace(os.sep, "/")
+    s3_uri = f"s3://{S3_BUCKET}/{S3_PREFIX}/{s3_path}" if S3_PREFIX else f"s3://{S3_BUCKET}/{s3_path}"
+    local_path = os.path.join(BASE_DIR, runtime_path)
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    print(f"[S3] {s3_uri} -> {local_path}")
+    import subprocess
+    subprocess.run(
+        ["aws", "s3", "cp", s3_uri, local_path],
+        check=True,
+    )
+
+
 def download_runtime_files_from_s3():
-    """從 S3 下載 config.ini、stock_data.py、p12 憑證到 /app。"""
+    """從 S3 下載 config.ini、stock_data.py，以及 config.ini 指定的 p12 憑證到 /app。"""
     if not should_download_from_s3():
         print("===== Skip S3 download: runtime files already exist locally =====")
         return
 
     print("===== Download runtime files from S3 =====")
     for fname in REQUIRED_RUNTIME_FILES:
-        s3_uri = f"s3://{S3_BUCKET}/{S3_PREFIX}/{fname}" if S3_PREFIX else f"s3://{S3_BUCKET}/{fname}"
-        local_path = os.path.join(BASE_DIR, fname)
-        print(f"[S3] {s3_uri} -> {local_path}")
-        import subprocess
-        subprocess.run(
-            ["aws", "s3", "cp", s3_uri, local_path],
-            check=True,
-        )
+        download_one_runtime_file_from_s3(fname)
+    download_one_runtime_file_from_s3(get_cert_runtime_file())
 
 
 def load_stock_data_from_runtime_file():
@@ -301,10 +337,10 @@ def transform_main_for_docker(source: str) -> str:
     """Keep the singleton main flow and patch only container-specific operations."""
     source = replace_once_required(
         source,
-        "    market_index_ws = None\n\n    try:\n",
+        "    market_index_rest_thread = None\n\n    try:\n",
         "    realtime_sdk = None\n"
         "    sdk = None\n"
-        "    market_index_ws = None\n\n"
+        "    market_index_rest_thread = None\n\n"
         "    try:\n"
         "        print(\"===== Prepare runtime files =====\")\n"
         "        download_runtime_files_from_s3()\n"
@@ -337,11 +373,13 @@ def transform_main_for_docker(source: str) -> str:
     )
     source = replace_once_required(
         source,
-        "        close_market_index_stream(market_index_ws)\n",
-        "        close_market_index_stream(market_index_ws)\n"
+        "        sys.stdout = original_stdout\n"
+        "        sys.stderr = original_stderr\n",
         "        safe_logout_sdk(\"Esun Trade SDK\", sdk)\n"
-        "        safe_logout_sdk(\"EsunMarketdata\", realtime_sdk)\n",
-        "market-index cleanup hook",
+        "        safe_logout_sdk(\"EsunMarketdata\", realtime_sdk)\n"
+        "        sys.stdout = original_stdout\n"
+        "        sys.stderr = original_stderr\n",
+        "stdio restore cleanup hook",
     )
     return source
 
