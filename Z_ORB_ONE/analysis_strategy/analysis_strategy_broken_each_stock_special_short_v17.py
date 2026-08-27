@@ -31,8 +31,9 @@ LOWER 模式個股入場條件
 
 LIMIT_UP 策略個股入場條件
 1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中。
-2. 當日指定時間後首根分 K 的前一根 close，須落在「昨收到漲停價」之 LIMIT_UP_ENTRY_RANGE_START_PERCENT～LIMIT_UP_ENTRY_RANGE_END_PERCENT 區間內。
-3. 以上述指定時間後首根分 K 的 open 做多進場。
+2. 於 LIMIT_UP_ENTRY_TIME～LIMIT_UP_LEAVE_TIME（含）先找到第一根 low 小於昨收的分 K。
+3. 從上述分 K 的下一根起，找到第一根 high 大於昨收的分 K。
+4. 以上述站回分 K 的 high 做多進場。
 
 LIMIT_DOWN 策略個股入場條件
 1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中。
@@ -87,9 +88,9 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = False
 INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
-INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = True
+INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
@@ -106,17 +107,15 @@ OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 7.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 5.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
-LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
-LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
-LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
-LIMIT_UP_LEAVE_TIME = (9, 6) # limit up 最晚嘗試進場時間，包含此時間點
+LIMIT_UP_ENTRY_TIME = (9, 10) # limit up 開始嘗試進場時間，包含此時間點
+LIMIT_UP_LEAVE_TIME = (9, 30) # limit up 最晚嘗試進場時間，包含此時間點
 
 SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 LIMIT_DOWN_ENTRY_RANGE_START_PERCENT = 10.0 # limit down 入場價距昨收到跌停的起始百分比，可以為 10
@@ -1590,6 +1589,47 @@ def scan_entry_signal_lower(
     return next(iter_entry_signal_lower_candidates(today_bars, ystats), None)
 
 
+def scan_entry_signal_limit_up(today_bars: list, ystats: dict):
+    """
+    LIMIT_UP 作多進場訊號：
+    1) 進場檢查時間為 LIMIT_UP_ENTRY_TIME 到 LIMIT_UP_LEAVE_TIME（含起訖）
+    2) 先找第一根 low 小於昨收的分 K
+    3) 從下一根起，找第一根 high 大於昨收的分 K
+    4) 候選進場價 = 站回分 K 的 high
+    """
+    start_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
+    end_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
+    previous_close = float(ystats['close'])
+    broke_previous_close = False
+
+    indexed_bars = []
+    for bar in today_bars:
+        dtv = bar.get('dt')
+        if dtv is None:
+            continue
+        hm = dtv.hour * 60 + dtv.minute
+        indexed_bars.append((bar, hm))
+    indexed_bars.sort(key=lambda item: item[0]['dt'])
+
+    for bar, hm in indexed_bars:
+        if not (start_hm <= hm <= end_hm):
+            continue
+
+        if not broke_previous_close:
+            if bar.get('low') is not None and float(bar['low']) < previous_close:
+                broke_previous_close = True
+            continue
+
+        if bar.get('high') is None:
+            continue
+
+        entry_price = float(bar['high'])
+        if entry_price > previous_close:
+            return bar, entry_price
+
+    return None
+
+
 
 
 def normalize_daily_candles(raw_day_bars: list, stock_name: str) -> dict[date, dict]:
@@ -2048,9 +2088,6 @@ def print_daily_optimization_results(
         f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%'
     )
     print(
-        f'LIMIT_UP_ENTRY_RANGE={LIMIT_UP_ENTRY_RANGE_START_PERCENT:.1f}%~{LIMIT_UP_ENTRY_RANGE_END_PERCENT:.1f}%'
-    )
-    print(
         f'LIMIT_DOWN_ENTRY_RANGE={LIMIT_DOWN_ENTRY_RANGE_START_PERCENT:.1f}%~{LIMIT_DOWN_ENTRY_RANGE_END_PERCENT:.1f}%'
     )
     print(
@@ -2075,7 +2112,7 @@ def print_daily_optimization_results(
     )
     print(
         f'LIMIT_UP允許的實際連續漲停天數={LONG_LIMIT_UP_DAYS}  '
-        f'LIMIT_UP進場=時間窗內首根符合條件的分K open  '
+        f'LIMIT_UP進場=時間窗內先破昨收後首根站回昨收的分K high  '
         f'LIMIT_UP_ENTRY_TIME={LIMIT_UP_ENTRY_TIME[0]:02d}:{LIMIT_UP_ENTRY_TIME[1]:02d}  '
         f'LIMIT_UP_LEAVE_TIME={LIMIT_UP_LEAVE_TIME[0]:02d}:{LIMIT_UP_LEAVE_TIME[1]:02d}    '
         f'LIMIT_UP出場時間窗={INTRADAY_COMPARE_END_LIMIT_UP[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_UP[1]:02d}'
@@ -2133,39 +2170,18 @@ def find_limit_candidate_on_date(
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
     if strategy_type == STRATEGY_LIMIT_UP:
-        entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-            previous_close,
-            limit_up_price,
-            LIMIT_UP_ENTRY_RANGE_START_PERCENT,
-            LIMIT_UP_ENTRY_RANGE_END_PERCENT,
-        )
-        entry_bar = None
-        entry_start_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
-        entry_leave_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
-        for entry_idx, candidate_bar in enumerate(today_ordered):
-            candidate_dt = candidate_bar['dt']
-            candidate_hm = candidate_dt.hour * 60 + candidate_dt.minute
-            if candidate_hm < entry_start_hm:
-                continue
-            if candidate_hm > entry_leave_hm:
-                break
-            previous_entry_bar = find_previous_bar_with_close(today_ordered, entry_idx)
-            if previous_entry_bar is None:
-                continue
-            previous_entry_close = float(previous_entry_bar['close'])
-            if (
-                candidate_bar.get('open') is not None
-                and is_price_in_entry_range(previous_entry_close, entry_lower_bound, entry_upper_bound)
-                and is_limit_industry_market_filter_passed(
-                    stock_item,
-                    target_date,
-                    candidate_dt,
-                    index_minute_bars_by_key,
-                    strategy_type,
-                )
-            ):
-                entry_bar = candidate_bar
-                break
+        entry_signal = scan_entry_signal_limit_up(today_ordered, ystats)
+        if entry_signal is None:
+            return None
+        entry_bar, entry_price = entry_signal
+        if not is_limit_industry_market_filter_passed(
+            stock_item,
+            target_date,
+            entry_bar['dt'],
+            index_minute_bars_by_key,
+            strategy_type,
+        ):
+            return None
         if entry_bar is None:
             return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_UP
@@ -2208,11 +2224,11 @@ def find_limit_candidate_on_date(
             return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_DOWN
         trade_side = TRADE_SIDE_SHORT
+        entry_price = float(entry_bar['open'])
 
-    if entry_bar is None or entry_bar.get('open') is None:
+    if entry_bar is None or entry_price is None:
         return None
 
-    entry_price = float(entry_bar['open'])
     candidate = build_trade_candidate(
         stock_name,
         get_stock_industry_code(stock_item),
@@ -2537,11 +2553,7 @@ def evaluate_candidates(
             'stop_loss_price': stop_loss_price,
         }
         result = None
-        first_exit_check_idx = (
-            entry_idx
-            if is_independent_limit_strategy(strategy_type)
-            else entry_idx + 1
-        )
+        first_exit_check_idx = entry_idx + 1
         for i in range(first_exit_check_idx, len(dt_values)):
             bar_time = dt_values[i]
             if (
