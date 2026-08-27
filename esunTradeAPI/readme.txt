@@ -47,11 +47,10 @@ Enter cert password:
 262052
 
 
-行情API連線限制
--日內行情 (Intraday Market Data): 每分鐘 600 次。
--行情快照 (Market Snapshot): 每分鐘 600 次。
--歷史行情 (Historical Market Data): 每分鐘 60 次。
--WebSocket: 訂閱數上限 300，連線數上限 2。
+日內行情：2000 / min
+WebSocket：2000 訂閱數；3 連線數
+行情快照：2000 / min
+歷史行情：60 / min
 
 交易API連線限制與異常行為規範
 -委託下單: 若每日委託下單筆數（證券/期貨）超過 2,000 筆上限。

@@ -138,6 +138,14 @@ def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def get_default_target_date(now: datetime | None = None) -> date:
+    """00:00～13:30 使用前一日，其餘時間使用今天。"""
+    current = now or datetime.now()
+    if (current.hour, current.minute) <= (13, 30):
+        return current.date() - timedelta(days=1)
+    return current.date()
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -756,13 +764,8 @@ def main() -> int:
     parser.add_argument(
         "--target-date",
         type=lambda value: datetime.strptime(value, "%Y-%m-%d").date(),
-        default=date.today(),
-        help="要更新成哪一天的收盤價，格式 YYYY-MM-DD，預設今天",
-    )
-    parser.add_argument(
-        "--allow-latest-before-target",
-        action="store_true",
-        help="API 若找不到 target-date 資料，允許使用 target-date 以前最新一筆 K 棒 close",
+        default=get_default_target_date(),
+        help="要更新成哪一天的收盤價，格式 YYYY-MM-DD；預設 00:00～13:30 取前一日，其餘時間取今天",
     )
     parser.add_argument(
         "--request-delay",
@@ -846,12 +849,15 @@ def main() -> int:
         log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
         print_missing_stocks(missing_stocks)
 
-        log(f"[INFO] 使用 REST API 取得 {args.target_date:%Y-%m-%d} 指數收盤價")
+        log(
+            f"[INFO] 使用 REST API 取得不晚於 {args.target_date:%Y-%m-%d} "
+            "的最新交易日指數收盤價"
+        )
         index_state = fetch_indices_by_api(
             realtime_sdk,
             targets,
             args.target_date,
-            not args.allow_latest_before_target,
+            False,
             args.request_delay,
         )
         missing_keys = sorted(set(targets) - set(index_state))

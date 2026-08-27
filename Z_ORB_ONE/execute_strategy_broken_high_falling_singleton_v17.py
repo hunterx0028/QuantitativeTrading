@@ -8,7 +8,7 @@ import shutil
 import io
 import threading
 from typing import List, Tuple, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from tempfile import NamedTemporaryFile
 from configparser import ConfigParser
@@ -135,12 +135,14 @@ ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免�
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 預掛單於開盤前不可能成交，09:00 前不查委託結果
 ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS = 60.0  # AGR0005 後依券商指示暫停查詢
 MARKET_INDEX_REST_POLL_SECONDS = 5
-MARKET_INDEX_REST_START_TIME = (9, 0)
-MARKET_INDEX_STALE_SECONDS = 10.0  # IX0001/IX0043 REST 報價供應商時間超過此秒數即視為資料不足
+MARKET_INDEX_REST_POLL_OFFSET_SECONDS = 1.0  # 避開供應商整 5 秒快照剛發布的邊界
+MARKET_INDEX_REST_START_TIME = REALTIME_QUOTE_START_TIME
+MARKET_INDEX_STALE_SECONDS = 12.0  # 容許兩個 5 秒供應週期及少量網路/排程誤差
+MARKET_INDEX_FUTURE_TOLERANCE_SECONDS = 1.0  # 容許供應商與本機最多 1 秒時鐘偏差
+MARKET_INDEX_CRITICAL_WAIT_SECONDS = 3.0  # 關鍵判斷資料逾時時，最多等待既有背景輪次完成
 INDUSTRY_INDEX_STALE_SECONDS = 20.0  # 產業指數配合每分鐘四輪 REST 查詢
 QUOTE_ROUND_INTERVAL_SECONDS = 15.0
-REST_QUOTE_ESTIMATED_SECONDS_PER_REQUEST = 0.6
-REST_QUOTE_ROUND_SAFETY_SECONDS = 3.0
+INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 2000
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
@@ -151,6 +153,12 @@ ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = 0.0
 
 MARKET_INDEX_STATE: Dict[str, Dict[str, Any]] = {}
 MARKET_INDEX_STATE_LOCK = threading.RLock()
+MARKET_INDEX_ROUND_CONDITION = threading.Condition(MARKET_INDEX_STATE_LOCK)
+MARKET_INDEX_ROUND_STATE: Dict[str, Any] = {
+    "completed_round": 0,
+    "completed_at": None,
+    "snapshots": {},
+}
 MARKETDATA_STOCK_REST_CLIENT: Any = None
 MARKET_GATE_INDEX_KEYS = ("TWSE:MARKET", "TPEX:MARKET")
 MARKET_INDEX_REST_STOP_EVENT = threading.Event()
@@ -1142,6 +1150,18 @@ def get_market_index_snapshot(index_key: str) -> Dict[str, Any]:
         return dict(MARKET_INDEX_STATE.get(index_key, {}))
 
 
+def get_market_gate_snapshots() -> tuple[Dict[str, Dict[str, Any]], int]:
+    """在同一個 lock 內取得兩個大盤指數的同輪快照。"""
+    with MARKET_INDEX_STATE_LOCK:
+        completed_snapshots = MARKET_INDEX_ROUND_STATE.get("snapshots", {})
+        snapshots = {
+            index_key: dict(completed_snapshots.get(index_key, {}))
+            for index_key in MARKET_GATE_INDEX_KEYS
+        }
+        completed_round = int(MARKET_INDEX_ROUND_STATE.get("completed_round", 0) or 0)
+    return snapshots, completed_round
+
+
 def get_market_index_snapshot_freshness(
     index_key: str,
     market_state: Dict[str, Any],
@@ -1156,8 +1176,81 @@ def get_market_index_snapshot_freshness(
     if last_updated_dt.tzinfo is None:
         last_updated_dt = TZ.localize(last_updated_dt)
     age_seconds = (now_tpe() - last_updated_dt).total_seconds()
-    stale_seconds = MARKET_INDEX_STALE_SECONDS if index_key in MARKET_GATE_INDEX_KEYS else INDUSTRY_INDEX_STALE_SECONDS
-    return 0 <= age_seconds <= stale_seconds, age_seconds
+    if index_key in MARKET_GATE_INDEX_KEYS:
+        return (
+            -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS
+            <= age_seconds
+            <= MARKET_INDEX_STALE_SECONDS
+        ), age_seconds
+    return 0 <= age_seconds <= INDUSTRY_INDEX_STALE_SECONDS, age_seconds
+
+
+def market_gate_snapshots_are_fresh(snapshots: Dict[str, Dict[str, Any]]) -> bool:
+    return all(
+        get_market_index_snapshot_freshness(index_key, snapshots.get(index_key, {}))[0]
+        for index_key in MARKET_GATE_INDEX_KEYS
+    )
+
+
+def market_gate_diagnostic_fields(snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    for index_key in MARKET_GATE_INDEX_KEYS:
+        state = snapshots.get(index_key, {})
+        _, age_seconds = get_market_index_snapshot_freshness(index_key, state)
+        prefix = "twse" if index_key == "TWSE:MARKET" else "tpex"
+        fields[f"{prefix}_index"] = state.get("last_index")
+        fields[f"{prefix}_provider_last_updated"] = state.get("last_updated")
+        fields[f"{prefix}_received_at"] = state.get("received_at")
+        fields[f"{prefix}_age_seconds"] = age_seconds
+    return fields
+
+
+def get_critical_market_gate_snapshots(context: str) -> Dict[str, Dict[str, Any]]:
+    """資料逾時時只等待既有背景輪次；不在主執行緒額外查 REST。"""
+    snapshots, completed_round = get_market_gate_snapshots()
+    if market_gate_snapshots_are_fresh(snapshots):
+        return snapshots
+
+    stale_indices = [
+        index_key
+        for index_key in MARKET_GATE_INDEX_KEYS
+        if not get_market_index_snapshot_freshness(index_key, snapshots.get(index_key, {}))[0]
+    ]
+    wait_started = time.monotonic()
+    trade_log(
+        "MARKET_INDEX_CRITICAL_WAIT_START",
+        context=context,
+        stale_indices=",".join(stale_indices),
+        completed_round=completed_round,
+        timeout_seconds=MARKET_INDEX_CRITICAL_WAIT_SECONDS,
+        action="wait_existing_background_round_no_extra_rest_request",
+        **market_gate_diagnostic_fields(snapshots),
+    )
+
+    with MARKET_INDEX_ROUND_CONDITION:
+        MARKET_INDEX_ROUND_CONDITION.wait_for(
+            lambda: (
+                int(MARKET_INDEX_ROUND_STATE.get("completed_round", 0) or 0) > completed_round
+                or MARKET_INDEX_REST_FATAL_EVENT.is_set()
+                or MARKET_INDEX_REST_STOP_EVENT.is_set()
+            ),
+            timeout=MARKET_INDEX_CRITICAL_WAIT_SECONDS,
+        )
+
+    snapshots, new_completed_round = get_market_gate_snapshots()
+    fresh = market_gate_snapshots_are_fresh(snapshots)
+    trade_log(
+        "MARKET_INDEX_CRITICAL_WAIT_DONE",
+        error=not fresh,
+        context=context,
+        waited_seconds=f"{time.monotonic() - wait_started:.3f}",
+        previous_completed_round=completed_round,
+        completed_round=new_completed_round,
+        fresh=fresh,
+        action="use_refreshed_snapshot" if fresh else "fail_closed_no_extra_rest_request",
+        **market_gate_diagnostic_fields(snapshots),
+    )
+    return snapshots
 
 
 def is_market_index_fresh(index_key: str) -> tuple[bool, Optional[float]]:
@@ -1175,6 +1268,12 @@ def get_fresh_market_index_value_from_snapshot(
     is_fresh, age_seconds = get_market_index_snapshot_freshness(index_key, market_state)
     if not is_fresh:
         age_text = "--" if age_seconds is None else f"{age_seconds:.1f}"
+        if (
+            index_key in MARKET_GATE_INDEX_KEYS
+            and age_seconds is not None
+            and age_seconds < -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS
+        ):
+            return None, age_seconds, f"REST 指數供應商時間超前 age_seconds={age_text}"
         return None, age_seconds, f"REST 指數資料逾時 age_seconds={age_text}"
 
     try:
@@ -1187,12 +1286,15 @@ def get_fresh_market_index_value(index_key: str) -> tuple[Optional[float], Optio
     return get_fresh_market_index_value_from_snapshot(index_key, get_market_index_snapshot(index_key))
 
 
-def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
+def get_market_strategy_decision_gate_result(
+    index_key: str,
+    market_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     index_config = market_previous_close_indices.get(index_key, {})
     drop_percent = get_strategy_decision_drop_percent(index_key)
     rebound_percent = get_strategy_decision_rebound_percent(index_key)
     previous_close = index_config.get("previous_close")
-    market_state = get_market_index_snapshot(index_key)
+    market_state = get_market_index_snapshot(index_key) if market_state is None else dict(market_state)
     market_index_fresh, market_index_age = get_market_index_snapshot_freshness(index_key, market_state)
 
     result = {
@@ -1201,6 +1303,9 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         "name": index_config.get("name"),
         "previous_close": previous_close,
         "last_index": market_state.get("last_index"),
+        "current_change_percent": None,
+        "provider_last_updated": market_state.get("last_updated"),
+        "received_at": market_state.get("received_at"),
         "drop_threshold": None,
         "rebound_threshold": None,
         "previous_close_traded_above": bool(market_state.get("previous_close_traded_above")),
@@ -1234,6 +1339,13 @@ def get_market_strategy_decision_gate_result(index_key: str) -> Dict[str, Any]:
         result["drop_threshold"] = previous_close_float * (1 - drop_percent / 100.0)
     if rebound_percent is not None:
         result["rebound_threshold"] = previous_close_float * (1 - rebound_percent / 100.0)
+    try:
+        raw_last_index_float = float(market_state.get("last_index"))
+        result["current_change_percent"] = (
+            (raw_last_index_float - previous_close_float) / previous_close_float * 100.0
+        )
+    except (TypeError, ValueError):
+        pass
 
     last_index_float, market_index_age, market_index_error = get_fresh_market_index_value_from_snapshot(
         index_key,
@@ -1316,9 +1428,11 @@ def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
 
 def decide_entry_mode_by_market_gate(
     states: Dict[str, Dict[str, Any]],
+    market_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> tuple[int, list[Dict[str, Any]]]:
+    market_snapshots = market_snapshots or {}
     gate_results = [
-        get_market_strategy_decision_gate_result(index_key)
+        get_market_strategy_decision_gate_result(index_key, market_snapshots.get(index_key))
         for index_key in MARKET_GATE_INDEX_KEYS
     ]
 
@@ -1329,6 +1443,7 @@ def decide_entry_mode_by_market_gate(
             not result.get("symbol")
             or result.get("previous_close") in (None, "")
             or result.get("last_index") is None
+            or not result.get("index_fresh")
         )
     ]
     if data_issue_results:
@@ -1429,8 +1544,23 @@ def format_market_gate_age(value: Any) -> str:
         return str(value)
 
 
-def print_lower_strategy_early_breakout_deadline_summary() -> None:
+def format_market_gate_percent(value: Any, *, threshold_drop: bool = False) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        percent = float(value)
+        if threshold_drop and percent != 0:
+            percent = -percent
+        return f"{percent:+.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def print_lower_strategy_early_breakout_deadline_summary(
+    market_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
     """早盤突破截止分鐘結束後，列印並記錄兩指數的完整觸發結果。"""
+    market_snapshots = market_snapshots or {}
     deadline_text = (
         f"{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:"
         f"{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d}"
@@ -1439,17 +1569,17 @@ def print_lower_strategy_early_breakout_deadline_summary() -> None:
 
     for index_key in MARKET_GATE_INDEX_KEYS:
         index_config = market_previous_close_indices.get(index_key, {})
-        market_state = get_market_index_snapshot(index_key)
+        market_state = dict(market_snapshots.get(index_key) or get_market_index_snapshot(index_key))
         drop_percent = get_strategy_decision_drop_percent(index_key)
         previous_close = index_config.get("previous_close")
         passed = bool(market_state.get("early_breakout_passed"))
         breakout_index = market_state.get("early_breakout_index")
-        breakout_change_percent = market_state.get("early_breakout_change_percent")
         breakout_time = market_state.get("early_breakout_time")
-        last_index, age_seconds, data_error = get_fresh_market_index_value_from_snapshot(
+        _, age_seconds, data_error = get_fresh_market_index_value_from_snapshot(
             index_key,
             market_state,
         )
+        raw_last_index = market_state.get("last_index")
 
         try:
             previous_close_float = float(previous_close)
@@ -1464,49 +1594,46 @@ def print_lower_strategy_early_breakout_deadline_summary() -> None:
             and drop_percent is not None
         ):
             threshold = previous_close_float * (1 - drop_percent / 100.0)
-            if last_index is not None:
+            try:
+                display_last_index = float(raw_last_index)
+            except (TypeError, ValueError):
+                display_last_index = None
+            if display_last_index is not None:
                 latest_change_percent = (
-                    (last_index - previous_close_float) / previous_close_float * 100.0
+                    (display_last_index - previous_close_float) / previous_close_float * 100.0
                 )
+        else:
+            display_last_index = None
 
-        status_text = "PASS" if passed else "FAIL"
-        latest_text = format_market_gate_value(last_index)
-        latest_change_text = (
-            f"{latest_change_percent:+.2f}%" if latest_change_percent is not None else "N/A"
-        )
-        breakout_index_text = format_market_gate_value(breakout_index)
-        breakout_change_text = (
-            f"{float(breakout_change_percent):+.2f}%"
-            if breakout_change_percent is not None
-            else "N/A"
-        )
+        extra_breakout = ""
+        if passed:
+            extra_breakout = (
+                f" 突破值={format_market_gate_value(breakout_index)}"
+                f" 突破時間={format_market_gate_time(breakout_time)}"
+            )
         print(
-            f"[MODE] {index_key} status={status_text} "
-            f"設定跌幅={format_market_gate_value(drop_percent)}% "
-            f"昨收={format_market_gate_value(previous_close)} "
-            f"門檻={format_market_gate_value(threshold)} "
-            f"突破值={breakout_index_text} "
-            f"突破跌幅={breakout_change_text} "
-            f"突破時間={format_market_gate_time(breakout_time)} "
-            f"最新值={latest_text} "
-            f"最新漲跌={latest_change_text} "
-            f"資料年齡={format_market_gate_age(age_seconds)}"
+            f"[MODE] {index_key} {index_config.get('symbol') or ''} "
+            f"門檻跌幅={format_market_gate_percent(drop_percent, threshold_drop=True)} "
+            f"門檻值={format_market_gate_value(threshold)} "
+            f"當前值={format_market_gate_value(display_last_index)} "
+            f"當前漲跌={format_market_gate_percent(latest_change_percent)} "
+            f"早盤突破={'YES' if passed else 'NO'}{extra_breakout}"
         )
-        trade_log(
-            "LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE",
-            index_key=index_key,
-            status=status_text,
-            configured_drop_percent=drop_percent,
-            previous_close=previous_close,
-            threshold=threshold,
-            breakout_index=breakout_index,
-            breakout_change_percent=breakout_change_percent,
-            breakout_time=breakout_time,
-            latest_index=last_index,
-            latest_change_percent=latest_change_percent,
-            index_age_seconds=age_seconds,
-            data_error=data_error,
-        )
+        if data_error:
+            trade_log(
+                "MARKET_INDEX_BREAKOUT_DATA_ERROR",
+                error=True,
+                index_key=index_key,
+                symbol=index_config.get("symbol"),
+                stored_index=raw_last_index,
+                provider_last_updated=market_state.get("last_updated"),
+                received_at=market_state.get("received_at"),
+                index_age_seconds=age_seconds,
+                stale_limit_seconds=MARKET_INDEX_STALE_SECONDS,
+                future_tolerance_seconds=MARKET_INDEX_FUTURE_TOLERANCE_SECONDS,
+                reason=data_error,
+                action="diagnostic_only_breakout_state_remains_fail_closed",
+            )
 
 
 def print_entry_mode_decision(
@@ -1519,31 +1646,40 @@ def print_entry_mode_decision(
     lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
     print(f"[MODE] LOWER 個股池：{format_lower_decision_summary(lower_decision_summary)}")
     for result in gate_results:
+        drop_percent = get_strategy_decision_drop_percent(result["index_key"])
+        rebound_percent = get_strategy_decision_rebound_percent(result["index_key"])
+        if not result.get("index_fresh"):
+            rebound_maintained_text = "N/A"
+        elif result.get("rebound_level_maintained"):
+            rebound_maintained_text = "YES"
+        else:
+            rebound_maintained_text = "NO"
         print(
             f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
-            f"early_breakout_passed={result.get('early_breakout_passed')} "
-            f"early_breakout_side={result.get('early_breakout_side') or '--'} "
-            f"early_breakout_time={format_market_gate_time(result.get('early_breakout_time'))}"
+            f"門檻跌幅={format_market_gate_percent(drop_percent, threshold_drop=True)} "
+            f"門檻值={format_market_gate_value(result.get('drop_threshold'))} "
+            f"當前值={format_market_gate_value(result.get('last_index'))} "
+            f"當前漲跌={format_market_gate_percent(result.get('current_change_percent'))} "
+            f"早盤突破={'YES' if result.get('early_breakout_passed') else 'NO'} "
+            f"反彈失效門檻={format_market_gate_percent(rebound_percent, threshold_drop=True)}"
+            f"/{format_market_gate_value(result.get('rebound_threshold'))} "
+            f"決策門檻維持={rebound_maintained_text}"
         )
-    for result in gate_results:
-        print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
-            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
-            f"drop_threshold={format_market_gate_value(result.get('drop_threshold'))} "
-            f"rebound_threshold={format_market_gate_value(result.get('rebound_threshold'))} "
-            f"last_index={format_market_gate_value(result.get('last_index'))} "
-            f"index_fresh={result.get('index_fresh')} "
-            f"index_age={format_market_gate_age(result.get('index_age_seconds'))} "
-            f"stale_limit={MARKET_INDEX_STALE_SECONDS:.1f}s "
-            f"rebound_level_maintained={result.get('rebound_level_maintained')}"
-        )
-    for result in gate_results:
-        print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
-            f"previous_close={format_market_gate_value(result.get('previous_close'))} "
-            f"last_index={format_market_gate_value(result.get('last_index'))} "
-            f"lower_reason={result.get('lower_reason') or '--'}"
-        )
+        if not result.get("index_fresh") or result.get("last_index") is None:
+            trade_log(
+                "MARKET_INDEX_DECISION_DATA_ERROR",
+                error=True,
+                index_key=result["index_key"],
+                symbol=result.get("symbol"),
+                stored_index=result.get("last_index"),
+                provider_last_updated=result.get("provider_last_updated"),
+                received_at=result.get("received_at"),
+                index_age_seconds=result.get("index_age_seconds"),
+                stale_limit_seconds=MARKET_INDEX_STALE_SECONDS,
+                future_tolerance_seconds=MARKET_INDEX_FUTURE_TOLERANCE_SECONDS,
+                reason=result.get("lower_reason") or "市場指數資料不足",
+                action="fail_closed",
+            )
 
 
 def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: int) -> None:
@@ -1605,7 +1741,12 @@ def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool
     received_at = now_tpe()
     provider_age_seconds = (received_at - provider_time).total_seconds()
     stale_seconds = MARKET_INDEX_STALE_SECONDS if index_key in MARKET_GATE_INDEX_KEYS else INDUSTRY_INDEX_STALE_SECONDS
-    is_fresh = 0 <= provider_age_seconds <= stale_seconds
+    minimum_age_seconds = (
+        -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS
+        if index_key in MARKET_GATE_INDEX_KEYS
+        else 0.0
+    )
+    is_fresh = minimum_age_seconds <= provider_age_seconds <= stale_seconds
     diagnostic_time_reached = (received_at.hour, received_at.minute) >= (9, 0)
     with MARKET_INDEX_STATE_LOCK:
         market_state = MARKET_INDEX_STATE.setdefault(index_key, {})
@@ -1628,6 +1769,8 @@ def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool
         trade_log(
             "INDEX_REST_STALE", error=True, index_key=index_key, symbol=index_symbol,
             provider_age_seconds=f"{provider_age_seconds:.1f}", stale_limit_seconds=stale_seconds,
+            provider_last_updated=provider_time.isoformat(), received_at=received_at.isoformat(),
+            index_value=index_value,
             action="fail_closed",
         )
     if is_fresh:
@@ -1654,34 +1797,33 @@ def get_required_industry_index_keys(states: Dict[str, Dict[str, Any]]) -> list[
     } - set(MARKET_GATE_INDEX_KEYS))
 
 
-def print_rest_quote_round_capacity_estimate(states: Dict[str, Dict[str, Any]]) -> None:
+def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> None:
     stock_count = sum(1 for state in states.values() if not state.get("traded"))
     industry_count = len(get_required_industry_index_keys(states))
-    request_count = stock_count + industry_count
-    usable_seconds = max(0.0, QUOTE_ROUND_INTERVAL_SECONDS - REST_QUOTE_ROUND_SAFETY_SECONDS)
-    max_requests_per_round = math.floor(
-        (usable_seconds + 1e-9) / REST_QUOTE_ESTIMATED_SECONDS_PER_REQUEST
+    stock_and_industry_per_round = stock_count + industry_count
+    stock_quote_rounds_per_minute = math.ceil(60 / QUOTE_ROUND_INTERVAL_SECONDS)
+    stock_and_industry_per_minute = stock_and_industry_per_round * stock_quote_rounds_per_minute
+
+    market_index_count = len(MARKET_GATE_INDEX_KEYS)
+    market_index_rounds_per_minute = math.ceil(60 / MARKET_INDEX_REST_POLL_SECONDS)
+    market_indices_per_minute = market_index_count * market_index_rounds_per_minute
+
+    total_per_minute = stock_and_industry_per_minute + market_indices_per_minute
+    usage_percent = total_per_minute / INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE * 100
+
+    print(
+        f"個股與產業指數：{stock_and_industry_per_round} × {stock_quote_rounds_per_minute} "
+        f"= {stock_and_industry_per_minute} 次／分鐘"
     )
-    max_stock_count_for_current_industries = max(0, max_requests_per_round - industry_count)
-    estimated_seconds = request_count * REST_QUOTE_ESTIMATED_SECONDS_PER_REQUEST
-    margin_seconds = usable_seconds - estimated_seconds
-    status = "OK" if estimated_seconds <= usable_seconds else "RISK"
-    trade_log(
-        "REST_QUOTE_ROUND_CAPACITY",
-        error=status == "RISK",
-        status=status,
-        stocks=stock_count,
-        industries=industry_count,
-        requests_per_round=request_count,
-        estimated_max_requests_per_round=max_requests_per_round,
-        estimated_max_stocks_for_current_industries=max_stock_count_for_current_industries,
-        estimated_seconds_per_request=REST_QUOTE_ESTIMATED_SECONDS_PER_REQUEST,
-        estimated_round_seconds=f"{estimated_seconds:.1f}",
-        round_budget_seconds=f"{QUOTE_ROUND_INTERVAL_SECONDS:.1f}",
-        safety_reserve_seconds=f"{REST_QUOTE_ROUND_SAFETY_SECONDS:.1f}",
-        usable_request_seconds=f"{usable_seconds:.1f}",
-        estimated_margin_seconds=f"{margin_seconds:.1f}",
-        action="review_candidate_count_before_market_open" if status == "RISK" else "none",
+    print(
+        f"大盤 IX0001、IX0043：{market_index_count} × {market_index_rounds_per_minute} "
+        f"= {market_indices_per_minute} 次／分鐘"
+    )
+    print(f"合計：約 {total_per_minute} 次／分鐘")
+    print(f"連線限制：每分鐘 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} 次")
+    print(
+        f"使用率預做：{total_per_minute} ÷ {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} "
+        f"= {usage_percent:.0f}%"
     )
 
 
@@ -1703,7 +1845,7 @@ def log_market_index_rest_watchdog_once(now_local: datetime) -> None:
             if reference_dt.tzinfo is None:
                 reference_dt = TZ.localize(reference_dt)
             age_seconds = (now_local - reference_dt).total_seconds()
-            if age_seconds < MARKET_INDEX_STALE_SECONDS:
+            if age_seconds <= MARKET_INDEX_STALE_SECONDS:
                 live_state["rest_watchdog_logged"] = False
                 continue
             if live_state.get("rest_watchdog_logged"):
@@ -1732,12 +1874,12 @@ def start_market_index_rest_poller(realtime_sdk: EsunMarketdata) -> threading.Th
                 minute=MARKET_INDEX_REST_START_TIME[1],
                 second=0,
                 microsecond=0,
-            )
+            ) + timedelta(seconds=MARKET_INDEX_REST_POLL_OFFSET_SECONDS)
             wait_seconds = max(0.0, (start_at - now_local).total_seconds())
             if wait_seconds > 0:
                 trade_log(
                     "MARKET_INDEX_REST_WAITING",
-                    start_time=f"{MARKET_INDEX_REST_START_TIME[0]:02d}:{MARKET_INDEX_REST_START_TIME[1]:02d}:00",
+                    start_time=start_at.strftime("%H:%M:%S.%f")[:-3],
                     wait_seconds=f"{wait_seconds:.1f}",
                 )
                 if MARKET_INDEX_REST_STOP_EVENT.wait(timeout=wait_seconds):
@@ -1747,6 +1889,7 @@ def start_market_index_rest_poller(realtime_sdk: EsunMarketdata) -> threading.Th
                 "MARKET_INDEX_REST_POLLING_START",
                 symbols=",".join(str(market_previous_close_indices.get(key, {}).get("symbol", "")) for key in MARKET_GATE_INDEX_KEYS),
                 interval_seconds=MARKET_INDEX_REST_POLL_SECONDS,
+                offset_seconds=MARKET_INDEX_REST_POLL_OFFSET_SECONDS,
             )
             polling_started_at = now_tpe().isoformat()
             with MARKET_INDEX_STATE_LOCK:
@@ -1757,8 +1900,25 @@ def start_market_index_rest_poller(realtime_sdk: EsunMarketdata) -> threading.Th
                     if MARKET_INDEX_REST_STOP_EVENT.is_set():
                         return
                     update_index_from_rest(realtime_sdk, index_key)
+                with MARKET_INDEX_ROUND_CONDITION:
+                    MARKET_INDEX_ROUND_STATE["completed_round"] = (
+                        int(MARKET_INDEX_ROUND_STATE.get("completed_round", 0) or 0) + 1
+                    )
+                    MARKET_INDEX_ROUND_STATE["completed_at"] = now_tpe().isoformat()
+                    MARKET_INDEX_ROUND_STATE["snapshots"] = {
+                        index_key: dict(MARKET_INDEX_STATE.get(index_key, {}))
+                        for index_key in MARKET_GATE_INDEX_KEYS
+                    }
+                    MARKET_INDEX_ROUND_CONDITION.notify_all()
                 now_local = now_tpe()
-                next_poll = ceil_next_interval(now_local, MARKET_INDEX_REST_POLL_SECONDS)
+                poll_offset = timedelta(seconds=MARKET_INDEX_REST_POLL_OFFSET_SECONDS)
+                next_poll = (
+                    ceil_next_interval(
+                        now_local - poll_offset,
+                        MARKET_INDEX_REST_POLL_SECONDS,
+                    )
+                    + poll_offset
+                )
                 MARKET_INDEX_REST_STOP_EVENT.wait(timeout=max(0.2, (next_poll - now_local).total_seconds()))
         except Exception as exc:
             trade_log(
@@ -1769,6 +1929,8 @@ def start_market_index_rest_poller(realtime_sdk: EsunMarketdata) -> threading.Th
             )
             MARKET_INDEX_REST_FATAL_EVENT.set()
         finally:
+            with MARKET_INDEX_ROUND_CONDITION:
+                MARKET_INDEX_ROUND_CONDITION.notify_all()
             if not MARKET_INDEX_REST_STOP_EVENT.is_set():
                 trade_log(
                     "MARKET_INDEX_REST_POLLER_STOPPED",
@@ -3495,7 +3657,10 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             not lower_strategy_early_breakout_deadline_announced
             and now_hm > lower_strategy_early_breakout_deadline_hm
         ):
-            print_lower_strategy_early_breakout_deadline_summary()
+            market_snapshots = get_critical_market_gate_snapshots(
+                "lower_strategy_early_breakout_deadline_summary"
+            )
+            print_lower_strategy_early_breakout_deadline_summary(market_snapshots)
             lower_strategy_early_breakout_deadline_announced = True
 
         if (
@@ -3505,7 +3670,13 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             print(f"⏰ 模式判斷時間！目前時間：{now_local.strftime('%H:%M:%S')}")
             lower_strategy_decision_announced = True
             if not entry_mode_decided:
-                entry_mode, gate_results = decide_entry_mode_by_market_gate(states)
+                market_snapshots = get_critical_market_gate_snapshots(
+                    "lower_strategy_decision"
+                )
+                entry_mode, gate_results = decide_entry_mode_by_market_gate(
+                    states,
+                    market_snapshots,
+                )
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results, states)
                 entry_mode_decided = True
@@ -3714,6 +3885,10 @@ if __name__ == "__main__":
         MARKET_INDEX_REST_STOP_EVENT.clear()
         MARKET_INDEX_REST_FATAL_EVENT.clear()
         LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
+        with MARKET_INDEX_ROUND_CONDITION:
+            MARKET_INDEX_ROUND_STATE["completed_round"] = 0
+            MARKET_INDEX_ROUND_STATE["completed_at"] = None
+            MARKET_INDEX_ROUND_STATE["snapshots"] = {}
         clear_state_dir()
         persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
@@ -3764,7 +3939,7 @@ if __name__ == "__main__":
         states.update(limit_down_states)
         ACTIVE_ORDER_STATES.clear()
         ACTIVE_ORDER_STATES.update(states)
-        print_rest_quote_round_capacity_estimate(states)
+        print_rest_quote_rate_limit_estimate(states)
 
         trade_report_thread = start_trade_report_stream(sdk)
         time.sleep(1.0)  # 先讓交易回報 WebSocket 建立連線
