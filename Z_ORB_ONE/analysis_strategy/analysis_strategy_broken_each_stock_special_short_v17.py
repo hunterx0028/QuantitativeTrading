@@ -115,8 +115,8 @@ LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結�
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
+LIMIT_UP_REBOUND_PERCENT = 5.0 # 反向突破門檻：昨收到漲停價距離的百分比
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
-LIMIT_UP_REBOUND_PERCENT = 2.0 # 反向突破門檻：昨收到漲停價距離的百分比
 LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
 LIMIT_UP_LEAVE_TIME = (9, 25) # limit up 最晚嘗試進場時間，包含此時間點
 
