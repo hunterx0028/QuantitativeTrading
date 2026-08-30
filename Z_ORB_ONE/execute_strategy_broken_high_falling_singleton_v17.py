@@ -137,9 +137,9 @@ ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS = 60.0  # AGR0005 後依券商指示�
 MARKET_INDEX_REST_POLL_SECONDS = 5
 MARKET_INDEX_REST_POLL_OFFSET_SECONDS = 1.0  # 避開供應商整 5 秒快照剛發布的邊界
 MARKET_INDEX_REST_START_TIME = REALTIME_QUOTE_START_TIME
-MARKET_INDEX_STALE_SECONDS = 12.0  # 容許兩個 5 秒供應週期及少量網路/排程誤差
+MARKET_INDEX_STALE_SECONDS = 17.0  # 容許三個 5 秒供應週期及少量網路/排程誤差
 MARKET_INDEX_FUTURE_TOLERANCE_SECONDS = 1.0  # 容許供應商與本機最多 1 秒時鐘偏差
-MARKET_INDEX_CRITICAL_WAIT_SECONDS = 3.0  # 關鍵判斷資料逾時時，最多等待既有背景輪次完成
+MARKET_INDEX_CRITICAL_WAIT_SECONDS = 13.0  # 關鍵判斷資料逾時時，最多等待既有背景輪次恢復為新鮮資料
 INDUSTRY_INDEX_STALE_SECONDS = 20.0  # 產業指數配合每分鐘四輪 REST 查詢
 QUOTE_ROUND_INTERVAL_SECONDS = 15.0
 INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 2000
@@ -1192,6 +1192,14 @@ def market_gate_snapshots_are_fresh(snapshots: Dict[str, Dict[str, Any]]) -> boo
     )
 
 
+def market_gate_round_state_is_fresh_locked() -> bool:
+    snapshots = MARKET_INDEX_ROUND_STATE.get("snapshots", {})
+    return market_gate_snapshots_are_fresh({
+        index_key: dict(snapshots.get(index_key, {}))
+        for index_key in MARKET_GATE_INDEX_KEYS
+    })
+
+
 def market_gate_diagnostic_fields(snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     for index_key in MARKET_GATE_INDEX_KEYS:
@@ -1230,7 +1238,7 @@ def get_critical_market_gate_snapshots(context: str) -> Dict[str, Dict[str, Any]
     with MARKET_INDEX_ROUND_CONDITION:
         MARKET_INDEX_ROUND_CONDITION.wait_for(
             lambda: (
-                int(MARKET_INDEX_ROUND_STATE.get("completed_round", 0) or 0) > completed_round
+                market_gate_round_state_is_fresh_locked()
                 or MARKET_INDEX_REST_FATAL_EVENT.is_set()
                 or MARKET_INDEX_REST_STOP_EVENT.is_set()
             ),
