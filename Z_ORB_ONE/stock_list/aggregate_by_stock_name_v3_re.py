@@ -9,12 +9,12 @@ MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
-LONG_LIMIT_UP_DAYS = [6] # 分入 selected_limit_up_stocks 的實際連續漲停天數
-SHORT_LIMIT_DOWN_DAYS = [6] # 分入 selected_limit_down_stocks 的實際連續跌停天數
+LONG_LIMIT_UP_DAYS = [10] # 分入 selected_limit_up_stocks 的實際連續漲停天數
+SHORT_LIMIT_DOWN_DAYS = [10] # 分入 selected_limit_down_stocks 的實際連續跌停天數
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
-MIN_REPEAT_COUNT = 5 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
+MIN_REPEAT_COUNT = 3 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 EXCLUDED_INDUSTRY_CODES: list[str] = ["17"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"

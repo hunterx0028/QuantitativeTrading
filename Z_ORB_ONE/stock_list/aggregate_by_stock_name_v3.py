@@ -27,7 +27,7 @@ TOP_RANK = 100 # 出現次數的排名，僅是打印用，和寫入 stock_data.
 MIN_REPEAT_COUNT = 3 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 ST_DB_KEEP_RECENT_FILE_COUNT = 25 # st_db 保留最新 25 個日期檔案
-ST_DB_CALCULATE_RECENT_FILE_COUNT = 5 # 從保留檔案中取最新 14 個進行統計
+ST_DB_CALCULATE_RECENT_FILE_COUNT = 3 # 從保留檔案中取最新 14 個進行統計
 
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 TOP_REPEAT_RESULT_HEADER_PREFIX = "# FILTER_RESULT"

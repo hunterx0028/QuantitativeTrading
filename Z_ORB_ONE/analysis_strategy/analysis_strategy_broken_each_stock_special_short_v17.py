@@ -20,7 +20,7 @@ LIMIT_DOWN 策略成立條件
 
 LOWER 模式個股入場條件
 1. 於 STRATEGY_START_LOWER～STRATEGY_END_LOWER（含）逐根尋找 low 落在「昨收到跌停價」之 LOWER_ENTRY_RANGE_START_PERCENT～LOWER_ENTRY_RANGE_END_PERCENT 區間內的分 K。
-2. 以上述分 K 的 low 作為放空入場價。
+2. 以上述分 K 的下一根分 K low 作為放空入場價。
 3. 入場當下 IX0001、IX0043 均仍須維持 LOWER；若個股所屬產業指數未通過，繼續檢查後續分 K。
 
 三種模式共同入場保護
@@ -112,7 +112,7 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
@@ -1525,7 +1525,7 @@ def iter_entry_signal_lower_candidates(
     作空進場候選訊號：
     1) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
     2) 逐根回傳 low 落在入場區間的 K 棒
-    3) 候選進場價 = 進場分 K 棒 open
+    3) 候選進場價 = 訊號分 K 下一根 K 棒 low
     """
     start_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
     end_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
@@ -1547,8 +1547,8 @@ def iter_entry_signal_lower_candidates(
         indexed_bars.append((idx, bar, hm))
     indexed_bars.sort(key=lambda item: item[1]['dt'])
 
-    for original_idx, bar, hm in indexed_bars:
-        if bar.get('low') is None or bar.get('open') is None:
+    for sorted_idx, (_original_idx, bar, hm) in enumerate(indexed_bars):
+        if bar.get('low') is None:
             continue
 
         if not (start_hm <= hm <= end_hm):
@@ -1558,8 +1558,14 @@ def iter_entry_signal_lower_candidates(
         if not is_price_in_entry_range(signal_price, entry_lower_bound, entry_upper_bound):
             continue
 
-        entry_price = float(bar['open'])
-        yield bar, entry_price
+        if sorted_idx + 1 >= len(indexed_bars):
+            continue
+        _next_original_idx, entry_bar, _entry_hm = indexed_bars[sorted_idx + 1]
+        if entry_bar.get('low') is None:
+            continue
+
+        entry_price = float(entry_bar['low'])
+        yield entry_bar, entry_price
 
 
 def scan_entry_signal_lower(
@@ -2318,8 +2324,13 @@ def find_trade_candidate_on_date(
     if not has_enough_minute_bars_before_0930(today_bars):
         return None
 
+    today_ordered = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+
     if strategy_type == STRATEGY_LOWER:
-        entry_candidates = iter_entry_signal_lower_candidates(today_bars, ystats)
+        entry_candidates = iter_entry_signal_lower_candidates(today_ordered, ystats)
         intraday_compare_end = INTRADAY_COMPARE_END_LOWER
         trade_side = TRADE_SIDE_SHORT
     else:
@@ -2353,7 +2364,7 @@ def find_trade_candidate_on_date(
             target_date,
             entry_bar,
             entry_price,
-            today_bars,
+            today_ordered,
             limit_up_price,
             limit_down_price,
             strategy_type,
