@@ -89,8 +89,8 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-INCLUDE_LOWER_IN_PRINT_STATS = False
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ LOWER_STRATEGY_DECISION = (9, 31) # LOWER 市場模式判斷截止分K棒的(時
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
-INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_LOWER = (12, 50)  # lower 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
 

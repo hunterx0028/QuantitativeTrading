@@ -95,7 +95,7 @@ LOWER_STRATEGY_DECISION = (9, 31)  # LOWER 市場模式判斷截止時間，不�
 ENTRY_CHECK_START_TIME_LOWER = (9, 32)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 
-FORCE_CLOSE_TIME_LOWER = (13, 0)  # lower 收盤前強制平倉時間
+FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LIMIT_DOWN = (13, 0)  # limit down 收盤前強制平倉時間
 FORCE_CLOSE_TIME_LIMIT_UP = (13, 0)  # limit up 收盤前強制平倉時間
 

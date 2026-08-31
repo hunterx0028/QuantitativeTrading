@@ -16,18 +16,18 @@ REQUEST_INTERVAL_SEC = 1
 MIN_ATR = 4.0
 ATR_PERIOD = 14
 
-MAX_LIMIT_UP_PRICE = 300.0
+MAX_LIMIT_UP_PRICE = 1000.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 
-LIMIT_UP_REPEAT_COUNT = 1 # 連漲停多少次，才分開列於 stock_data.py
-LIMIT_DOWN_REPEAT_COUNT = 1 # 連跌停多少次，才分開列於 stock_data.py
+LIMIT_UP_REPEAT_COUNT = 10 # 連漲停多少次，才分開列於 stock_data.py
+LIMIT_DOWN_REPEAT_COUNT = 10 # 連跌停多少次，才分開列於 stock_data.py
 
 TOP_RANK = 100 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
 MIN_REPEAT_COUNT = 3 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
 
 ST_DB_KEEP_RECENT_FILE_COUNT = 25 # st_db 保留最新 25 個日期檔案
-ST_DB_CALCULATE_RECENT_FILE_COUNT = 10 # 從保留檔案中取最新 14 個進行統計
+ST_DB_CALCULATE_RECENT_FILE_COUNT = 5 # 從保留檔案中取最新 14 個進行統計
 
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 TOP_REPEAT_RESULT_HEADER_PREFIX = "# FILTER_RESULT"
