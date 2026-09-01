@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
@@ -9,17 +10,17 @@ MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
 MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
 
-LONG_LIMIT_UP_DAYS = [10] # 分入 selected_limit_up_stocks 的實際連續漲停天數
-SHORT_LIMIT_DOWN_DAYS = [10] # 分入 selected_limit_down_stocks 的實際連續跌停天數
+LONG_LIMIT_UP_DAYS = [99] # 分入 selected_limit_up_stocks 的實際連續漲停天數
+SHORT_LIMIT_DOWN_DAYS = [99] # 分入 selected_limit_down_stocks 的實際連續跌停天數
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
-MIN_REPEAT_COUNT = 3 # 最少的累計次數，這裡才是寫入 stock_data.py 的基礎數值
+MIN_REPEAT_COUNT = 0 # 從快取最新交易日起，股票不中斷出現的最少交易日數；設為 0 時取消此條件，供擴大測試樣本使用
 
 EXCLUDED_INDUSTRY_CODES: list[str] = ["17"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"
 
-RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result.txt"
+CACHE_FILE_NAME = "aggregate_by_stock_cache.json"
 OUTPUT_RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result_re.txt"
 EXECUTION_START_TIME_PREFIX = "# [INFO] 執行開始時間:"
 ALL_RESULT_REPEAT_COUNT_SORT_HEADER = "# ALL_RESULT_REPEAT_COUNT_SORT"
@@ -29,6 +30,133 @@ LEGACY_TOP_REPEAT_HEADER_PREFIX = "# TOP_REPEAT_RESULT"
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def lists_to_tuples(value):
+    if isinstance(value, list):
+        return tuple(lists_to_tuples(item) for item in value)
+    return value
+
+
+def load_cache(cache_path: Path) -> tuple[list[str], list[dict]]:
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    if cache.get("schema_version") != 2:
+        raise ValueError(f"不支援的快取格式版本: {cache.get('schema_version')}")
+
+    trading_dates = sorted({str(item) for item in cache.get("trading_dates", [])})
+    stocks = cache.get("stocks")
+    if not isinstance(stocks, list):
+        raise ValueError("快取缺少 stocks 陣列")
+    return trading_dates, stocks
+
+
+def count_recent_consecutive_occurrences(
+    occurrence_dates: list[str],
+    trading_dates: list[str],
+) -> int:
+    """由快取最新交易日起，計算股票不中斷出現的交易日數。"""
+    occurrences = {str(item) for item in occurrence_dates}
+    count = 0
+    for trading_date in reversed(trading_dates):
+        if trading_date not in occurrences:
+            break
+        count += 1
+    return count
+
+
+def count_recent_consecutive_limit_days(
+    daily_limit_states: list[dict],
+    limit_trading_dates: list[str],
+    state_name: str,
+) -> int:
+    """由 API 資料的最新交易日起累計，遇到缺日或不符合即停止。"""
+    state_by_date = {
+        str(state.get("date")): bool(state.get(state_name))
+        for state in daily_limit_states
+        if isinstance(state, dict) and state.get("date")
+    }
+    count = 0
+    for trading_date in reversed(limit_trading_dates):
+        if not state_by_date.get(trading_date, False):
+            break
+        count += 1
+    return count
+
+
+def apply_limit_counts(record: tuple, up_count: int, down_count: int) -> tuple:
+    updated = list(record)
+    if len(updated) >= 2:
+        updated[-1] = (int(up_count), int(down_count))
+    else:
+        updated.append((int(up_count), int(down_count)))
+    return tuple(updated)
+
+
+def build_ranked_records(
+    trading_dates: list[str],
+    stocks: list[dict],
+) -> tuple[list[tuple[tuple, int]], list[tuple[tuple, int]]]:
+    total_ranked = []
+    consecutive_ranked = []
+    limit_trading_dates = sorted(
+        {
+            str(state.get("date"))
+            for stock in stocks
+            for state in stock.get("daily_limit_states", [])
+            if isinstance(state, dict) and state.get("date")
+        }
+    )
+    for stock in stocks:
+        record = lists_to_tuples(stock.get("record"))
+        if not isinstance(record, tuple):
+            continue
+        daily_limit_states = stock.get("daily_limit_states", [])
+        if not isinstance(daily_limit_states, list):
+            daily_limit_states = []
+        up_count = count_recent_consecutive_limit_days(
+            daily_limit_states,
+            limit_trading_dates,
+            "is_limit_up",
+        )
+        down_count = count_recent_consecutive_limit_days(
+            daily_limit_states,
+            limit_trading_dates,
+            "is_limit_down",
+        )
+        record = apply_limit_counts(record, up_count, down_count)
+        occurrence_dates = [str(item) for item in stock.get("occurrence_dates", [])]
+        total_ranked.append((record, len(set(occurrence_dates))))
+        consecutive_ranked.append(
+            (
+                record,
+                count_recent_consecutive_occurrences(occurrence_dates, trading_dates),
+            )
+        )
+
+    sort_key = lambda item: (-item[1], str(item[0][0]) if item[0] else "")
+    total_ranked.sort(key=sort_key)
+    consecutive_ranked.sort(key=sort_key)
+    return total_ranked, consecutive_ranked
+
+
+def build_result_lines(
+    execution_start_time: str,
+    ranked_records: list[tuple[tuple, int]],
+    rank_records: list[tuple],
+    rank_header: str,
+    repeat_records: list[tuple],
+    repeat_header: str,
+) -> list[str]:
+    lines = [f"{EXECUTION_START_TIME_PREFIX} {execution_start_time}\n"]
+    lines.append(f"{ALL_RESULT_REPEAT_COUNT_SORT_HEADER}\n")
+    lines.extend(f"{record},{count},\n" for record, count in ranked_records)
+    lines.append("\n# ALL_RESULT\n")
+    lines.extend(f"{record},\n" for record, _count in ranked_records)
+    lines.append(f"\n{TOP_REPEAT_RESULT_HEADER_PREFIX} ({rank_header})\n")
+    lines.extend(f"{record},\n" for record in rank_records)
+    lines.append(f"\n{TOP_REPEAT_RESULT_HEADER_PREFIX} ({repeat_header})\n")
+    lines.extend(f"{record},\n" for record in repeat_records)
+    return lines
 
 
 def parse_rank_line(line: str):
@@ -400,28 +528,33 @@ def main() -> None:
             )
 
     base_dir = Path(__file__).resolve().parent
-    result_path = base_dir / RESULT_FILE_NAME
+    cache_path = base_dir / "aggregate_json_cache" / CACHE_FILE_NAME
     output_result_path = base_dir / OUTPUT_RESULT_FILE_NAME
     stock_data_path = base_dir.parent.parent / "Z_ORB_ONE" / "stock_data.py"
 
-    if not result_path.exists():
-        raise FileNotFoundError(f"找不到檔案: {result_path}")
+    if not cache_path.exists():
+        raise FileNotFoundError(f"找不到快取檔案: {cache_path}")
 
-    lines = result_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    ranked_records = extract_ranked_records(lines)
+    trading_dates, cached_stocks = load_cache(cache_path)
+    ranked_records, consecutive_ranked_records = build_ranked_records(
+        trading_dates,
+        cached_stocks,
+    )
     price_filtered_ranked_records = filter_records_by_price_range(ranked_records)
     atr_filtered_ranked_records = filter_records_by_min_atr(price_filtered_ranked_records)
     filtered_ranked_records = filter_records_by_excluded_industries(atr_filtered_ranked_records)
+    consecutive_price_filtered = filter_records_by_price_range(consecutive_ranked_records)
+    consecutive_atr_filtered = filter_records_by_min_atr(consecutive_price_filtered)
+    consecutive_filtered = filter_records_by_excluded_industries(consecutive_atr_filtered)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
-    repeat_records, repeat_header = select_records_for_repeat_count(filtered_ranked_records)
-    updated_lines = upsert_execution_start_time(lines, execution_start_time)
-    updated_lines = remove_section_by_header_prefix(updated_lines, LEGACY_TOP_REPEAT_HEADER_PREFIX)
-    updated_lines = replace_top_repeat_section(
-        updated_lines,
-        [
-            (rank_records, rank_header),
-            (repeat_records, repeat_header),
-        ],
+    repeat_records, repeat_header = select_records_for_repeat_count(consecutive_filtered)
+    updated_lines = build_result_lines(
+        execution_start_time,
+        ranked_records,
+        rank_records,
+        rank_header,
+        repeat_records,
+        repeat_header,
     )
     output_result_path.write_text("".join(updated_lines), encoding="utf-8")
     # 一般名單仍須通過價位、ATR、產業與出現次數篩選；符合連續漲跌停天數者則直接從
@@ -442,7 +575,8 @@ def main() -> None:
 
     log(f"done: {output_result_path}")
     log(f"updated selected_stocks: {stock_data_path}")
-    log(f"source={result_path}")
+    log(f"source={cache_path}")
+    log(f"trading_dates={trading_dates}")
     log(f"ranked_count={len(ranked_records)}")
     log(f"price_filtered_ranked_count={len(price_filtered_ranked_records)}")
     log(f"atr_filtered_ranked_count={len(atr_filtered_ranked_records)}")
