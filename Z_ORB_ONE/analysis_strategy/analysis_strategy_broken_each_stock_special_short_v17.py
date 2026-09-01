@@ -1720,11 +1720,12 @@ def has_limit_sequence_before_date(
     return actual_days in allowed_days
 
 
-def find_third_consecutive_limit_up_dates(
+def find_consecutive_limit_up_dates(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
+    target_days: int,
 ) -> list[tuple[date, str, str]]:
-    """找出每段連續收漲停首次達到 3 天的日期與股票。"""
+    """找出每段連續收漲停首次達到指定天數的日期與股票。"""
     rows: list[tuple[date, str, str]] = []
     for stock_item in stock_list:
         stock_name = stock_item[0]
@@ -1741,20 +1742,37 @@ def find_third_consecutive_limit_up_dates(
             limit_up_price, _ = calculate_limit_prices(daily_map[previous_date]['close'])
             if is_same_price(daily_map[current_date]['close'], limit_up_price):
                 consecutive_days += 1
-                if consecutive_days == 3:
+                if consecutive_days == target_days:
                     rows.append((current_date, stock_name, industry_code))
             else:
                 consecutive_days = 0
     return sorted(rows, key=lambda row: (row[0], row[1]), reverse=True)
 
 
-def print_third_consecutive_limit_up_references(
+def find_second_consecutive_limit_up_dates(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
+) -> list[tuple[date, str, str]]:
+    """找出每段連續收漲停首次達到 2 天的日期與股票。"""
+    return find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, 2)
+
+
+def find_third_consecutive_limit_up_dates(
+    stock_list: list[tuple],
+    day_candles_by_symbol: dict[str, list],
+) -> list[tuple[date, str, str]]:
+    """找出每段連續收漲停首次達到 3 天的日期與股票。"""
+    return find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, 3)
+
+
+def print_consecutive_limit_up_references(
+    stock_list: list[tuple],
+    day_candles_by_symbol: dict[str, list],
+    target_days: int,
 ) -> None:
-    """額外列印連續收漲停首次達到 3 天的參考標的，不影響交易資格。"""
-    rows = find_third_consecutive_limit_up_dates(stock_list, day_candles_by_symbol)
-    print('========== 連續收漲停 3 天參考標的 ==========')
+    """額外列印連續收漲停首次達到指定天數的參考標的，不影響交易資格。"""
+    rows = find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, target_days)
+    print(f'========== 連續收漲停 {target_days} 天參考標的 ==========')
     if not rows:
         print('無')
     else:
@@ -1763,8 +1781,16 @@ def print_third_consecutive_limit_up_references(
                 f'{format_date_with_weekday(limit_date.strftime("%Y-%m-%d"))} '
                 f'{format_stock_label(stock_name, industry_code)}'
             )
-    print('========== 連續收漲停 3 天參考標的結束 ==========')
+    print(f'========== 連續收漲停 {target_days} 天參考標的結束 ==========')
     print('')
+
+
+def print_third_consecutive_limit_up_references(
+    stock_list: list[tuple],
+    day_candles_by_symbol: dict[str, list],
+) -> None:
+    """額外列印連續收漲停首次達到 3 天的參考標的，不影響交易資格。"""
+    print_consecutive_limit_up_references(stock_list, day_candles_by_symbol, 3)
 
 
 def build_trade_candidate(
@@ -2795,6 +2821,11 @@ def main() -> None:
             )
             print(f'已儲存API快取: {cache_path.name}')
 
+        print_consecutive_limit_up_references(
+            analysis_stock_list,
+            day_candles_by_symbol,
+            2,
+        )
         print_third_consecutive_limit_up_references(
             analysis_stock_list,
             day_candles_by_symbol,
