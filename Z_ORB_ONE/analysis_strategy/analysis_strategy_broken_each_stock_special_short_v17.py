@@ -373,6 +373,7 @@ def save_api_cache(
     index_minute_raw_by_key: dict[str, list],
 ) -> None:
     """儲存 API 快取。"""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         'stock_names': [item[0] for item in stock_list],
         'day_candles_by_symbol': day_candles_by_symbol,
