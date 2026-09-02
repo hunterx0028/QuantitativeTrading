@@ -20,7 +20,7 @@ LIMIT_DOWN 策略成立條件
 
 LOWER 模式個股入場條件
 1. 於 STRATEGY_START_LOWER～STRATEGY_END_LOWER（含）逐根尋找 low 落在「昨收到跌停價」之 LOWER_ENTRY_RANGE_START_PERCENT～LOWER_ENTRY_RANGE_END_PERCENT 區間內的分 K。
-2. 以上述分 K 的 low 作為放空入場價。
+2. 以上述分 K 的下一根分 K low 作為放空入場價。
 3. 入場當下 IX0001、IX0043 均仍須維持 LOWER；若個股所屬產業指數未通過，繼續檢查後續分 K。
 
 三種模式共同入場保護
@@ -89,8 +89,8 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-INCLUDE_LOWER_IN_PRINT_STATS = False
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
+INCLUDE_LOWER_IN_PRINT_STATS = True
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
@@ -112,11 +112,11 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
-LIMIT_UP_REBOUND_PERCENT = 5.0 # 反向突破門檻：昨收到漲停價距離的百分比
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
+LIMIT_UP_REBOUND_PERCENT = 2.0 # 反向突破門檻：昨收到漲停價距離的百分比
 LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
 LIMIT_UP_LEAVE_TIME = (9, 25) # limit up 最晚嘗試進場時間，包含此時間點
 
@@ -132,7 +132,7 @@ LOWER_STRATEGY_DECISION = (9, 31) # LOWER 市場模式判斷截止分K棒的(時
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
-INTRADAY_COMPARE_END_LOWER = (13, 0)  # lower 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_LOWER = (12, 50)  # lower 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
 
@@ -373,6 +373,7 @@ def save_api_cache(
     index_minute_raw_by_key: dict[str, list],
 ) -> None:
     """儲存 API 快取。"""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         'stock_names': [item[0] for item in stock_list],
         'day_candles_by_symbol': day_candles_by_symbol,
@@ -1525,7 +1526,7 @@ def iter_entry_signal_lower_candidates(
     作空進場候選訊號：
     1) 進場檢查時間為 STRATEGY_START_LOWER 到 STRATEGY_END_LOWER（含起訖）
     2) 逐根回傳 low 落在入場區間的 K 棒
-    3) 候選進場價 = 進場分 K 棒 open
+    3) 候選進場價 = 訊號分 K 下一根 K 棒 low
     """
     start_hm = STRATEGY_START_LOWER[0] * 60 + STRATEGY_START_LOWER[1]
     end_hm = STRATEGY_END_LOWER[0] * 60 + STRATEGY_END_LOWER[1]
@@ -1547,8 +1548,8 @@ def iter_entry_signal_lower_candidates(
         indexed_bars.append((idx, bar, hm))
     indexed_bars.sort(key=lambda item: item[1]['dt'])
 
-    for original_idx, bar, hm in indexed_bars:
-        if bar.get('low') is None or bar.get('open') is None:
+    for sorted_idx, (_original_idx, bar, hm) in enumerate(indexed_bars):
+        if bar.get('low') is None:
             continue
 
         if not (start_hm <= hm <= end_hm):
@@ -1558,8 +1559,14 @@ def iter_entry_signal_lower_candidates(
         if not is_price_in_entry_range(signal_price, entry_lower_bound, entry_upper_bound):
             continue
 
-        entry_price = float(bar['open'])
-        yield bar, entry_price
+        if sorted_idx + 1 >= len(indexed_bars):
+            continue
+        _next_original_idx, entry_bar, _entry_hm = indexed_bars[sorted_idx + 1]
+        if entry_bar.get('low') is None:
+            continue
+
+        entry_price = float(entry_bar['low'])
+        yield entry_bar, entry_price
 
 
 def scan_entry_signal_lower(
@@ -1720,12 +1727,11 @@ def has_limit_sequence_before_date(
     return actual_days in allowed_days
 
 
-def find_consecutive_limit_up_dates(
+def find_third_consecutive_limit_up_dates(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
-    target_days: int,
 ) -> list[tuple[date, str, str]]:
-    """找出每段連續收漲停首次達到指定天數的日期與股票。"""
+    """找出每段連續收漲停首次達到 3 天的日期與股票。"""
     rows: list[tuple[date, str, str]] = []
     for stock_item in stock_list:
         stock_name = stock_item[0]
@@ -1742,37 +1748,20 @@ def find_consecutive_limit_up_dates(
             limit_up_price, _ = calculate_limit_prices(daily_map[previous_date]['close'])
             if is_same_price(daily_map[current_date]['close'], limit_up_price):
                 consecutive_days += 1
-                if consecutive_days == target_days:
+                if consecutive_days == 3:
                     rows.append((current_date, stock_name, industry_code))
             else:
                 consecutive_days = 0
     return sorted(rows, key=lambda row: (row[0], row[1]), reverse=True)
 
 
-def find_second_consecutive_limit_up_dates(
+def print_third_consecutive_limit_up_references(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
-) -> list[tuple[date, str, str]]:
-    """找出每段連續收漲停首次達到 2 天的日期與股票。"""
-    return find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, 2)
-
-
-def find_third_consecutive_limit_up_dates(
-    stock_list: list[tuple],
-    day_candles_by_symbol: dict[str, list],
-) -> list[tuple[date, str, str]]:
-    """找出每段連續收漲停首次達到 3 天的日期與股票。"""
-    return find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, 3)
-
-
-def print_consecutive_limit_up_references(
-    stock_list: list[tuple],
-    day_candles_by_symbol: dict[str, list],
-    target_days: int,
 ) -> None:
-    """額外列印連續收漲停首次達到指定天數的參考標的，不影響交易資格。"""
-    rows = find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, target_days)
-    print(f'========== 連續收漲停 {target_days} 天參考標的 ==========')
+    """額外列印連續收漲停首次達到 3 天的參考標的，不影響交易資格。"""
+    rows = find_third_consecutive_limit_up_dates(stock_list, day_candles_by_symbol)
+    print('========== 連續收漲停 3 天參考標的 ==========')
     if not rows:
         print('無')
     else:
@@ -1781,16 +1770,8 @@ def print_consecutive_limit_up_references(
                 f'{format_date_with_weekday(limit_date.strftime("%Y-%m-%d"))} '
                 f'{format_stock_label(stock_name, industry_code)}'
             )
-    print(f'========== 連續收漲停 {target_days} 天參考標的結束 ==========')
+    print('========== 連續收漲停 3 天參考標的結束 ==========')
     print('')
-
-
-def print_third_consecutive_limit_up_references(
-    stock_list: list[tuple],
-    day_candles_by_symbol: dict[str, list],
-) -> None:
-    """額外列印連續收漲停首次達到 3 天的參考標的，不影響交易資格。"""
-    print_consecutive_limit_up_references(stock_list, day_candles_by_symbol, 3)
 
 
 def build_trade_candidate(
@@ -2344,8 +2325,13 @@ def find_trade_candidate_on_date(
     if not has_enough_minute_bars_before_0930(today_bars):
         return None
 
+    today_ordered = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+
     if strategy_type == STRATEGY_LOWER:
-        entry_candidates = iter_entry_signal_lower_candidates(today_bars, ystats)
+        entry_candidates = iter_entry_signal_lower_candidates(today_ordered, ystats)
         intraday_compare_end = INTRADAY_COMPARE_END_LOWER
         trade_side = TRADE_SIDE_SHORT
     else:
@@ -2379,7 +2365,7 @@ def find_trade_candidate_on_date(
             target_date,
             entry_bar,
             entry_price,
-            today_bars,
+            today_ordered,
             limit_up_price,
             limit_down_price,
             strategy_type,
@@ -2821,11 +2807,6 @@ def main() -> None:
             )
             print(f'已儲存API快取: {cache_path.name}')
 
-        print_consecutive_limit_up_references(
-            analysis_stock_list,
-            day_candles_by_symbol,
-            2,
-        )
         print_third_consecutive_limit_up_references(
             analysis_stock_list,
             day_candles_by_symbol,
