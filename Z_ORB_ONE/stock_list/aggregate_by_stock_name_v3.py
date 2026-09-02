@@ -16,7 +16,7 @@ REQUEST_INTERVAL_SEC = 1
 ATR_PERIOD = 14
 
 ST_DB_KEEP_RECENT_FILE_COUNT = 25 # st_db 最多保留最近 25 個日期檔案
-ST_DB_CALCULATE_RECENT_FILE_COUNT = 12 # 本次取最近 12 個日期檔案寫入快取
+ST_DB_CALCULATE_RECENT_FILE_COUNT = 15 # 本次取最近 12 個日期檔案寫入快取
 
 CACHE_FILE_NAME = "aggregate_by_stock_cache.json"
 
