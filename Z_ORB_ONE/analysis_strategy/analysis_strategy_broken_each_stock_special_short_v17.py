@@ -30,10 +30,8 @@ LOWER 模式個股入場條件
 1. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
-1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中。
-2. 於 LIMIT_UP_ENTRY_TIME～LIMIT_UP_LEAVE_TIME（含）先找到第一根 low 低於「昨收到跌停價」指定百分比門檻的分 K。
-3. 從上述分 K 的下一根起，找到第一根 high 高於「昨收到漲停價」指定百分比門檻的分 K。
-4. 以上述站回分 K 的 high 做多進場。
+1. 該股票截至前一交易日必須恰好連續收漲停 2 天；連續 3 天以上不進場。
+2. 於次一交易日第一根分 K 棒，以該棒 open 做多進場。
 
 LIMIT_DOWN 策略個股入場條件
 1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中。
@@ -89,8 +87,8 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
@@ -107,18 +105,14 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 8.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_UP = 7.0 # limit up 停利百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 8.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
-LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
-LIMIT_UP_REBOUND_PERCENT = 2.0 # 反向突破門檻：昨收到漲停價距離的百分比
-LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
-LIMIT_UP_LEAVE_TIME = (9, 25) # limit up 最晚嘗試進場時間，包含此時間點
 
 SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 LIMIT_DOWN_BREAK_UP_PERCENT = 3.0 # 上破門檻：昨收到漲停價距離的百分比
@@ -134,16 +128,15 @@ STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)�
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)  # lower 盤中停損/停利比對截止(時, 分)
 INTRADAY_COMPARE_END_LIMIT_DOWN = (13, 0) # limit down 盤中停損/停利比對截止(時, 分)
-INTRADAY_COMPARE_END_LIMIT_UP = (13, 0) # limit up 盤中停損/停利比對截止(時, 分)
+INTRADAY_COMPARE_END_LIMIT_UP = (13, 15) # limit up 盤中停損/停利比對截止(時, 分)
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 啟動門檻：LOWER_STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：LOWER_STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-# 產業盤勢過濾：作空須嚴格低於昨收下跌門檻，作多須嚴格高於昨收上漲門檻。
+# 產業盤勢過濾：LOWER / LIMIT_DOWN 作空須嚴格低於昨收下跌門檻。
 INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER / LIMIT_DOWN 作空：產業指數需低於昨收下跌此百分比的門檻
-INDUSTRY_MARKET_FILTER_LONG_PERCENT = 0 # LIMIT_UP 作多：產業指數需高於昨收上漲此百分比的門檻
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -1267,14 +1260,13 @@ def is_industry_market_filter_passed(
     return industry_close < threshold
 
 
-def is_limit_industry_market_filter_passed(
+def is_limit_down_industry_market_filter_passed(
     stock_item: tuple,
     target_date: date,
     entry_dt: datetime,
     index_minute_bars_by_key: dict[str, dict[str, list]],
-    strategy_type: str,
 ) -> bool:
-    """LIMIT 進場前，產業指數前一根已完成分 K 須嚴格突破交易方向門檻。"""
+    """LIMIT_DOWN 進場前，產業指數前一根已完成分 K 須嚴格跌破門檻。"""
     index_key = get_industry_index_key(stock_item)
     if index_key is None:
         return False
@@ -1307,13 +1299,8 @@ def is_limit_industry_market_filter_passed(
         previous_reference = float(previous_reference)
     except (TypeError, ValueError):
         return False
-    if strategy_type == STRATEGY_LIMIT_DOWN:
-        threshold = previous_reference * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
-        return industry_close < threshold
-    if strategy_type == STRATEGY_LIMIT_UP:
-        threshold = previous_reference * (1 + INDUSTRY_MARKET_FILTER_LONG_PERCENT / 100.0)
-        return industry_close > threshold
-    return False
+    threshold = previous_reference * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
+    return industry_close < threshold
 
 
 def is_market_reversal_blocked_at_entry(
@@ -1579,51 +1566,14 @@ def scan_entry_signal_lower(
     return next(iter_entry_signal_lower_candidates(today_bars, ystats), None)
 
 
-def scan_entry_signal_limit_up(today_bars: list, ystats: dict):
-    """
-    LIMIT_UP 作多進場訊號：
-    1) 進場檢查時間為 LIMIT_UP_ENTRY_TIME 到 LIMIT_UP_LEAVE_TIME（含起訖）
-    2) 先找第一根 low 低於「昨收到跌停價」指定百分比門檻的分 K
-    3) 從下一根起，找第一根 high 高於「昨收到漲停價」指定百分比門檻的分 K
-    4) 候選進場價 = 站回分 K 的 high
-    """
-    start_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
-    end_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
-    previous_close = float(ystats['close'])
-    limit_up_price, limit_down_price = calculate_limit_prices(previous_close)
-    break_down_threshold = previous_close + (
-        limit_down_price - previous_close
-    ) * (LIMIT_UP_BREAK_DOWN_PERCENT / 100.0)
-    rebound_threshold = previous_close + (
-        limit_up_price - previous_close
-    ) * (LIMIT_UP_REBOUND_PERCENT / 100.0)
-    broke_previous_close = False
-
-    indexed_bars = []
-    for bar in today_bars:
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        indexed_bars.append((bar, hm))
-    indexed_bars.sort(key=lambda item: item[0]['dt'])
-
-    for bar, hm in indexed_bars:
-        if not (start_hm <= hm <= end_hm):
-            continue
-
-        if not broke_previous_close:
-            if bar.get('low') is not None and float(bar['low']) < break_down_threshold:
-                broke_previous_close = True
-            continue
-
-        if bar.get('high') is None:
-            continue
-
-        entry_price = float(bar['high'])
-        if entry_price > rebound_threshold:
-            return bar, entry_price
-
+def scan_entry_signal_limit_up(today_bars: list):
+    """以次一交易日第一根有效分 K 棒的 open 作多進場。"""
+    for bar in sorted(
+        (item for item in today_bars if item.get('dt') is not None),
+        key=lambda item: item['dt'],
+    ):
+        if bar.get('open') is not None:
+            return bar, float(bar['open'])
     return None
 
 
@@ -1727,11 +1677,12 @@ def has_limit_sequence_before_date(
     return actual_days in allowed_days
 
 
-def find_third_consecutive_limit_up_dates(
+def find_consecutive_limit_up_dates(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
+    target_days: int,
 ) -> list[tuple[date, str, str]]:
-    """找出每段連續收漲停首次達到 3 天的日期與股票。"""
+    """找出每段連續收漲停首次達到指定天數的日期與股票。"""
     rows: list[tuple[date, str, str]] = []
     for stock_item in stock_list:
         stock_name = stock_item[0]
@@ -1748,29 +1699,82 @@ def find_third_consecutive_limit_up_dates(
             limit_up_price, _ = calculate_limit_prices(daily_map[previous_date]['close'])
             if is_same_price(daily_map[current_date]['close'], limit_up_price):
                 consecutive_days += 1
-                if consecutive_days == 3:
+                if consecutive_days == target_days:
                     rows.append((current_date, stock_name, industry_code))
             else:
                 consecutive_days = 0
     return sorted(rows, key=lambda row: (row[0], row[1]), reverse=True)
 
 
-def print_third_consecutive_limit_up_references(
+def get_limit_up_next_day_mark(
+    stock_name: str,
+    target_date: date,
+    day_candles_by_symbol: dict[str, list],
+) -> str:
+    """依連續漲停後次一交易日的日 K 表現回傳標記。"""
+    daily_map = normalize_daily_candles(
+        day_candles_by_symbol.get(stock_name, []),
+        stock_name,
+    )
+    ordered_dates = sorted(daily_map)
+    if target_date not in daily_map:
+        return ''
+    target_index = ordered_dates.index(target_date)
+    if target_index == 0:
+        return ''
+
+    previous_date = ordered_dates[target_index - 1]
+    previous_close = float(daily_map[previous_date]['close'])
+    target_candle = daily_map[target_date]
+    limit_up_price, limit_down_price = calculate_limit_prices(previous_close)
+    if is_same_price(target_candle['close'], limit_up_price):
+        return '  ***'
+    if is_same_price(target_candle['high'], limit_up_price):
+        return '  **'
+    if is_same_price(target_candle['low'], limit_down_price):
+        return '  ---'
+    if float(target_candle['close']) > float(target_candle['open']):
+        return '  *'
+    return ''
+
+
+def print_consecutive_limit_up_references(
     stock_list: list[tuple],
     day_candles_by_symbol: dict[str, list],
+    target_days: int,
 ) -> None:
-    """額外列印連續收漲停首次達到 3 天的參考標的，不影響交易資格。"""
-    rows = find_third_consecutive_limit_up_dates(stock_list, day_candles_by_symbol)
-    print('========== 連續收漲停 3 天參考標的 ==========')
+    """額外列印連續收漲停首次達到指定天數的參考標的，不影響交易資格。"""
+    rows = find_consecutive_limit_up_dates(stock_list, day_candles_by_symbol, target_days)
+    next_day_marks: dict[tuple[date, str], str] = {}
+    if target_days == 2:
+        for limit_date, stock_name, _industry_code in rows:
+            daily_map = normalize_daily_candles(
+                day_candles_by_symbol.get(stock_name, []),
+                stock_name,
+            )
+            ordered_dates = sorted(daily_map)
+            limit_date_index = ordered_dates.index(limit_date)
+            if limit_date_index + 1 >= len(ordered_dates):
+                continue
+
+            next_date = ordered_dates[limit_date_index + 1]
+            next_day_marks[(limit_date, stock_name)] = get_limit_up_next_day_mark(
+                stock_name,
+                next_date,
+                day_candles_by_symbol,
+            )
+
+    print(f'========== 連續收漲停 {target_days} 天參考標的 ==========')
     if not rows:
         print('無')
     else:
         for limit_date, stock_name, industry_code in rows:
+            continuation_mark = next_day_marks.get((limit_date, stock_name), '')
             print(
                 f'{format_date_with_weekday(limit_date.strftime("%Y-%m-%d"))} '
-                f'{format_stock_label(stock_name, industry_code)}'
+                f'{format_stock_label(stock_name, industry_code)}{continuation_mark}'
             )
-    print('========== 連續收漲停 3 天參考標的結束 ==========')
+    print(f'========== 連續收漲停 {target_days} 天參考標的結束 ==========')
     print('')
 
 
@@ -1822,7 +1826,10 @@ def format_result_line(stock_name: str, date_str: str,
     if signal is None or result is None:
         return ''
 
-    stock_label = format_stock_label(stock_name, signal.get('industry_code'))
+    stock_label = (
+        format_stock_label(stock_name, signal.get('industry_code'))
+        + signal.get('reference_mark', '')
+    )
     outcome = result['outcome']
     exit_reason = result.get('exit_reason')
     signed = result.get('signed_pnl', signed_pnl(result))
@@ -2040,7 +2047,7 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool, list[float], float | None]]] = {}
+    grouped_results: dict[tuple[str, str], list[tuple]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
@@ -2056,6 +2063,7 @@ def print_daily_optimization_results(
             signed_pnl(result),
             result.get('outcome') == 'success',
             signal.get('previous_close'),
+            signal.get('reference_mark', ''),
         ))
 
     normal_gate_group_keys = {
@@ -2119,7 +2127,7 @@ def print_daily_optimization_results(
                     index_minute_bars_by_key,
                 ):
                     print(index_summary)
-            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _, previous_close in sorted(
+            for stock_name, industry_code, entry_dt, exit_dt, entry_price, exit_price, pnl_value, _, previous_close, reference_mark in sorted(
                 day_rows,
                 key=lambda row: (format_entry_time(row[2]), row[0]),
             ):
@@ -2131,7 +2139,7 @@ def print_daily_optimization_results(
                     if previous_close is not None:
                         previous_close_text = f' {previous_close:.2f}'
                 print(
-                    f'{format_stock_label(stock_name, industry_code)} '
+                    f'{format_stock_label(stock_name, industry_code)}{reference_mark} '
                     f'{format_entry_time(entry_dt)} {format_entry_time(exit_dt)}{previous_close_text} '
                     f'[{entry_price:.2f}|{exit_price:.2f}|{pnl_value:.2f}]'
                 )
@@ -2192,11 +2200,7 @@ def print_daily_optimization_results(
     )
     print(
         f'LIMIT_UP允許的實際連續漲停天數={LONG_LIMIT_UP_DAYS}  '
-        f'LIMIT_UP下破區間={LIMIT_UP_BREAK_DOWN_PERCENT:.1f}%  '
-        f'LIMIT_UP反向突破區間={LIMIT_UP_REBOUND_PERCENT:.1f}%  '
-        f'LIMIT_UP進場=先下破跌停方向門檻後，首根突破漲停方向門檻的分K high  '
-        f'LIMIT_UP_ENTRY_TIME={LIMIT_UP_ENTRY_TIME[0]:02d}:{LIMIT_UP_ENTRY_TIME[1]:02d}  '
-        f'LIMIT_UP_LEAVE_TIME={LIMIT_UP_LEAVE_TIME[0]:02d}:{LIMIT_UP_LEAVE_TIME[1]:02d}    '
+        f'LIMIT_UP進場=次一交易日第一根分K open  '
         f'LIMIT_UP出場時間窗={INTRADAY_COMPARE_END_LIMIT_UP[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_UP[1]:02d}'
     )
 
@@ -2252,18 +2256,10 @@ def find_limit_candidate_on_date(
     limit_up_price, limit_down_price = calculate_limit_prices(ystats['close'])
 
     if strategy_type == STRATEGY_LIMIT_UP:
-        entry_signal = scan_entry_signal_limit_up(today_ordered, ystats)
+        entry_signal = scan_entry_signal_limit_up(today_ordered)
         if entry_signal is None:
             return None
         entry_bar, entry_price = entry_signal
-        if not is_limit_industry_market_filter_passed(
-            stock_item,
-            target_date,
-            entry_bar['dt'],
-            index_minute_bars_by_key,
-            strategy_type,
-        ):
-            return None
         if entry_bar is None:
             return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_UP
@@ -2273,12 +2269,11 @@ def find_limit_candidate_on_date(
         if entry_signal is None:
             return None
         entry_bar, entry_price = entry_signal
-        if not is_limit_industry_market_filter_passed(
+        if not is_limit_down_industry_market_filter_passed(
             stock_item,
             target_date,
             entry_bar['dt'],
             index_minute_bars_by_key,
-            strategy_type,
         ):
             return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_DOWN
@@ -2302,6 +2297,12 @@ def find_limit_candidate_on_date(
         None,
     )
     candidate['previous_close'] = previous_close
+    if strategy_type == STRATEGY_LIMIT_UP:
+        candidate['reference_mark'] = get_limit_up_next_day_mark(
+            stock_name,
+            target_date,
+            day_candles_by_symbol,
+        )
     return candidate
 
 
@@ -2609,6 +2610,7 @@ def evaluate_candidates(
             'entry_price': entry_price,
             'strategy_type': strategy_type,
             'trade_side': trade_side,
+            'reference_mark': candidate.get('reference_mark', ''),
             'previous_close': candidate.get('previous_close'),
             'take_profit_price': take_profit_price,
             'effective_profit': effective_profit,
@@ -2807,11 +2809,11 @@ def main() -> None:
             )
             print(f'已儲存API快取: {cache_path.name}')
 
-        print_third_consecutive_limit_up_references(
+        print_consecutive_limit_up_references(
             analysis_stock_list,
             day_candles_by_symbol,
+            2,
         )
-
         stock_strategy_assignments = build_stock_strategy_assignments(analysis_stock_list)
         total_stocks = len(stock_strategy_assignments)
 
@@ -2893,42 +2895,11 @@ def main() -> None:
         ):
             print('[ERROR] LONG_LIMIT_UP_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
             sys.exit(1)
-        if not (0 <= LIMIT_UP_BREAK_DOWN_PERCENT <= 100):
-            print('[ERROR] LIMIT_UP_BREAK_DOWN_PERCENT 需介於 0~100', file=sys.stderr)
-            sys.exit(1)
-        if not (0 <= LIMIT_UP_REBOUND_PERCENT <= 100):
-            print('[ERROR] LIMIT_UP_REBOUND_PERCENT 需介於 0~100', file=sys.stderr)
-            sys.exit(1)
         if not (0 <= LIMIT_DOWN_BREAK_UP_PERCENT <= 100):
             print('[ERROR] LIMIT_DOWN_BREAK_UP_PERCENT 需介於 0~100', file=sys.stderr)
             sys.exit(1)
         if not (0 <= LIMIT_DOWN_FALL_BACK_PERCENT <= 100):
             print('[ERROR] LIMIT_DOWN_FALL_BACK_PERCENT 需介於 0~100', file=sys.stderr)
-            sys.exit(1)
-        if (
-            not isinstance(LIMIT_UP_ENTRY_TIME, tuple)
-            or len(LIMIT_UP_ENTRY_TIME) != 2
-            or any(type(value) is not int for value in LIMIT_UP_ENTRY_TIME)
-        ):
-            print('[ERROR] LIMIT_UP_ENTRY_TIME 必須是 (時, 分) tuple', file=sys.stderr)
-            sys.exit(1)
-        limit_up_entry_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
-        if not (0 <= limit_up_entry_hm <= 23 * 60 + 59):
-            print('[ERROR] LIMIT_UP_ENTRY_TIME 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
-            sys.exit(1)
-        if (
-            not isinstance(LIMIT_UP_LEAVE_TIME, tuple)
-            or len(LIMIT_UP_LEAVE_TIME) != 2
-            or any(type(value) is not int for value in LIMIT_UP_LEAVE_TIME)
-        ):
-            print('[ERROR] LIMIT_UP_LEAVE_TIME 必須是 (時, 分) tuple', file=sys.stderr)
-            sys.exit(1)
-        limit_up_leave_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
-        if not (0 <= limit_up_leave_hm <= 23 * 60 + 59):
-            print('[ERROR] LIMIT_UP_LEAVE_TIME 設定錯誤，需介於 00:00~23:59', file=sys.stderr)
-            sys.exit(1)
-        if limit_up_leave_hm < limit_up_entry_hm:
-            print('[ERROR] LIMIT_UP_LEAVE_TIME 不可早於 LIMIT_UP_ENTRY_TIME', file=sys.stderr)
             sys.exit(1)
         if (
             not isinstance(LIMIT_DOWN_ENTRY_TIME, tuple)
@@ -3015,9 +2986,6 @@ def main() -> None:
             sys.exit(1)
         if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
             print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)
-            sys.exit(1)
-        if INDUSTRY_MARKET_FILTER_LONG_PERCENT < 0:
-            print('[ERROR] INDUSTRY_MARKET_FILTER_LONG_PERCENT 不可小於 0', file=sys.stderr)
             sys.exit(1)
         best_window_result = evaluate_one_window()
         builtins.print()
