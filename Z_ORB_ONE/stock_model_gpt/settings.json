@@ -18,8 +18,7 @@
   "n_layers": 4,
   "dropout": 0.1,
   "seed": 42,
-  "loss_price": 4.0,
-  "loss_hit_up": 2.0,
-  "loss_hit_down": 2.0,
-  "loss_close_limit": 1.0
+  "loss_price": 2.0,
+  "loss_hit_up": 4.0,
+  "loss_hit_down": 4.0
 }

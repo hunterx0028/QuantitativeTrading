@@ -30,10 +30,9 @@ class Settings:
     n_layers: int = 4
     dropout: float = 0.1
     seed: int = 42
-    loss_price: float = 4.0
-    loss_hit_up: float = 2.0
-    loss_hit_down: float = 2.0
-    loss_close_limit: float = 1.0
+    loss_price: float = 2.0
+    loss_hit_up: float = 4.0
+    loss_hit_down: float = 4.0
 
     @classmethod
     def load(cls, path: Path | str = DEFAULT_SETTINGS_PATH) -> "Settings":

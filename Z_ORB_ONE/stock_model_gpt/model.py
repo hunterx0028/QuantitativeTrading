@@ -5,7 +5,7 @@ from torch import nn
 
 
 class StockAutoregressiveModel(nn.Module):
-    """每個 timestep 是一天；成交量只作輸入，輸出為隔日四項狀態。"""
+    """每個 timestep 是一天；輸出為隔日三項交易核心狀態。"""
 
     def __init__(
         self,
@@ -32,12 +32,15 @@ class StockAutoregressiveModel(nn.Module):
             norm_first=True,
             activation="gelu",
         )
-        self.transformer = nn.TransformerEncoder(layer, num_layers=n_layers)
+        self.transformer = nn.TransformerEncoder(
+            layer,
+            num_layers=n_layers,
+            enable_nested_tensor=False,
+        )
         self.norm = nn.LayerNorm(d_model)
         self.price_head = nn.Linear(d_model, 5)
         self.hit_up_head = nn.Linear(d_model, 2)
         self.hit_down_head = nn.Linear(d_model, 2)
-        self.close_head = nn.Linear(d_model, 3)
 
     def forward(self, states: torch.Tensor) -> dict[str, torch.Tensor]:
         if states.ndim != 3 or states.shape[-1] != 5:
@@ -62,5 +65,4 @@ class StockAutoregressiveModel(nn.Module):
             "price": self.price_head(hidden),
             "hit_up": self.hit_up_head(hidden),
             "hit_down": self.hit_down_head(hidden),
-            "close_limit": self.close_head(hidden),
         }

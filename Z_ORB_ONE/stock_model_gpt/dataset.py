@@ -67,5 +67,4 @@ class StockSequenceDataset(Dataset):
             "price": torch.tensor(target[0], dtype=torch.long),
             "hit_up": torch.tensor(target[1], dtype=torch.long),
             "hit_down": torch.tensor(target[2], dtype=torch.long),
-            "close_limit": torch.tensor(target[3], dtype=torch.long),
         }

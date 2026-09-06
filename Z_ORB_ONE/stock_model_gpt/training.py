@@ -11,9 +11,13 @@ from torch.utils.data import DataLoader
 
 from .config import Settings
 from .dataset import StockSequenceDataset
+from .device import describe_device, move_targets_to_device, select_device
 from .model import StockAutoregressiveModel
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, ensure_runtime_dirs
 from .universe import recent_symbols
+
+
+TARGET_NAMES = ("price", "hit_up", "hit_down")
 
 
 def seed_everything(seed: int) -> None:
@@ -39,8 +43,15 @@ def weighted_loss(outputs, targets, settings: Settings) -> torch.Tensor:
         settings.loss_price * criterion(outputs["price"], targets["price"])
         + settings.loss_hit_up * criterion(outputs["hit_up"], targets["hit_up"])
         + settings.loss_hit_down * criterion(outputs["hit_down"], targets["hit_down"])
-        + settings.loss_close_limit * criterion(outputs["close_limit"], targets["close_limit"])
     )
+
+
+def ensure_checkpoint_compatible(checkpoint: dict) -> None:
+    if any(key.startswith("close_head.") for key in checkpoint.get("model", {})):
+        raise RuntimeError(
+            "checkpoint 是舊版四目標模型，含 close_limit 輸出 head；"
+            "三目標模型請先重新執行 train_initial"
+        )
 
 
 def train(
@@ -65,13 +76,22 @@ def train(
     )
     if not dataset:
         raise RuntimeError("沒有足夠的特徵序列可供訓練")
-    loader = DataLoader(dataset, batch_size=settings.batch_size, shuffle=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device()
+    use_cuda = device.type == "cuda"
+    print(f"device={describe_device(device)}")
+    loader = DataLoader(
+        dataset,
+        batch_size=settings.batch_size,
+        shuffle=True,
+        pin_memory=use_cuda,
+    )
     model = build_model(settings).to(device)
     learning_rate = settings.daily_learning_rate if daily else settings.learning_rate
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
     if resume_path:
         checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        ensure_checkpoint_compatible(checkpoint)
         previous_as_of = checkpoint.get("training_as_of")
         if previous_as_of and previous_as_of > as_of.isoformat():
             raise RuntimeError(
@@ -83,6 +103,8 @@ def train(
             optimizer.load_state_dict(checkpoint["optimizer"])
             for group in optimizer.param_groups:
                 group["lr"] = learning_rate
+        if use_cuda and checkpoint.get("scaler"):
+            scaler.load_state_dict(checkpoint["scaler"])
 
     epochs = settings.daily_epochs if daily else settings.epochs
     model.train()
@@ -90,13 +112,20 @@ def train(
     for epoch in range(epochs):
         total_loss = 0.0
         for states, targets in loader:
-            states = states.to(device)
-            targets = {key: value.to(device) for key, value in targets.items()}
+            states = states.to(device, non_blocking=use_cuda)
+            targets = move_targets_to_device(targets, device, non_blocking=use_cuda)
             optimizer.zero_grad(set_to_none=True)
-            loss = weighted_loss(model(states), targets, settings)
-            loss.backward()
+            with torch.amp.autocast(
+                device_type="cuda",
+                dtype=torch.float16,
+                enabled=use_cuda,
+            ):
+                loss = weighted_loss(model(states), targets, settings)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += float(loss.detach()) * states.shape[0]
         final_loss = total_loss / len(dataset)
         print(f"epoch={epoch + 1}/{epochs} loss={final_loss:.6f}")
@@ -107,7 +136,9 @@ def train(
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict() if use_cuda else None,
             "settings": asdict(settings),
+            "target_names": TARGET_NAMES,
             "loss": final_loss,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "training_as_of": as_of.isoformat(),
