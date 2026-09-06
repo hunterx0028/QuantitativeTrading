@@ -6,13 +6,14 @@
 
 - `update_data.py`：讀取 `Z_ORB_ONE/stock_data.py` 的 `selected_stocks`、保存每日清單快照、登入玉山 SDK 並增量更新日 K，同時增量同步 FinMind 公司行動資料。程式刻意不呼叫 logout。
 - `finmind.py`：匿名或使用可選 `FINMIND_TOKEN` 查詢除權息結果；另保留付費公司行動資料的選用介面。
+- `resync_corporate_actions.py`：忽略既有同步狀態，重新同步並覆寫 FinMind 公司行動快取。
 - `prepare_features.py`：將 OHLCV 轉成議定的每日狀態。
 - `model.py`：無股票代號 embedding 的第一版 causal Transformer、三輸出頭。
 - `train_initial.py`：由隨機權重訓練初始模型。
 - `train_daily.py`：載入前一 checkpoint，以較小學習率繼續訓練。
 - `predict.py`：保存下一交易日各分類的完整機率。
-- `validate_predictions.py`：用已發生交易日的實際日 K 驗證預測結果，並標出重點訊號。
-- `post_training_gate.py`：彙整已驗證的重點訊號交易結果，打印門檻與方向建議。
+- `validate_predictions.py`：用已發生交易日的實際日 K 驗證預測結果，並標出漲跌訊號與方向訊號。
+- `post_training_gate.py`：彙整已驗證的漲跌訊號與方向訊號交易結果，打印門檻與方向建議。
 - `run_daily.py`：串接特徵產生、每日續訓與預測；資料更新由前一步 `update_data.py` 負責。
 
 ## 資料表示
@@ -46,52 +47,7 @@ price=2.0, hit_up=4.0, hit_down=4.0
 
 原始 K 棒保存在 `data/candles`，衍生狀態保存在 `data/features`，每日股票清單快照保存在 `data/universe`。這些執行期資料不納入 Git。
 
-## 執行順序
-
-`--as-of` 是強制的資料時間邊界，應填「最後一個已有完整日 K 的交易日」，不是執行程式當天的日期；特徵及訓練目標都只會使用該日以前的資料。`prediction-date` 必須由交易日曆或操作者提供，程式不把曆日的明天誤認為交易日。預測程式也會拒絕載入訓練截止日晚於 `--universe-date` 的 checkpoint，防止本地快取已有未來日 K 時發生資訊洩漏。
-
-從專案根目錄執行：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.update_data --as-of 2026-09-03
-python -m Z_ORB_ONE.stock_model_gpt.prepare_features --as-of 2026-09-03
-python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-03
-python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-03 --prediction-date 2026-09-04
-```
-
-`predict.py` 會在保存 JSON 後，同步於控制台列出符合重點訊號門檻的標的。四個門檻預設都是 `0.6`：
-
-```text
-LONG: hit_up.T >= long_hit_threshold 或 price.2 >= long_price_threshold
-SHORT: hit_down.T >= short_hit_threshold 或 price.-2 >= short_price_threshold
-```
-
-`--signal-threshold` 可一次設定四個門檻；也可用 `--long-hit-threshold`、`--long-price-threshold`、`--short-hit-threshold`、`--short-price-threshold` 分別調整。輸出中的 `reason=hit/price/both` 代表該方向是由觸及機率、價格分類機率，或兩者同時觸發。同方向同股票只會打印一筆訊號。
-
-### 驗證已發生的預測
-
-預測日期已經發生後，可驗證預測結果：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.update_data --as-of 2026-09-04
-python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-04
-```
-
-驗證前需先讓本地 `data/candles` 含有該預測日的實際日 K；驗證程式會讀取 `predictions/2026-09-04.json`，從本地 `data/candles` 擷取 2026-09-04 實際日 K，另存至 `data/actual_candles/2026-09-04.jsonl`，並在控制台打印前三項各自的命中率與重點訊號實際結果。重點訊號會列出 `actual_hit`、`actual_price` 與實際日 K 的 `O/H/L/C`。驗證程式會直接由實際 K 棒重算該日狀態，不需要先重跑 `prepare_features`。
-
-重點訊號的交易成功定義預設為開盤進場後，最佳順向價差至少 `3%`，且最大逆向價差不超過 `2%`。LONG 使用 `high/open` 與 `low/open` 評估；SHORT 使用 `open/low` 與 `high/open` 評估。門檻可用 `--target-profit-pct` 與 `--max-adverse-pct` 調整。驗證結果會保存至 `data/evaluations/YYYY-MM-DD.json`，作為 post-training gate 的資料來源。
-
-### Post-Training Gate
-
-每個已預測交易日收盤後，先執行驗證並累積 evaluation；累積數個交易日後再看 gate 建議，不建議只根據單日結果調參。
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.post_training_gate
-```
-
-`post_training_gate.py` 預設讀取最近 20 個已驗證交易日，並額外打印最近 5 日概況。它會依 LONG/SHORT 分開統計重點訊號的成功率、平均最佳順向價差、平均收盤價差與平均逆向價差，給出 `KEEP`、`RAISE_THRESHOLD_OR_PAUSE`、`KEEP_OR_LOWER_SLIGHTLY` 等建議。目前 gate 只打印建議，不會自動修改 `settings.json`、模型 checkpoint 或訊號門檻。
-
-### GPU 確認
+## GPU 確認
 
 訓練與預測會在啟動時印出實際使用的裝置，例如：
 
@@ -106,6 +62,48 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 ```
 
 若是 `+cpu` 且 `False`，請將目前環境的 PyTorch 換成 CUDA build。依實際 PyTorch 官方頁面選擇與本機 driver 相容的 CUDA wheel；完成後重新跑上面的確認指令，看到 `True` 與 GPU 名稱才代表程式會走 CUDA。CUDA 可用時，訓練會自動使用 pinned memory、non-blocking transfer 與 AMP mixed precision；CPU 環境則維持原本流程。
+
+## 執行順序
+
+`--as-of` 是強制的資料時間邊界，應填「最後一個已有完整日 K 的交易日」，不是執行程式當天的日期；特徵及訓練目標都只會使用該日以前的資料。`prediction-date` 必須由交易日曆或操作者提供，程式不把曆日的明天誤認為交易日。預測程式也會拒絕載入訓練截止日晚於 `--universe-date` 的 checkpoint，防止本地快取已有未來日 K 時發生資訊洩漏。
+
+從專案根目錄執行：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.update_data --as-of 2026-09-03
+python -m Z_ORB_ONE.stock_model_gpt.prepare_features --as-of 2026-09-03
+python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-03
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-03 --prediction-date 2026-09-04
+```
+
+`predict.py` 會保存 JSON，機率欄位仍是數字，但小機率不使用科學記號，方便目視檢查；保存後會同步於控制台列出符合訊號門檻或方向訊號門檻的標的，並將同一批訊號摘要另存至 `signal_reports/YYYY-MM-DD.txt`。訊號門檻代表較極端的當沖機會，預設門檻都是 `0.6`：
+
+```text
+LONG: hit_up.T >= long_hit_threshold 或 price.2 >= long_price_threshold
+SHORT: hit_down.T >= short_hit_threshold 或 price.-2 >= short_price_threshold
+```
+
+方向訊號用於判斷當日偏多或偏空機會，預設門檻也是 `0.6`：
+
+```text
+LONG: price.1 + price.2 >= long_direction_threshold
+SHORT: price.-1 + price.-2 >= short_direction_threshold
+```
+
+`--signal-threshold` 可一次設定全部六個門檻；也可用 `--long-hit-threshold`、`--long-price-threshold`、`--short-hit-threshold`、`--short-price-threshold`、`--long-direction-threshold`、`--short-direction-threshold` 分別調整。訊號輸出中的 `reason=hit/price/both` 代表該方向是由觸及機率、價格分類機率，或兩者同時觸發。同方向同股票只會打印一筆訊號。
+
+### 驗證已發生的預測
+
+預測日期已經發生後，可驗證預測結果：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.update_data --as-of 2026-09-04
+python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-04
+```
+
+驗證前需先讓本地 `data/candles` 含有該預測日的實際日 K；驗證程式會讀取 `predictions/2026-09-04.json`，從本地 `data/candles` 擷取 2026-09-04 實際日 K，另存至 `data/actual_candles/2026-09-04.jsonl`，並在控制台打印前三項各自的命中率、漲跌訊號與方向訊號的實際結果。訊號會列出 `actual_hit`、`actual_price` 與實際日 K 的 `O/H/L/C`。驗證程式會直接由實際 K 棒重算該日狀態，不需要先重跑 `prepare_features`。
+
+訊號的交易成功定義預設為開盤進場後，最佳順向價差至少 `3%`，且最大逆向價差不超過 `2%`。LONG 使用 `high/open` 與 `low/open` 評估；SHORT 使用 `open/low` 與 `high/open` 評估。門檻可用 `--target-profit-pct` 與 `--max-adverse-pct` 調整。驗證結果會保存至 `data/evaluations/YYYY-MM-DD.json`，作為 post-training gate 的資料來源。
 
 ### 日常更新
 
@@ -122,13 +120,55 @@ python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-04 --prediction-da
 
 玉山若回傳 OHLC 含 `null`、非正價格或最高價低於最低價的歷史列，更新程式會顯示 `[WARN]` 並略過；不會以0補成假行情。成交量單獨為空時則保存為0，特徵化後標記為 `X`。
 
+### Post-Training Gate
+
+每個已預測交易日收盤後，先執行驗證並累積 evaluation；累積數個交易日後再看 gate 建議，不建議只根據單日結果調參。
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.post_training_gate
+```
+
+`post_training_gate.py` 預設讀取最近 20 個已驗證交易日，並額外打印最近 5 日概況。它會把漲跌訊號與方向訊號分開統計：漲跌訊號依 LONG/SHORT 與 `reason=hit/price/both` 看交易成功率、平均最佳順向價差、平均收盤價差與平均逆向價差；方向訊號依 LONG/SHORT 看 `actual_price` 是否同方向、收盤是否仍有利、交易成功率與價差表現。建議會輸出 `KEEP`、`RAISE_THRESHOLD_OR_PAUSE`、`KEEP_OR_LOWER_SLIGHTLY`。目前 gate 只打印建議，不會自動修改 `settings.json`、模型 checkpoint 或訊號門檻。
+
+### 重產舊日期預測
+
+若只是想用目前的新訊號規則重新檢視既有預測，不需要重跑模型，直接驗證該預測日即可：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-04
+```
+
+若要重新產生某個舊日期的預測，必須指定當時尚未看過答案的 checkpoint。例如要重產 2026-09-04 預測，checkpoint 的 `training_as_of` 不可晚於 2026-09-03：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.predict --checkpoint <training_as_of_2026-09-03的checkpoint> --universe-date 2026-09-03 --prediction-date 2026-09-04
+```
+
+不要用 `run_daily` 回頭跑舊日期；`run_daily` 會載入最新 checkpoint 續訓，若最新模型已看過該預測日資料，會造成資料洩漏或被程式拒絕。
+
 ## 除權息及特殊參考價
 
-玉山 historical candles 提供原始 OHLCV 與 `change`。一般交易日先以 `close - change` 推算參考價；除權息日由 FinMind 公布資料覆蓋：
+玉山 historical candles 提供原始 OHLCV 與 `change`。一般交易日先以 `close - change` 推算參考價；公司行動日由 FinMind 公布資料覆蓋：
 
-- `TaiwanStockDividendResult`：除權除息結果與參考價，免費流程預設啟用。
+- `TaiwanStockDividendResult`：除權除息結果與參考價，免費流程預設啟用，逐股查詢。
 
-`TaiwanStockCapitalReductionReferencePrice`、`TaiwanStockSplitPrice`、`TaiwanStockParValueChange` 的全市場查詢可能要求 FinMind 付費會員，預設不啟用。若日後具備相應權限，可將 `settings.json` 的 `finmind_extended_corporate_actions` 改為 `true`。未啟用時，這些日期仍使用玉山 `close - change` 推算的交易參考價。
+以下特殊公司行動預設啟用；實測匿名查詢可用，但初次重建歷史快取時 API 量會增加：
+
+- `TaiwanStockCapitalReductionReferencePrice`：減資恢復買賣參考價，免費流程需逐股查詢；全市場查詢需 backer/sponsor。
+- `TaiwanStockSplitPrice`：台股分割後參考價，可全市場查詢並在本機快取。
+- `TaiwanStockParValueChange`：變更面額恢復買賣參考價，可全市場查詢並在本機快取。
+
+若日後關閉 `settings.json` 的 `finmind_extended_corporate_actions`，減資、分割、面額變更日期會改用玉山 `close - change` 推算的交易參考價。
+
+若要讓既有歷史資料補上 extended 公司行動修正，可先重建公司行動快取，再重建特徵並重新訓練：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.resync_corporate_actions --as-of 2026-09-04 --include-extended
+python -m Z_ORB_ONE.stock_model_gpt.prepare_features --as-of 2026-09-04
+python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-04
+```
+
+`resync_corporate_actions.py` 預設使用 `stock_data.py` 目前的 `selected_stocks`；若只要重建部分股票，可加上 `--symbols 2330 2464`。它只處理 FinMind 公司行動資料，不會登入玉山 SDK，也不會重抓日 K。
 
 FinMind Token 不是必填；程式預設匿名存取。若日後需要較高流量，在本機設定環境變數 `FINMIND_TOKEN`，不要將 Token 寫入程式、README 或 Git。
 

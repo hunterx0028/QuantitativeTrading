@@ -17,7 +17,7 @@ class Settings:
     request_chunk_calendar_days: int = 365
     request_interval_seconds: float = 1.0
     finmind_request_interval_seconds: float = 0.25
-    finmind_extended_corporate_actions: bool = False
+    finmind_extended_corporate_actions: bool = True
     recent_universe_days: int = 60
     min_history_days: int = 60
     batch_size: int = 64

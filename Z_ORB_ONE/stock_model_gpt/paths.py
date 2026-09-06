@@ -13,6 +13,7 @@ FEATURES_DIR = DATA_DIR / "features"
 EVALUATIONS_DIR = DATA_DIR / "evaluations"
 CHECKPOINT_DIR = PACKAGE_DIR / "checkpoints"
 PREDICTIONS_DIR = PACKAGE_DIR / "predictions"
+SIGNAL_REPORTS_DIR = PACKAGE_DIR / "signal_reports"
 CONFIG_PATH = Z_ORB_ONE_DIR / "config.ini"
 STOCK_DATA_PATH = Z_ORB_ONE_DIR / "stock_data.py"
 
@@ -27,5 +28,6 @@ def ensure_runtime_dirs() -> None:
         EVALUATIONS_DIR,
         CHECKPOINT_DIR,
         PREDICTIONS_DIR,
+        SIGNAL_REPORTS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

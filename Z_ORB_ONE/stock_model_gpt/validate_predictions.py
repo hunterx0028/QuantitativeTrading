@@ -13,7 +13,7 @@ from .paths import (
     PREDICTIONS_DIR,
     ensure_runtime_dirs,
 )
-from .predict import SignalThresholds, build_signal_thresholds, detect_signal
+from .predict import SignalThresholds, build_signal_thresholds, detect_direction_signal, detect_signal
 from .storage import read_jsonl, write_jsonl
 
 
@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--long-price-threshold", type=float, default=None)
     parser.add_argument("--short-hit-threshold", type=float, default=None)
     parser.add_argument("--short-price-threshold", type=float, default=None)
+    parser.add_argument("--long-direction-threshold", type=float, default=None)
+    parser.add_argument("--short-direction-threshold", type=float, default=None)
     parser.add_argument("--target-profit-pct", type=float, default=3.0)
     parser.add_argument("--max-adverse-pct", type=float, default=2.0)
     args = parser.parse_args()
@@ -117,6 +119,8 @@ def print_summary(
     hit_down_hits = 0
     signal_rows: list[tuple[dict, dict, DailyState, dict]] = []
     signal_results: list[dict] = []
+    direction_rows: list[tuple[dict, dict, DailyState, dict]] = []
+    direction_results: list[dict] = []
     actual_candles_by_symbol = {row["symbol"]: row for row in actual_candles}
 
     for prediction in predictions:
@@ -142,6 +146,14 @@ def print_summary(
             trade = evaluate_signal_trade(signal, candle, target_profit_pct, max_adverse_pct)
             signal_rows.append((prediction, signal, actual, trade))
             signal_results.append({**signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]})
+        direction_signal = detect_direction_signal(prediction, thresholds)
+        if direction_signal:
+            candle = actual_candles_by_symbol[symbol]
+            trade = evaluate_signal_trade(direction_signal, candle, target_profit_pct, max_adverse_pct)
+            direction_rows.append((prediction, direction_signal, actual, trade))
+            direction_results.append(
+                {**direction_signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]}
+            )
 
     print(f"驗證筆數: {evaluated}/{len(predictions)}")
     if evaluated:
@@ -150,7 +162,7 @@ def print_summary(
         print(f"hit_down 命中率: {hit_down_hits}/{evaluated} = {hit_down_hits / evaluated:.2%}")
 
     print(
-        "重點訊號 "
+        "漲跌訊號 "
         f"long_hit>={thresholds.long_hit:.2f}, "
         f"long_price>={thresholds.long_price:.2f}, "
         f"short_hit>={thresholds.short_hit:.2f}, "
@@ -163,6 +175,22 @@ def print_summary(
             f"[SIGNAL {signal['side']}] {signal['symbol']} "
             f"reason={signal['reason']} "
             f"{signal['hit_key']}={signal['hit_probability']:.4f} "
+            f"{signal['price_key']}={signal['price_probability']:.4f} | "
+            f"actual_hit={trade['actual_hit']} actual_price={actual.price} | "
+            f"O={trade['open']} H={trade['high']} L={trade['low']} C={trade['close']} | "
+            f"best={trade['best_profit_pct']:.2f}% close={trade['close_profit_pct']:.2f}% "
+            f"adverse={trade['adverse_pct']:.2f}% success={trade['success']}"
+        )
+    print(
+        "方向訊號 "
+        f"long_direction>={thresholds.long_direction:.2f}, "
+        f"short_direction>={thresholds.short_direction:.2f}, "
+        f"target_profit >= {target_profit_pct:.2f}%, max_adverse <= {max_adverse_pct:.2f}%: "
+        f"{len(direction_rows)}"
+    )
+    for prediction, signal, actual, trade in direction_rows:
+        print(
+            f"[DIRECTION {signal['side']}] {signal['symbol']} "
             f"{signal['price_key']}={signal['price_probability']:.4f} | "
             f"actual_hit={trade['actual_hit']} actual_price={actual.price} | "
             f"O={trade['open']} H={trade['high']} L={trade['low']} C={trade['close']} | "
@@ -182,6 +210,7 @@ def print_summary(
             "hit_down": hit_down_hits / evaluated if evaluated else None,
         },
         "signals": signal_results,
+        "direction_signals": direction_results,
     }
 
 

@@ -4,7 +4,13 @@ from .dataset import StockSequenceDataset
 from .features import calculate_limit_prices, encode_candles, price_bucket, volume_bucket
 from .finmind import DATASET_ACCEPTS_DATA_ID, FREE_DATASETS, apply_corporate_actions
 from .market_data import _normalise_candle
-from .predict import SignalThresholds, detect_signal
+from .predict import (
+    SignalThresholds,
+    build_signal_report_lines,
+    detect_direction_signal,
+    detect_signal,
+    dumps_json_no_scientific,
+)
 from .validate_predictions import evaluate_signal_trade
 from .storage import write_jsonl
 
@@ -64,12 +70,12 @@ def test_finmind_action_overrides_reference_and_limits():
     assert result["limit_down"] == 81
 
 
-def test_finmind_global_datasets_do_not_send_data_id():
+def test_finmind_dataset_query_modes_match_free_access():
     assert FREE_DATASETS == ("TaiwanStockDividendResult",)
-    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockSplitPrice"] is False
-    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockCapitalReductionReferencePrice"] is False
-    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockParValueChange"] is False
     assert DATASET_ACCEPTS_DATA_ID["TaiwanStockDividendResult"] is True
+    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockCapitalReductionReferencePrice"] is True
+    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockSplitPrice"] is False
+    assert DATASET_ACCEPTS_DATA_ID["TaiwanStockParValueChange"] is False
 
 
 def test_invalid_candle_is_skipped():
@@ -197,6 +203,60 @@ def test_detect_signal_flags_long_setup_when_only_hit_passes():
     assert signal["reason"] == "hit"
 
 
+def test_detect_direction_signal_flags_short_price_sum():
+    prediction = {
+        "symbol": "2464",
+        "prediction_date": "2026-09-07",
+        "price": {"-2": 0.35, "-1": 0.32, "0": 0.1, "1": 0.13, "2": 0.1},
+    }
+    signal = detect_direction_signal(prediction, SignalThresholds())
+    assert signal is not None
+    assert signal["side"] == "SHORT"
+    assert signal["price_key"] == "price.-1+-2"
+    assert signal["price_probability"] == 0.67
+
+
+def test_detect_direction_signal_flags_long_price_sum():
+    prediction = {
+        "symbol": "2330",
+        "prediction_date": "2026-09-07",
+        "price": {"-2": 0.1, "-1": 0.1, "0": 0.1, "1": 0.25, "2": 0.45},
+    }
+    signal = detect_direction_signal(prediction, SignalThresholds())
+    assert signal is not None
+    assert signal["side"] == "LONG"
+    assert signal["price_key"] == "price.1+2"
+    assert signal["price_probability"] == 0.7
+
+
+def test_build_signal_report_lines_uses_signal_threshold_label():
+    signal = {
+        "side": "SHORT",
+        "reason": "both",
+        "symbol": "2464",
+        "prediction_date": "2026-09-07",
+        "hit_key": "hit_down.T",
+        "hit_probability": 0.6158,
+        "price_key": "price.-2",
+        "price_probability": 0.7048,
+    }
+    direction_signal = {
+        "side": "SHORT",
+        "symbol": "8150",
+        "prediction_date": "2026-09-07",
+        "price_key": "price.-1+-2",
+        "price_probability": 0.8482,
+        "price_minus_1_probability": 0.5172,
+        "price_minus_2_probability": 0.3311,
+        "price_1_probability": 0.023,
+        "price_2_probability": 0.01,
+    }
+    lines = build_signal_report_lines(date(2026, 9, 7), SignalThresholds(), [signal], [direction_signal])
+    assert "符合訊號門檻: long_hit>=0.60, long_price>=0.60, short_hit>=0.60, short_price>=0.60" in lines
+    assert "[SHORT] 2464 reason=both prediction_date=2026-09-07 hit_down.T=0.6158 price.-2=0.7048" in lines
+    assert any(line.startswith("[DIRECTION SHORT] 8150 ") for line in lines)
+
+
 def test_signal_trade_success_uses_intraday_profit_not_classification_match():
     signal = {"side": "SHORT"}
     candle = {
@@ -211,3 +271,10 @@ def test_signal_trade_success_uses_intraday_profit_not_classification_match():
     assert round(trade["best_profit_pct"], 2) == 9.17
     assert round(trade["adverse_pct"], 2) == 0.22
     assert trade["success"] is True
+
+
+def test_prediction_json_does_not_use_scientific_notation():
+    payload = {"hit_up": {"T": 8.642131433589384e-05, "F": 0.9999135786856641}}
+    text = dumps_json_no_scientific(payload)
+    assert "e-05" not in text
+    assert "0.00008642131433589384" in text

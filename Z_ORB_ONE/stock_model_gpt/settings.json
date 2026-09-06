@@ -5,7 +5,7 @@
   "request_chunk_calendar_days": 365,
   "request_interval_seconds": 1.0,
   "finmind_request_interval_seconds": 0.25,
-  "finmind_extended_corporate_actions": false,
+  "finmind_extended_corporate_actions": true,
   "recent_universe_days": 60,
   "min_history_days": 60,
   "batch_size": 64,

@@ -11,8 +11,10 @@ from typing import Any
 
 from .config import Settings
 from .storage import (
+    corporate_action_path,
     corporate_action_sync_path,
     merge_corporate_actions,
+    write_jsonl,
 )
 
 
@@ -24,12 +26,11 @@ EXTENDED_DATASETS = (
     "TaiwanStockParValueChange",
 )
 
-# 除權息結果需按個股查詢；其餘三種稀疏事件資料可查全市場。
-# 同一查詢區間只抓一次，再由本機依 stock_id 過濾，讓121支股票的
-# 首次同步維持在匿名額度內。
+# 除權息結果與減資參考價在免費流程需按個股查詢；分割與面額變更
+# 可查全市場。同一全市場查詢區間只抓一次，再由本機依 stock_id 過濾。
 DATASET_ACCEPTS_DATA_ID = {
     "TaiwanStockDividendResult": True,
-    "TaiwanStockCapitalReductionReferencePrice": False,
+    "TaiwanStockCapitalReductionReferencePrice": True,
     "TaiwanStockSplitPrice": False,
     "TaiwanStockParValueChange": False,
 }
@@ -137,11 +138,13 @@ def update_corporate_actions(
     as_of: date,
     settings: Settings,
     token: str | None = None,
+    force_from_start: bool = False,
+    replace_existing: bool = False,
 ) -> list[dict]:
     """增量取得影響歷史參考價的公司行動；Token 可省略。"""
     sync_path = corporate_action_sync_path(symbol)
     start_date = date.fromisoformat(settings.earliest_date)
-    if sync_path.exists():
+    if sync_path.exists() and not force_from_start:
         payload = json.loads(sync_path.read_text(encoding="utf-8"))
         start_date = date.fromisoformat(payload["checked_through"]) + timedelta(days=1)
     if start_date > as_of:
@@ -156,7 +159,11 @@ def update_corporate_actions(
         incoming.extend(fetch_dataset(dataset, symbol, start_date, as_of, token=token))
         if index + 1 < len(datasets):
             time.sleep(settings.finmind_request_interval_seconds)
-    merged = merge_corporate_actions(symbol, incoming)
+    if replace_existing:
+        merged = sorted(incoming, key=lambda row: (row["date"], row["source"]))
+        write_jsonl(corporate_action_path(symbol), merged)
+    else:
+        merged = merge_corporate_actions(symbol, incoming)
     sync_path.write_text(
         json.dumps(
             {"symbol": symbol, "checked_through": as_of.isoformat()},
