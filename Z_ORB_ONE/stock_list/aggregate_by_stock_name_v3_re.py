@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 
 MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
-MIN_ATR = 4.0 # ATR 低於此門檻的股票不寫入 stock_data.py
+MIN_ATR_PCT = 4.0 # 一般清單要求 ATR / 昨收價 * 100 >= 4%；LIMIT 名單沿用原本分流規則
 
 LONG_LIMIT_UP_DAYS = [99] # 分入 selected_limit_up_stocks 的實際連續漲停天數
 SHORT_LIMIT_DOWN_DAYS = [99] # 分入 selected_limit_down_stocks 的實際連續跌停天數
@@ -263,9 +264,14 @@ def is_record_atr_qualified(record: tuple) -> bool:
         return False
     try:
         atr_value = float(record[7])
+        previous_close = float(record[5])
     except (TypeError, ValueError):
         return False
-    return atr_value >= MIN_ATR
+    if not math.isfinite(atr_value) or not math.isfinite(previous_close):
+        return False
+    if atr_value < 0 or previous_close <= 0:
+        return False
+    return atr_value / previous_close * 100 >= MIN_ATR_PCT
 
 
 def filter_records_by_min_atr(ranked: list[tuple[tuple, int]]) -> list[tuple[tuple, int]]:
@@ -588,7 +594,7 @@ def main() -> None:
     log(f"short_limit_down_days={SHORT_LIMIT_DOWN_DAYS}")
     log(f"max_limit_up_price={MAX_LIMIT_UP_PRICE}")
     log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
-    log(f"min_atr={MIN_ATR}")
+    log(f"min_atr_pct={MIN_ATR_PCT}% (ATR / previous_close * 100)")
     log(f"top_result_count(rank)={len(rank_records)}")
     log(f"top_result_count(repeat_count)={len(repeat_records)}")
     log(f"selected_stocks_count={len(selected_stock_records)}")
