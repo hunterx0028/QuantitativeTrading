@@ -10,6 +10,7 @@ from typing import Iterable
 PRICE_VALUES = (-2, -1, 0, 1, 2)
 VOLUME_VALUES = (-2, -1, 0, 1, 2)
 CLOSE_VALUES = ("D", "N", "U")
+ATR_PERIOD = 14
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class DailyState:
     hit_down: bool
     close_limit: str
     volume: int | str
+    atr: float
+    atr_ratio: float
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -90,10 +93,45 @@ def _is_same_price(left: float, right: float) -> bool:
     return math.isclose(left, right, rel_tol=0.0, abs_tol=float(tick_size(right)) / 10)
 
 
+def calculate_atr(candles: list[dict]) -> list[float | None]:
+    """Wilder ATR(14) in each day's price scale, using the trading reference."""
+    values: list[float | None] = [None] * len(candles)
+    seed: list[float] = []
+    atr = None
+    for index in range(1, len(candles)):
+        row = candles[index]
+        high, low = float(row["high"]), float(row["low"])
+        previous_close = float(candles[index - 1]["close"])
+        reference = row.get("reference_price")
+        reference = previous_close if reference is None else float(reference)
+        if not all(math.isfinite(value) and value > 0 for value in (previous_close, reference)):
+            raise ValueError(f"{row.get('date')}: ATR 前收盤價與交易參考價必須為有限正數")
+        factor = reference / previous_close
+        # Convert only the running history, never already emitted past values.
+        # During warmup every accumulated TR must use today's price units too.
+        if atr is None:
+            seed = [value * factor for value in seed]
+        else:
+            atr *= factor
+        tr = max(high - low, abs(high - reference), abs(low - reference))
+        if atr is None:
+            seed.append(tr)
+            if len(seed) < ATR_PERIOD:
+                continue
+            atr = statistics.mean(seed)
+        else:
+            atr = (atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
+        values[index] = atr
+    return values
+
+
 def encode_candles(candles: Iterable[dict], warmup_days: int = 20) -> list[DailyState]:
+    if warmup_days < 1:
+        raise ValueError("warmup_days 必須至少為 1")
     rows = sorted(candles, key=lambda item: item["date"])
+    atr_values = calculate_atr(rows)
     states: list[DailyState] = []
-    for index in range(warmup_days, len(rows)):
+    for index in range(max(warmup_days, ATR_PERIOD), len(rows)):
         row = rows[index]
         previous = rows[index - 1]
         prior_volumes = [int(item.get("volume", 0) or 0) for item in rows[index - warmup_days:index]]
@@ -106,6 +144,8 @@ def encode_candles(candles: Iterable[dict], warmup_days: int = 20) -> list[Daily
         limit_down = float(row.get("limit_down") or calculated_down)
 
         close = float(row["close"])
+        atr = atr_values[index]
+        assert atr is not None
         close_limit = "U" if _is_same_price(close, limit_up) else "D" if _is_same_price(close, limit_down) else "N"
         states.append(
             DailyState(
@@ -115,6 +155,8 @@ def encode_candles(candles: Iterable[dict], warmup_days: int = 20) -> list[Daily
                 hit_down=float(row["low"]) <= limit_down,
                 close_limit=close_limit,
                 volume=volume_bucket(int(row.get("volume", 0) or 0), baseline),
+                atr=atr,
+                atr_ratio=atr / close,
             )
         )
     return states

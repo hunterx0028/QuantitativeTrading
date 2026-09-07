@@ -10,7 +10,7 @@ from .training import train
 def main() -> None:
     parser = argparse.ArgumentParser(description="訓練初始 stock_model_gpt")
     parser.add_argument("--settings", default=None)
-    parser.add_argument("--as-of", default=date.today().isoformat())
+    parser.add_argument("--as-of", required=True, help="訓練截止日；ATR 刻度只使用此日以前資料")
     args = parser.parse_args()
     settings = Settings.load(args.settings) if args.settings else Settings.load()
     output = train(settings, as_of=date.fromisoformat(args.as_of))

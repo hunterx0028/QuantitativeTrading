@@ -4,10 +4,9 @@ import argparse
 from datetime import date
 
 from .config import Settings
-from .features import encode_candles
-from .finmind import apply_corporate_actions
+from .state_pipeline import load_candle_states
 from .paths import CANDLES_DIR
-from .storage import corporate_action_path, feature_path, read_jsonl, write_jsonl
+from .storage import feature_path, write_jsonl
 
 
 def main() -> None:
@@ -19,13 +18,7 @@ def main() -> None:
     cutoff = as_of.isoformat()
     settings = Settings.load(args.settings) if args.settings else Settings.load()
     for path in sorted(list(CANDLES_DIR.glob("*.jsonl"))):
-        candles = [row for row in read_jsonl(path) if row["date"] <= cutoff]
-        actions = [
-            row for row in read_jsonl(corporate_action_path(path.stem))
-            if row["date"] <= cutoff
-        ]
-        candles = apply_corporate_actions(candles, actions)
-        states = encode_candles(candles, settings.warmup_days)
+        candles, states = load_candle_states(path, cutoff, settings.warmup_days)
         write_jsonl(feature_path(path.stem), (state.to_dict() for state in states))
         print(
             f"{path.stem}: as_of={cutoff} candles={len(candles)} states={len(states)}"

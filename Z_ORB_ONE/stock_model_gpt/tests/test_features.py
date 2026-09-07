@@ -1,18 +1,20 @@
 from datetime import date
 
-from .dataset import StockSequenceDataset
-from .features import calculate_limit_prices, encode_candles, price_bucket, volume_bucket
-from .finmind import DATASET_ACCEPTS_DATA_ID, FREE_DATASETS, apply_corporate_actions
-from .market_data import _normalise_candle
-from .predict import (
+import pytest
+
+from ..dataset import StockSequenceDataset
+from ..features import calculate_limit_prices, encode_candles, price_bucket, volume_bucket
+from ..finmind import DATASET_ACCEPTS_DATA_ID, FREE_DATASETS, apply_corporate_actions
+from ..market_data import _normalise_candle
+from ..predict import (
     SignalThresholds,
     build_signal_report_lines,
     detect_direction_signal,
     detect_signal,
     dumps_json_no_scientific,
 )
-from .validate_predictions import evaluate_signal_trade
-from .storage import write_jsonl
+from ..validate_predictions import evaluate_signal_trade
+from ..storage import write_jsonl
 
 
 def test_price_bucket_boundaries():
@@ -126,7 +128,7 @@ def test_dataset_hard_filters_future_targets(tmp_path):
     assert len(dataset) == 1
 
 
-def test_dataset_uses_five_inputs_and_three_targets(tmp_path):
+def test_dataset_uses_six_inputs_and_three_targets(tmp_path):
     path = tmp_path / "2330.jsonl"
     rows = [
         {
@@ -136,13 +138,15 @@ def test_dataset_uses_five_inputs_and_three_targets(tmp_path):
             "hit_down": False,
             "close_limit": "N",
             "volume": 0,
+            "atr_ratio": 0.025,
         }
         for day in range(1, 4)
     ]
     write_jsonl(path, rows)
     dataset = StockSequenceDataset([path], context_days=2)
     inputs, targets = dataset[0]
-    assert inputs.shape == (2, 5)
+    assert inputs.shape == (2, 6)
+    assert inputs[0, 5].item() == 2
     assert set(targets) == {"price", "hit_up", "hit_down"}
 
 
@@ -213,7 +217,7 @@ def test_detect_direction_signal_flags_short_price_sum():
     assert signal is not None
     assert signal["side"] == "SHORT"
     assert signal["price_key"] == "price.-1+-2"
-    assert signal["price_probability"] == 0.67
+    assert signal["price_probability"] == pytest.approx(0.67)
 
 
 def test_detect_direction_signal_flags_long_price_sum():

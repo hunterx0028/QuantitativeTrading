@@ -22,6 +22,7 @@ class StockAutoregressiveModel(nn.Module):
         self.hit_down_embedding = nn.Embedding(2, d_model)
         self.close_embedding = nn.Embedding(3, d_model)
         self.volume_embedding = nn.Embedding(6, d_model)
+        self.atr_embedding = nn.Embedding(5, d_model)
         self.position_embedding = nn.Embedding(context_days, d_model)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -43,18 +44,22 @@ class StockAutoregressiveModel(nn.Module):
         self.hit_down_head = nn.Linear(d_model, 2)
 
     def forward(self, states: torch.Tensor) -> dict[str, torch.Tensor]:
-        if states.ndim != 3 or states.shape[-1] != 5:
-            raise ValueError("states shape 必須是 [batch, days, 5]")
+        if states.ndim != 3 or states.shape[-1] != 6:
+            raise ValueError("states shape 必須是 [batch, days, 6]，含 ATR(14)")
+        if states.dtype != torch.long:
+            raise ValueError("六項輸入必須為 torch.long 離散刻度，ATR 不接受連續值")
         days = states.shape[1]
         if days > self.context_days:
             raise ValueError(f"輸入 {days} 日超過模型上限 {self.context_days}")
         positions = torch.arange(days, device=states.device)
+        categorical = states[..., :5].long()
         hidden = (
-            self.price_embedding(states[..., 0])
-            + self.hit_up_embedding(states[..., 1])
-            + self.hit_down_embedding(states[..., 2])
-            + self.close_embedding(states[..., 3])
-            + self.volume_embedding(states[..., 4])
+            self.price_embedding(categorical[..., 0])
+            + self.hit_up_embedding(categorical[..., 1])
+            + self.hit_down_embedding(categorical[..., 2])
+            + self.close_embedding(categorical[..., 3])
+            + self.volume_embedding(categorical[..., 4])
+            + self.atr_embedding(states[..., 5])
             + self.position_embedding(positions)[None, :, :]
         )
         causal_mask = torch.triu(

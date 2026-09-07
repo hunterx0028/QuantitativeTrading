@@ -5,7 +5,8 @@ from datetime import date
 from pathlib import Path
 
 from .config import Settings
-from .features import DailyState, encode_candles
+from .features import DailyState
+from .state_pipeline import load_candle_states
 from .paths import (
     ACTUAL_CANDLES_DIR,
     CANDLES_DIR,
@@ -13,8 +14,8 @@ from .paths import (
     PREDICTIONS_DIR,
     ensure_runtime_dirs,
 )
-from .predict import SignalThresholds, build_signal_thresholds, detect_direction_signal, detect_signal
-from .storage import read_jsonl, write_jsonl
+from .predict import SignalThresholds, build_signal_thresholds, detect_signal
+from .storage import write_jsonl
 
 
 def main() -> None:
@@ -27,8 +28,6 @@ def main() -> None:
     parser.add_argument("--long-price-threshold", type=float, default=None)
     parser.add_argument("--short-hit-threshold", type=float, default=None)
     parser.add_argument("--short-price-threshold", type=float, default=None)
-    parser.add_argument("--long-direction-threshold", type=float, default=None)
-    parser.add_argument("--short-direction-threshold", type=float, default=None)
     parser.add_argument("--target-profit-pct", type=float, default=3.0)
     parser.add_argument("--max-adverse-pct", type=float, default=2.0)
     args = parser.parse_args()
@@ -69,15 +68,13 @@ def load_actuals(
 
     for prediction in predictions:
         symbol = prediction["symbol"]
-        rows = [
-            row for row in read_jsonl(CANDLES_DIR / f"{symbol}.jsonl")
-            if row["date"] <= prediction_date
-        ]
+        rows, states = load_candle_states(
+            CANDLES_DIR / f"{symbol}.jsonl", prediction_date, settings.warmup_days,
+        )
         actual_candle = next((row for row in rows if row["date"] == prediction_date), None)
         if actual_candle is None:
             missing_symbols.append(symbol)
             continue
-        states = encode_candles(rows, warmup_days=settings.warmup_days)
         actual_state = next((state for state in states if state.date == prediction_date), None)
         if actual_state is None:
             missing_symbols.append(symbol)
@@ -119,8 +116,7 @@ def print_summary(
     hit_down_hits = 0
     signal_rows: list[tuple[dict, dict, DailyState, dict]] = []
     signal_results: list[dict] = []
-    direction_rows: list[tuple[dict, dict, DailyState, dict]] = []
-    direction_results: list[dict] = []
+    conflicts: list[dict] = []
     actual_candles_by_symbol = {row["symbol"]: row for row in actual_candles}
 
     for prediction in predictions:
@@ -141,19 +137,16 @@ def print_summary(
         hit_down_hits += int(hit_down_ok)
 
         signal = detect_signal(prediction, thresholds)
+        if signal and signal["side"] == "CONFLICT":
+            conflicts.append({**signal, "actual_price": actual.price,
+                              "actual_hit_up": actual.hit_up, "actual_hit_down": actual.hit_down,
+                              "candle": actual_candles_by_symbol[symbol]})
+            signal = None
         if signal:
             candle = actual_candles_by_symbol[symbol]
             trade = evaluate_signal_trade(signal, candle, target_profit_pct, max_adverse_pct)
             signal_rows.append((prediction, signal, actual, trade))
             signal_results.append({**signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]})
-        direction_signal = detect_direction_signal(prediction, thresholds)
-        if direction_signal:
-            candle = actual_candles_by_symbol[symbol]
-            trade = evaluate_signal_trade(direction_signal, candle, target_profit_pct, max_adverse_pct)
-            direction_rows.append((prediction, direction_signal, actual, trade))
-            direction_results.append(
-                {**direction_signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]}
-            )
 
     print(f"驗證筆數: {evaluated}/{len(predictions)}")
     if evaluated:
@@ -181,27 +174,16 @@ def print_summary(
             f"best={trade['best_profit_pct']:.2f}% close={trade['close_profit_pct']:.2f}% "
             f"adverse={trade['adverse_pct']:.2f}% success={trade['success']}"
         )
-    print(
-        "方向訊號 "
-        f"long_direction>={thresholds.long_direction:.2f}, "
-        f"short_direction>={thresholds.short_direction:.2f}, "
-        f"target_profit >= {target_profit_pct:.2f}%, max_adverse <= {max_adverse_pct:.2f}%: "
-        f"{len(direction_rows)}"
-    )
-    for prediction, signal, actual, trade in direction_rows:
-        print(
-            f"[DIRECTION {signal['side']}] {signal['symbol']} "
-            f"{signal['price_key']}={signal['price_probability']:.4f} | "
-            f"actual_hit={trade['actual_hit']} actual_price={actual.price} | "
-            f"O={trade['open']} H={trade['high']} L={trade['low']} C={trade['close']} | "
-            f"best={trade['best_profit_pct']:.2f}% close={trade['close_profit_pct']:.2f}% "
-            f"adverse={trade['adverse_pct']:.2f}% success={trade['success']}"
-        )
+    for label, items in (("SIGNAL", conflicts),):
+        print(f"{label} CONFLICT: {len(items)} 筆，暫不選邊，不計入單方向交易統計")
+        for item in items:
+            print(f"[{label} CONFLICT] {item['symbol']} actual_price={item['actual_price']} "
+                  f"actual_hit_up={item['actual_hit_up']} actual_hit_down={item['actual_hit_down']}")
     return {
         "prediction_date": next((item["prediction_date"] for item in predictions), None),
         "evaluated": evaluated,
         "total_predictions": len(predictions),
-        "signal_thresholds": thresholds.__dict__,
+        "signal_thresholds": thresholds.signal_values(),
         "target_profit_pct": target_profit_pct,
         "max_adverse_pct": max_adverse_pct,
         "accuracy": {
@@ -210,7 +192,7 @@ def print_summary(
             "hit_down": hit_down_hits / evaluated if evaluated else None,
         },
         "signals": signal_results,
-        "direction_signals": direction_results,
+        "conflicts": conflicts,
     }
 
 
@@ -220,6 +202,8 @@ def evaluate_signal_trade(
     target_profit_pct: float,
     max_adverse_pct: float,
 ) -> dict:
+    if signal["side"] not in ("LONG", "SHORT"):
+        raise ValueError("交易評估只接受 LONG 或 SHORT；CONFLICT 必須獨立保存")
     open_price = float(candle["open"])
     high = float(candle["high"])
     low = float(candle["low"])
