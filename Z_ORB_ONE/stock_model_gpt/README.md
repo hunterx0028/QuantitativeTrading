@@ -28,7 +28,6 @@ python -m pytest Z_ORB_ONE/stock_model_gpt/tests -q
 - `finmind.py`：匿名或使用可選 `FINMIND_TOKEN` 查詢除權息結果；另保留付費公司行動資料的選用介面。
 - `resync_corporate_actions.py`：忽略既有同步狀態，重新同步並覆寫 FinMind 公司行動快取。
 - `prepare_features.py`：將 OHLCV 轉成議定的每日狀態。
-- `analyze_atr.py`：正式訓練前分析 ATR 比例分布，列出候選刻度占比、分位數及逐年分布，不自動修改設定。
 - `atr_calibration.py`：初始訓練擬合五級界線並保存分析報告；每日續訓只繼承 checkpoint 界線，不分析分布或產生新報告。
 - `model.py`：無股票代號 embedding 的第一版 causal Transformer、三輸出頭。
 - `train_initial.py`：由隨機權重訓練初始模型。
@@ -139,27 +138,6 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-03 --predict
 ATR 界線一律由初始訓練自動產生，保存至 checkpoint；不提供 CLI 或 settings.json 的手動覆寫。
 
 只有初始訓練產生 `data/atr_analysis/initial_fit_<as-of>_<timestamp>.json`，記錄所用界線、來源、初始擬合日期、整體／逐年／當日占比。每日 checkpoint 繼承原有刻度及初始報告路徑，不新增報告。
-
-### 選用：獨立分析與比較候選
-
-`analyze_atr` 仍可獨立執行，不會修改模型使用的刻度。`--as-of` 必填；若只分析特定期間或股票：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.analyze_atr --from-date 2020-01-01 --as-of 2026-09-03 --symbols 2330 2464
-```
-
-獨立分析預設比較界線 `1 2 3 5`（百分比單位，即 1%、2%、3%、5%，不是 0.01 等比例），不自動讀 checkpoint。也能比較四級候選，但目前模型固定五級：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.analyze_atr --as-of 2026-09-03 --boundaries-pct 1 2 4 --output Z_ORB_ONE/stock_model_gpt/data/atr_analysis/four_levels.json
-python -m Z_ORB_ONE.stock_model_gpt.analyze_atr --as-of 2026-09-03 --boundaries-pct 1 2 3 5 --output Z_ORB_ONE/stock_model_gpt/data/atr_analysis/five_levels.json
-```
-
-控制台列出整體及逐年各級筆數／占比、P20/P40/P60/P80 等分位數與等頻候選界線。預設報告保存至 `data/atr_analysis/<as-of>.json`，同截止日重跑會覆寫；比較方案時用 `--output` 分別保存。報告也記錄日期範圍、股票筆數、缺檔及缺少／無效 ATR 筆數。分位數使用排序後線性內插，等頻候選若包含零或重複界線會提示不可直接使用。
-
-未指定 `--symbols` 時，股票範圍依訓練程式相同的 recent universe 規則選取；沒有近期快照時回退全部特徵檔，並在輸出標明。分析以每筆有效「股票日」等權計數，不是訓練滑動視窗重複出現次數；長歷史股票會有較多筆數。`--from-date` 只限制分析範圍，不會更改訓練程式的資料範圍。
-
-獨立分析工具只讀取特徵快取，不呼叫行情 API、不修改 settings 或模型。請先以最新公司行動規則重跑 `prepare_features`。此工具保留供手動研究使用，日常流程不會呼叫它。
 
 ### 日期設定
 
