@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import json
 import math
+import subprocess
+import sys
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
@@ -609,6 +611,15 @@ def main() -> None:
         "selected_limit_down_stocks_previous_close_total="
         f"{sum_previous_close_prices(selected_limit_down_stock_records)}"
     )
+
+    update_script_path = base_dir.parent / "update_stock_data_industry_indices.py"
+    log(f"[INFO] 選股完成，開始更新產業指數: {update_script_path}")
+    subprocess.run(
+        [sys.executable, str(update_script_path), "--stock-data", str(stock_data_path)],
+        cwd=update_script_path.parent,
+        check=True,
+    )
+    log("[INFO] 產業指數更新完成")
 
 
 if __name__ == "__main__":
