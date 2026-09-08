@@ -17,6 +17,7 @@
   "daily_replay_ratio": 1.0,
   "daily_replay_max_sequences": 4096,
   "daily_replay_per_symbol": 128,
+  "daily_replay_hit_oversample": 4.0,
   "d_model": 128,
   "n_heads": 4,
   "n_layers": 4,
@@ -24,5 +25,10 @@
   "seed": 42,
   "loss_price": 2.0,
   "loss_hit_up": 4.0,
-  "loss_hit_down": 4.0
+  "loss_hit_down": 4.0,
+  "focal_gamma": 2.0,
+  "gate_window_days": 20,
+  "gate_short_window_days": 5,
+  "gate_min_signals": 3,
+  "gate_max_success_rate_drop": 0.25
 }

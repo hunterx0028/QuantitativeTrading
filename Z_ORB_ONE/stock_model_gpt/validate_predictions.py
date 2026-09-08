@@ -14,6 +14,7 @@ from .paths import (
     PREDICTIONS_DIR,
     ensure_runtime_dirs,
 )
+from .checkpoint_gate import compute_gate_status, save_gate_status
 from .predict import SignalThresholds, build_signal_thresholds, detect_signal
 from .storage import write_jsonl
 
@@ -55,6 +56,9 @@ def main() -> None:
         args.max_adverse_pct,
     )
     write_evaluation(prediction_date, summary)
+    gate_status = compute_gate_status(settings)
+    save_gate_status(gate_status)
+    print(f"checkpoint gate: {gate_status['verdict']} — {gate_status['reason']}")
 
 
 def load_actuals(
@@ -114,6 +118,8 @@ def print_summary(
     price_hits = 0
     hit_up_hits = 0
     hit_down_hits = 0
+    hit_up_tp = hit_up_fp = hit_up_fn = 0
+    hit_down_tp = hit_down_fp = hit_down_fn = 0
     signal_rows: list[tuple[dict, dict, DailyState, dict]] = []
     signal_results: list[dict] = []
     conflicts: list[dict] = []
@@ -136,6 +142,15 @@ def print_summary(
         hit_up_hits += int(hit_up_ok)
         hit_down_hits += int(hit_down_ok)
 
+        hit_up_signal = prediction["hit_up"]["T"] >= thresholds.long_hit
+        hit_down_signal = prediction["hit_down"]["T"] >= thresholds.short_hit
+        hit_up_tp += int(hit_up_signal and actual.hit_up)
+        hit_up_fp += int(hit_up_signal and not actual.hit_up)
+        hit_up_fn += int(not hit_up_signal and actual.hit_up)
+        hit_down_tp += int(hit_down_signal and actual.hit_down)
+        hit_down_fp += int(hit_down_signal and not actual.hit_down)
+        hit_down_fn += int(not hit_down_signal and actual.hit_down)
+
         signal = detect_signal(prediction, thresholds)
         if signal and signal["side"] == "CONFLICT":
             conflicts.append({**signal, "actual_price": actual.price,
@@ -148,11 +163,24 @@ def print_summary(
             signal_rows.append((prediction, signal, actual, trade))
             signal_results.append({**signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]})
 
+    hit_up_recall, hit_up_precision = _recall_precision(hit_up_tp, hit_up_fp, hit_up_fn)
+    hit_down_recall, hit_down_precision = _recall_precision(hit_down_tp, hit_down_fp, hit_down_fn)
+
     print(f"驗證筆數: {evaluated}/{len(predictions)}")
     if evaluated:
         print(f"price 命中率: {price_hits}/{evaluated} = {price_hits / evaluated:.2%}")
         print(f"hit_up 命中率: {hit_up_hits}/{evaluated} = {hit_up_hits / evaluated:.2%}")
         print(f"hit_down 命中率: {hit_down_hits}/{evaluated} = {hit_down_hits / evaluated:.2%}")
+        print(
+            f"hit_up @ long_hit>={thresholds.long_hit:.2f}: "
+            f"recall={_format_rate(hit_up_recall)}({hit_up_tp}/{hit_up_tp + hit_up_fn}) "
+            f"precision={_format_rate(hit_up_precision)}({hit_up_tp}/{hit_up_tp + hit_up_fp})"
+        )
+        print(
+            f"hit_down @ short_hit>={thresholds.short_hit:.2f}: "
+            f"recall={_format_rate(hit_down_recall)}({hit_down_tp}/{hit_down_tp + hit_down_fn}) "
+            f"precision={_format_rate(hit_down_precision)}({hit_down_tp}/{hit_down_tp + hit_down_fp})"
+        )
 
     print(
         "漲跌訊號 "
@@ -191,9 +219,25 @@ def print_summary(
             "hit_up": hit_up_hits / evaluated if evaluated else None,
             "hit_down": hit_down_hits / evaluated if evaluated else None,
         },
+        "signal_recall_precision": {
+            "hit_up": {"recall": hit_up_recall, "precision": hit_up_precision,
+                       "tp": hit_up_tp, "fp": hit_up_fp, "fn": hit_up_fn},
+            "hit_down": {"recall": hit_down_recall, "precision": hit_down_precision,
+                         "tp": hit_down_tp, "fp": hit_down_fp, "fn": hit_down_fn},
+        },
         "signals": signal_results,
         "conflicts": conflicts,
     }
+
+
+def _recall_precision(tp: int, fp: int, fn: int) -> tuple[float | None, float | None]:
+    recall = tp / (tp + fn) if (tp + fn) else None
+    precision = tp / (tp + fp) if (tp + fp) else None
+    return recall, precision
+
+
+def _format_rate(value: float | None) -> str:
+    return f"{value:.2%}" if value is not None else "N/A"
 
 
 def evaluate_signal_trade(

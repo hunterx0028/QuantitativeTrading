@@ -42,12 +42,67 @@ def build_model(settings: Settings) -> StockAutoregressiveModel:
     )
 
 
-def weighted_loss(outputs, targets, settings: Settings) -> torch.Tensor:
-    criterion = nn.CrossEntropyLoss()
+def binary_class_weight(dataset: StockSequenceDataset, field: str) -> torch.Tensor | None:
+    """Inverse-frequency weight for a rare binary target (hit_up/hit_down)."""
+    positives = sum(
+        bool(dataset.rows_by_path[ref.feature_path][ref.end][field]) for ref in dataset.refs
+    )
+    total = len(dataset.refs)
+    negatives = total - positives
+    if positives == 0 or negatives == 0:
+        return None
+    return torch.tensor(
+        [total / (2.0 * negatives), total / (2.0 * positives)], dtype=torch.float32,
+    )
+
+
+class FocalLoss(nn.Module):
+    """Multi-class focal loss: down-weights samples the model already classifies
+    confidently, so gradient stays focused on rare, hard hit_up/hit_down positives."""
+
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        log_probs = torch.log_softmax(logits, dim=-1)
+        target_log_prob = log_probs.gather(1, target.unsqueeze(1)).squeeze(1)
+        focal_term = (1.0 - target_log_prob.exp()).clamp(min=0.0) ** self.gamma
+        loss = -focal_term * target_log_prob
+        if self.weight is not None:
+            sample_weight = self.weight[target]
+            return (loss * sample_weight).sum() / sample_weight.sum()
+        return loss.mean()
+
+
+def build_criteria(
+    settings: Settings, dataset: StockSequenceDataset, device: torch.device,
+) -> dict[str, nn.Module]:
+    criteria: dict[str, nn.Module] = {"price": nn.CrossEntropyLoss()}
+    for field in ("hit_up", "hit_down"):
+        weight = binary_class_weight(dataset, field)
+        criteria[field] = FocalLoss(
+            gamma=settings.focal_gamma,
+            weight=weight.to(device) if weight is not None else None,
+        )
+        if weight is not None:
+            print(
+                f"class_weight {field}: negative={weight[0]:.4f} positive={weight[1]:.4f} "
+                f"focal_gamma={settings.focal_gamma}"
+            )
+        else:
+            print(f"class_weight {field}: 樣本只有單一類別，維持不加權 focal_gamma={settings.focal_gamma}")
+    return criteria
+
+
+def weighted_loss(
+    outputs, targets, settings: Settings, criteria: dict[str, nn.Module],
+) -> torch.Tensor:
     return (
-        settings.loss_price * criterion(outputs["price"], targets["price"])
-        + settings.loss_hit_up * criterion(outputs["hit_up"], targets["hit_up"])
-        + settings.loss_hit_down * criterion(outputs["hit_down"], targets["hit_down"])
+        settings.loss_price * criteria["price"](outputs["price"], targets["price"])
+        + settings.loss_hit_up * criteria["hit_up"](outputs["hit_up"], targets["hit_up"])
+        + settings.loss_hit_down * criteria["hit_down"](outputs["hit_down"], targets["hit_down"])
     )
 
 
@@ -102,10 +157,15 @@ def train(
                     print(f"[SKIP] 相同來源模型與截止日已完成: {completed}")
                     return completed
     eligible_symbols = recent_symbols(as_of, settings.recent_universe_days)
+    if not eligible_symbols:
+        raise RuntimeError(
+            f"找不到 {as_of.isoformat()} 往前 {settings.recent_universe_days} 天內的股票清單快照，"
+            "請先執行 update_data 產生 universe snapshot，避免訓練誤用不在清單內的舊股票"
+        )
     all_feature_paths = list(FEATURES_DIR.glob("*.jsonl"))
     feature_paths = sorted(
         path for path in all_feature_paths
-        if not eligible_symbols or path.stem in eligible_symbols
+        if path.stem in eligible_symbols
     )
     # Initial calibration uses stocks that can contribute training sequences.
     feature_paths = [path for path in feature_paths
@@ -131,10 +191,14 @@ def train(
         if not dataset:
             print("[SKIP] 沒有選取的訓練序列")
             return resume_path
-        print(f"daily_mode={sampling['mode']} new={sampling['new_count']} replay={sampling['replay_count']}")
+        print(
+            f"daily_mode={sampling['mode']} new={sampling['new_count']} "
+            f"replay={sampling['replay_count']} replay_hit_days={sampling['replay_hit_days']}"
+        )
     device = select_device()
     use_cuda = device.type == "cuda"
     print(f"device={describe_device(device)}")
+    criteria = build_criteria(settings, dataset, device)
     loader = DataLoader(
         dataset,
         batch_size=settings.batch_size,
@@ -168,7 +232,7 @@ def train(
                 dtype=torch.float16,
                 enabled=use_cuda,
             ):
-                loss = weighted_loss(model(states), targets, settings)
+                loss = weighted_loss(model(states), targets, settings, criteria)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)

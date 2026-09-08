@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .analyze_atr import analyze, print_distribution, summarise, validate_boundaries
 from .config import Settings
-from .paths import DATA_DIR
+from .paths import ATR_ANALYSIS_DIR
 from .storage import read_jsonl
 
 
@@ -55,7 +55,7 @@ def prepare_atr_levels(settings: Settings, paths: list[Path], as_of: date,
     print(f"ATR 刻度模式={mode} 界線（%）={boundaries}")
     print_distribution("訓練期間", report["summary"], boundaries)
     print_distribution(f"當日 {as_of}", report["current_day"], boundaries)
-    output = DATA_DIR / "atr_analysis" / f"{mode}_{as_of}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+    output = ATR_ANALYSIS_DIR / f"{mode}_{as_of}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     print(f"ATR 分布報告: {output}")

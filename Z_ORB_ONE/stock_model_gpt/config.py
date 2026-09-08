@@ -29,6 +29,7 @@ class Settings:
     daily_replay_ratio: float = 1.0
     daily_replay_max_sequences: int = 4096
     daily_replay_per_symbol: int = 128
+    daily_replay_hit_oversample: float = 4.0
     d_model: int = 128
     n_heads: int = 4
     n_layers: int = 4
@@ -37,6 +38,11 @@ class Settings:
     loss_price: float = 2.0
     loss_hit_up: float = 4.0
     loss_hit_down: float = 4.0
+    focal_gamma: float = 2.0
+    gate_window_days: int = 20
+    gate_short_window_days: int = 5
+    gate_min_signals: int = 3
+    gate_max_success_rate_drop: float = 0.25
     # Internal checkpoint metadata only; never a user configuration override.
     atr_boundaries_pct: list[float] | None = None
 

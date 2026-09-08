@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 
 from .config import Settings
-from .paths import DATA_DIR, FEATURES_DIR
+from .paths import ATR_ANALYSIS_DIR, FEATURES_DIR
 from .storage import read_jsonl
 from .universe import recent_symbols
 
@@ -127,7 +127,7 @@ def main() -> None:
     if not report["candidate_usable"]:
         print("[WARN] 候選界線有零值或重複值，不能直接作為刻度界線")
     print(f"無效或缺 ATR 筆數: {report['invalid_rows']}; 缺特徵股票: {report['missing_symbols']}")
-    output = args.output or DATA_DIR / "atr_analysis" / f"{args.as_of.isoformat()}.json"
+    output = args.output or ATR_ANALYSIS_DIR / f"{args.as_of.isoformat()}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     print(f"分析已保存: {output}；未修改設定、特徵或 checkpoint")

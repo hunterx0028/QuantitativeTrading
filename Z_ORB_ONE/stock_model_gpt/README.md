@@ -9,12 +9,13 @@
 | 1. 模組說明 | 各程式用途 |
 | 2. 資料表示 | 六項輸入、ATR、預測輸出與訊號 |
 | 3. GPU確認 | 確認實際訓練裝置 |
-| 4. 初始訓練設定 | 更新資料、自動決定刻度、初始訓練與首次預測 |
-| 5. 驗證結果程序 | 取得實際行情、驗證先前預測 |
-| 6. 每日更新設定 | 新增序列、歷史重播、續訓與下次預測 |
+| 4. 初始訓練設定 | 從頭重置（選用）、更新資料、自動決定刻度、初始訓練與首次預測 |
+| 5. 驗證結果程序 | 取得實際行情、驗證先前預測、recall/precision、checkpoint gate 判定 |
+| 6. 每日更新設定 | 新增序列、歷史重播（含稀有事件加權）、續訓與下次預測 |
 | 7. Post-Training Gate | 定期查看 signals 統計與建議 |
 | 8. 除權息及特殊參考 | 公司行動資料來源與重新同步 |
 | 9. 尚待實驗而非固定項目 | 後續實驗方向 |
+| 10. Walk-forward 回測（選用工具） | 隔離環境下驗證訓練設定，不影響正式資料 |
 
 ## 1. 模組說明
 
@@ -24,6 +25,7 @@
 python -m pytest Z_ORB_ONE/stock_model_gpt/tests -q
 ```
 
+- `reset_runtime_data.py`：清空所有可重建的執行期資料（candles/features/checkpoints/predictions/evaluations/universe/atr_analysis/signal_reports），從頭重新開始用；不會動到 `config.ini`、`stock_data.py`、`settings.json` 或原始碼。預設乾跑只列出、不刪除，加 `--yes` 才會真的刪除。
 - `update_data.py`：讀取 `Z_ORB_ONE/stock_data.py` 的 `selected_stocks`、保存每日清單快照、登入玉山 SDK 並增量更新日 K，同時增量同步 FinMind 公司行動資料。程式刻意不呼叫 logout。
 - `finmind.py`：匿名或使用可選 `FINMIND_TOKEN` 查詢除權息結果；另保留付費公司行動資料的選用介面。
 - `resync_corporate_actions.py`：忽略既有同步狀態，重新同步並覆寫 FinMind 公司行動快取。
@@ -36,6 +38,8 @@ python -m pytest Z_ORB_ONE/stock_model_gpt/tests -q
 - `validate_predictions.py`：用實際日 K 驗證三項分類預測與 `signals`，不評估 TXT 的方向參考訊號。
 - `post_training_gate.py`：只彙整 `signals` 交易結果，打印門檻建議；忽略舊檔案中的方向訊號欄位。
 - `run_daily.py`：串接資料更新、特徵產生、每日續訓與預測；ATR 套用初始模型的固定刻度。
+- `checkpoint_gate.py`：每次 `validate_predictions` 完自動判定近期 `signals` 成功率是否明顯退化；退化時 `predict.py` 在沒有明確指定 `--checkpoint` 的情況下會拒絕自動選用最新 checkpoint。
+- `walk_forward_backtest.py`：選用工具，粗粒度 walk-forward 回測（每個 fold 只訓練一次、之後凍結預測驗證多個交易日），所有輸出隔離在獨立目錄，不影響正式資料。
 
 ## 2. 資料表示
 
@@ -85,6 +89,13 @@ price=2.0, hit_up=4.0, hit_down=4.0
 
 也就是收盤價格分類仍參與訓練，但盤中觸漲停/觸跌停是較高權重的主任務。
 
+`hit_up`/`hit_down` 是稀有事件（多數交易日都不會觸及），只靠上面的任務層級權重不足以處理類別內部的正負樣本不平衡，因此另外疊加兩層機制（`price` 不受影響，仍是一般 `CrossEntropyLoss`）：
+
+- **Class weight**：每次訓練（初始或每日續訓）依當次實際訓練集裡 `hit_up`/`hit_down` 的正負樣本比例，自動算出 inverse-frequency 權重，不是固定值。
+- **Focal loss**（`focal_gamma`，預設 `2.0`）：取代 `hit_up`/`hit_down` 原本的 `CrossEntropyLoss`，公式為 `loss = -(1-p_t)^γ * log(p_t)`，讓模型已經很有把握答對的樣本梯度貢獻變小，聚焦在難分的稀有正樣本上。`γ=0` 時等同沒有 class weight 的普通 `CrossEntropyLoss`。
+
+這兩層機制沒有上限保護；如果實際正樣本比例極低（例如 <1%），算出的 class weight 可能到十幾甚至上百倍，訓練時建議留意每個 epoch 印出的 loss 有沒有異常震盪。
+
 原始 K 棒保存在 `data/candles`，衍生狀態保存在 `data/features`，每日股票清單快照保存在 `data/universe`。這些執行期資料不納入 Git。
 
 ### 預測輸出與訊號
@@ -122,6 +133,14 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 若是 `+cpu` 且 `False`，請將目前環境的 PyTorch 換成 CUDA build。依實際 PyTorch 官方頁面選擇與本機 driver 相容的 CUDA wheel；完成後重新跑上面的確認指令，看到 `True` 與 GPU 名稱才代表程式會走 CUDA。CUDA 可用時，訓練會自動使用 pinned memory、non-blocking transfer 與 AMP mixed precision；CPU 環境則維持原本流程。
 
 ## 4. 初始訓練設定
+
+本節理論上只會執行一次：完成初始訓練後，之後每個交易日都是走第 5、6 節的驗證與續訓流程，不會回頭重跑本節。如果要重新從頭開始（例如想丟棄舊的執行期資料、或架構/資料有重大變更想乾淨重來），先用 `reset_runtime_data.py` 清空舊資料再往下走：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.reset_runtime_data --yes
+```
+
+這一步只清 `data/candles`、`data/features`、`checkpoints/` 等執行期資料，不會動到 `config.ini`、`stock_data.py`、`settings.json`。不確定要不要清時，先不加 `--yes` 執行一次看預覽，確認範圍後再加 `--yes` 重跑。
 
 初始流程為「更新資料 → 產生調整後 ATR → 自動分析並決定五級界線 → 分級 → 初始訓練」。無需另外手動執行分析程式。
 `train_initial` 預設使用訓練期間 ATR% 的 P20/P40/P60/P80 擬合四個界線；只納入訓練股票範圍內且有足夠 context 與目標日的股票，排除 `--as-of` 之後資料。界線不能用驗證期決定。分位數含零或重複時，明確警告並回退到固定 `1/2/3/5%`，不保證各級筆數均衡。
@@ -161,6 +180,20 @@ python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-
 衝突記錄保存 `long`、`short` 兩邊的機率及觸發證據。預測 JSON 保存完整 `predictions`、正式訊號 `signals` 與其四個 `signal_thresholds`，不再保存 `direction_signals`。`signal_reports` TXT 的內容與格式維持原樣，包含方向參考及雙向衝突標記。
 
 驗證仍計算所有可驗證股票的三項分類命中率；`signals` 的 CONFLICT 另存至 evaluation 的 `conflicts`，保留實際價格分類、兩個觸及結果及日 K，不選定交易方向、不計算單方向交易成功率。新 evaluation 不含 `direction_signals` 或 `direction_conflicts`。Gate 只處理 `signals` 與 `conflicts`，舊檔案中的方向欄位也會忽略。既有 JSON 不批次改寫，可重跑驗證產生新版 evaluation；此次不需重訓模型，也不修改既有 TXT。
+
+除了命中率（argmax 對答案），evaluation 另外用實際訊號門檻（`long_hit`/`short_hit`）計算 `hit_up`/`hit_down` 的 recall（實際觸及中抓到幾成）與 precision（觸發訊號中真的觸及的比例），存在 `signal_recall_precision` 欄位並同步印在控制台。稀有事件下命中率容易失真（模型永遠猜「不觸及」也能有高命中率），recall/precision 才是判斷訊號品質有沒有改善的依據。
+
+### Checkpoint gate（自動安全煞車）
+
+每次 `validate_predictions` 執行完，會自動彙整最近 `gate_window_days`（預設 20）個已驗證交易日與最近 `gate_short_window_days`（預設 5）日的 `signals` 成功率，寫入 `checkpoints/gate_status.json`：
+
+- 樣本數（`signals` 筆數）不足 `gate_min_signals`（預設 3）時，判定 `INSUFFICIENT_DATA`，不影響任何行為。
+- 短窗口成功率比長窗口下降超過 `gate_max_success_rate_drop`（預設 `0.25`，即 25 個百分點）時，判定 `DEGRADED`。
+- 其餘情況判定 `OK`。
+
+`predict.py` 在**沒有明確指定 `--checkpoint`** 的自動選檔路徑（也就是 `run_daily` 實際在用的路徑）會檢查這個狀態：`DEGRADED` 時直接報錯拒絕預測，避免不知不覺拿一個表現變差的模型血緣去產生真正的訊號。明確指定 `--checkpoint <路徑>` 永遠不受這個檢查影響。
+
+這不是完整的 A/B 模型比較機制（目前的每日續訓是同一條模型血緣持續更新，沒有辦法在新 checkpoint 上線前先做離線回測），只是偵測「最近訊號表現有沒有明顯變差」的煙霧偵測器，出現 `DEGRADED` 時需要人工檢查訓練或資料是否異常，而不是自動判定該用哪個模型。
 
 驗證前需先讓本地 `data/candles` 含有該預測日的實際日 K；驗證程式會讀取 `predictions/2026-09-04.json`，從本地 `data/candles` 擷取 2026-09-04 實際日 K，另存至 `data/actual_candles/2026-09-04.jsonl`，並在控制台打印前三項各自的命中率及 `signals` 的實際結果。訊號會列出 `actual_hit`、`actual_price` 與實際日 K 的 `O/H/L/C`。驗證程式會直接由實際 K 棒重算該日狀態，不需要先重跑 `prepare_features`。
 
@@ -206,7 +239,7 @@ python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-04 --prediction-da
 
 每日續訓預設 `daily_training_mode="incremental_replay"`：新增序列依「目標日」判定，範圍為前一 checkpoint 的 `training_as_of` 之後至本次 `--as-of`，全部納入；輸入仍保留每筆目標日前完整的 context。例如目標為今天，輸入仍是此前 120 日，不是只輸入今天新增的一列。
 
-歷史重播從前次截止日以前的序列抽樣，預設最多為新增筆數的 1 倍（`daily_replay_ratio=1.0`），總上限 4096（`daily_replay_max_sequences`），每股最多 128（`daily_replay_per_symbol`）。這些是初始工程設定，並非已驗證最佳比例。各股先隨機抽樣，再輪流選入，避免長歷史股票佔滿重播預算；候選不足不重複補抽。隨機種子由設定 seed 與本次日期決定。
+歷史重播從前次截止日以前的序列抽樣，預設最多為新增筆數的 1 倍（`daily_replay_ratio=1.0`），總上限 4096（`daily_replay_max_sequences`），每股最多 128（`daily_replay_per_symbol`）。這些是初始工程設定，並非已驗證最佳比例。各股抽樣時，`hit_up`/`hit_down` 為真的日子權重是一般日子的 `daily_replay_hit_oversample`（預設 `4.0`）倍（加權不放回抽樣，抽出後會重新洗牌，避免抽樣權重連帶影響後續輪流選入的順序），再輪流選入，避免長歷史股票佔滿重播預算；候選不足不重複補抽。隨機種子由設定 seed 與本次日期決定。此機制只在每日續訓（`train_daily`/`run_daily`）啟動，`train_initial` 不會用到。
 
 新加入股票也依相同日期規則處理：近期目標全部納入，較早歷史進入受單股上限約束的重播池，不會整批強制訓練。股票池仍使用 recent universe 規則，已退出且不在近期池的股票不會額外加入重播。初始訓練仍使用全部可用序列，ATR 刻度及 optimizer 狀態在每日續訓中繼承既有模型。
 
@@ -230,7 +263,7 @@ python -m Z_ORB_ONE.stock_model_gpt.train_daily --checkpoint <來源模型路徑
 
 此版本依全模型截止日區分新舊資料，遲補且目標日不晚於截止日的資料會歸入歷史池，不保證立即抽中；若要完整重學修訂的歷史資料，可使用全部歷史模式。以上只調整每日訓練取樣；自動補驗、待驗證股票抓取與 gate 自動串接仍未納入 `run_daily`。
 
-日常訓練只讀取 `recent_universe_days` 期間內曾出現在清單快照的股票；更舊股票的本地資料不會刪除，重新入選時可補齊缺口。預測則嚴格限定在 `--universe-date` 的 Active 清單。
+日常訓練只讀取 `recent_universe_days` 期間內曾出現在清單快照的股票；更舊股票的本地資料不會刪除，重新入選時可補齊缺口。預測則嚴格限定在 `--universe-date` 的 Active 清單。若 `recent_universe_days` 期間內完全找不到清單快照（例如忘記先執行 `update_data`），訓練會直接報錯，不會靜默改用全部本地股票。
 
 玉山若回傳 OHLC 含 `null`、非正價格或最高價低於最低價的歷史列，更新程式會顯示 `[WARN]` 並略過；不會以0補成假行情。成交量單獨為空時則保存為0，特徵化後標記為 `X`。
 
@@ -282,6 +315,29 @@ FinMind 的 `TaiwanStockPriceAdj` 屬 backer/sponsor 會員資料，因此第一
 
 - 玉山個股最早自2010年回溯，每次請求切為365曆日以內。
 - 60/120/240 日 context 比較。
-- 依日期切割的 walk-forward 驗證與候選模型發布門檻。
-- rare-event 類別權重、recency sampling、Active/Recent/Archived replay 比例。
+- ~~依日期切割的 walk-forward 驗證~~：第 10 節已有粗粒度 MVP（每個 fold 只訓練一次），但不模擬每日續訓，測不到 `daily_replay_hit_oversample`；細粒度版本（逐日模擬續訓）與「點時間股票清單重建」（目前用現在的 `selected_stocks` 回填歷史，有 survivorship bias）仍待做。
+- ~~候選模型發布門檻~~：第 5 節已有 `checkpoint_gate.py` 的煞車機制，但只是偵測「近期表現有沒有明顯退化」，不是真正的 A/B 模型比較或自動晉升，仍缺乏離線回測驅動的發布決策。
+- ~~rare-event 類別權重~~：已實作 class weight（inverse-frequency，自動依當次訓練集算，無上限）+ focal loss（`focal_gamma`）+ 重播抽樣加權（`daily_replay_hit_oversample`），效果尚未經過完整 walk-forward 驗證。
+- recency sampling、Active/Recent/Archived replay 比例。
 - 第二版是否加入受限制的股票 embedding；第一版準確時不必加入。
+
+## 10. Walk-forward 回測（選用工具）
+
+不屬於日常操作流程，用來在不影響正式環境的前提下，檢驗訓練設定（例如 class weight、focal loss 這類超參數）跨不同歷史區間的表現，而不用只能一天一天等真實新資料累積。
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest --output-dir backtests/run1 --min-training-days 500 --test-window-days 20
+```
+
+- `--min-training-days`：第一個 fold 至少要有多少交易日歷史才開始訓練（預設 500，約 2 年），依實際快取的資料量調整。
+- fold 數量不用指定，程式會掃過 `data/features/*.jsonl` 算出實際可用的交易日曆，自動切出「擴張窗口訓練 + `--test-window-days`（預設 20）個交易日凍結預測驗證，不重疊」的 fold。
+- `--max-as-of` 可選，限制不使用晚於此日期的資料。
+- `--settings` 可選，傳給內部呼叫的 `train_initial`/`validate_predictions`（不會呼叫 `update_data`，見下方資料隔離說明）。
+
+**粗粒度限制**：每個 fold 只訓練一次（`train_initial`），之後 `--test-window-days` 天都用同一個 checkpoint 凍結預測，不模擬 `train_daily` 的逐日續訓，因此**測不到只在續訓才啟動的機制**（例如 `daily_replay_hit_oversample`）。
+
+**資料隔離**：透過 `STOCK_MODEL_GPT_WRITE_ROOT` 環境變數（見 `paths.py`），把 `checkpoints/`、`predictions/`、`data/evaluations/`、`data/actual_candles/`、`data/universe/`、`data/atr_analysis/`、`signal_reports/` 全部重新導向到 `--output-dir` 底下，不會覆寫或污染正式環境的同名檔案；`data/candles`、`data/features`、`data/corporate_actions`、`stock_data.py` 維持唯讀共用，不重新抓取或修改。不會呼叫 `update_data.py`（會嘗試登入玉山 SDK），股票清單快照改用 `universe.py` 的函式直接產生。
+
+**已知偏誤（不是 bug，是方法論限制）**：每個模擬的歷史日期，股票清單都是用「現在」的 `selected_stocks` 回頭套用，不是那個時間點真正會選的清單，結果相對於「真的從那個時間點開始上線」會偏樂觀（look-ahead / survivorship bias）。報告的 `caveat` 欄位會註記這件事；結果只適合當作「這次改動前後的相對比較」，不是「這個模型能不能賺錢」的證明。
+
+結果存在 `<output-dir>/backtest_report.json`：每個 fold 的訊號成功率、`hit_up`/`hit_down` 的 pooled recall/precision，以及全部 fold 合併的整體數字。

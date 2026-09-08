@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 
+from .checkpoint_gate import load_gate_status
 from .config import Settings
 from .dataset import encode_state
 from .device import describe_device, select_device
@@ -42,6 +43,19 @@ def latest_checkpoint() -> Path:
     if not paths:
         raise RuntimeError("找不到 checkpoint")
     return paths[-1]
+
+
+def select_checkpoint_for_prediction() -> Path:
+    """Auto-select path only; an explicit --checkpoint always bypasses this gate."""
+    candidate = latest_checkpoint()
+    status = load_gate_status()
+    if status is not None and status["verdict"] == "DEGRADED":
+        raise RuntimeError(
+            f"checkpoint gate 判定近期訊號表現明顯退化（{status['reason']}），"
+            f"拒絕自動使用最新 checkpoint {candidate.name}；"
+            "請先確認訓練或資料是否異常，或明確指定 --checkpoint 選用你確認過的模型"
+        )
+    return candidate
 
 
 def select_prediction_inputs(
@@ -92,7 +106,7 @@ def main() -> None:
     if prediction_date <= universe_date:
         raise ValueError("prediction-date 必須晚於 universe-date")
     ensure_runtime_dirs()
-    checkpoint_path = Path(args.checkpoint) if args.checkpoint else latest_checkpoint()
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction()
     device = select_device()
     print(f"device={describe_device(device)}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
