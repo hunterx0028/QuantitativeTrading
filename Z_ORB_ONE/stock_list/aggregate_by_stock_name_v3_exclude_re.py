@@ -27,8 +27,8 @@ EXCLUDED_INDUSTRY_CODES: list[str] = ["17"]  # 排除 17-金融保險
 # 其他可選：20-其他、36-數位雲端、31-其他電子業、25-電腦及週邊設備業
 
 # 原 MIN_REPEAT_COUNT 的條件由參數 A 取代，改為排除連續出現者。
-EXCLUDE_MIN_REPEAT_COUNT = 5  # 參數 A：排除最近連續出現至少 A 個交易日的股票；0 表示不排除
-RECENT_CACHE_DATE_COUNT = 7  # 參數 B：僅取現有快取中最近 B 個交易日出現過的股票
+EXCLUDE_MIN_REPEAT_COUNT = 3  # 參數 A：排除最近連續出現至少 A 個交易日的股票；0 表示不排除
+RECENT_CACHE_DATE_COUNT = 5  # 參數 B：僅取現有快取中最近 B 個交易日出現過的股票
 CACHE_FILE_NAME = "aggregate_by_stock_cache.json"
 OUTPUT_RESULT_FILE_NAME = "aggregate_by_stock_name_v3_result_exclude_re.txt"
 
