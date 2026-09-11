@@ -108,6 +108,7 @@ ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 60.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
 
 LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
 LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
@@ -651,9 +652,14 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 LOWER_STRATEGY_DECISION"
         )
-    if LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < 0:
+    if not (
+        0 <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+        < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100
+    ):
         raise ValueError(
-            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0"
+            "lower 股票比例門檻須符合 0 <= "
+            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < "
+            "LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100"
         )
     if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
         raise ValueError("INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0")
@@ -1421,13 +1427,19 @@ def summarize_lower_strategy_decision_candidates(
         "decline_percent": decline_percent,
         "data_missing_count": data_missing_count,
         "threshold": LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
-        "passed": decline_percent > LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
+        "max_threshold": LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD,
+        "passed": (
+            LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+            < decline_percent
+            <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
+        ),
     }
 
 
 def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
     return (
-        f"數量門檻={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% "
+        f"數量門檻={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% < 比例 "
+        f"<= {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
         f"候選={summary.get('candidate_count', 0)} "
         f"下降={summary.get('decline_count', 0)} "
         f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}%"
@@ -1490,7 +1502,7 @@ def decide_entry_mode_by_market_gate(
         lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
         if not lower_decision_summary["passed"]:
             print(
-                "[MODE] LOWER 個股池下降比例不足："
+                "[MODE] LOWER 個股池下降比例未落在允許範圍："
                 f"{format_lower_decision_summary(lower_decision_summary)}，"
                 "判定為 NO_TRADE"
             )

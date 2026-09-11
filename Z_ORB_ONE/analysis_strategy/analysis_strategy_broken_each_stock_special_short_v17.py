@@ -113,6 +113,7 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 60.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
@@ -1215,7 +1216,11 @@ def get_strategy_market_decision_gate_status(
         minute_bars_by_symbol,
     )
     decline_percent = calculate_percent(decline_count, candidate_count)
-    if decline_percent <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:
+    if not (
+        LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+        < decline_percent
+        <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
+    ):
         return GATE_NO_TRADE
     return GATE_LOWER_PASSED
 
@@ -2958,8 +2963,16 @@ def main() -> None:
         if IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER < 0:
             print('[ERROR] IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER 不可小於 0', file=sys.stderr)
             sys.exit(1)
-        if LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < 0:
-            print('[ERROR] LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0', file=sys.stderr)
+        if not (
+            0 <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+            < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100
+        ):
+            print(
+                '[ERROR] lower 股票比例門檻須符合 0 <= '
+                'LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < '
+                'LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100',
+                file=sys.stderr,
+            )
             sys.exit(1)
         if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
             print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)
