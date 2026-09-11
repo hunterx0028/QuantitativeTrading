@@ -1,7 +1,8 @@
 """只讀現有快取：最近 B 個交易日的股票，扣除截至最新日連續出現 A 次者。
 
 價格、ATR、產業及 LIMIT 分流設定可在本檔獨立調整。
-執行後寫入獨立結果檔及 stock_data.py；不讀 st_db、不呼叫 API 或更新產業指數。
+選股僅使用現有快取，不讀 st_db 或重新查詢行情 API。
+執行後寫入獨立結果檔及 stock_data.py，再呼叫產業指數更新程式。
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import ast
 import json
 import math
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -465,6 +468,15 @@ def main() -> None:
     log(f"selected_limit_down_stocks_count={len(limit_down)}")
     log(f"done: {output_path}")
     log(f"updated selected_stocks: {stock_data_path}")
+
+    update_script_path = base_dir.parent / "update_stock_data_industry_indices.py"
+    log(f"[INFO] 選股完成，開始更新產業指數: {update_script_path}")
+    subprocess.run(
+        [sys.executable, str(update_script_path), "--stock-data", str(stock_data_path)],
+        cwd=update_script_path.parent,
+        check=True,
+    )
+    log("[INFO] 產業指數更新完成")
 
 
 if __name__ == "__main__":
