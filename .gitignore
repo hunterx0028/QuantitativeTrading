@@ -13,6 +13,7 @@ config.ini
 *.p12
 *_result.txt
 *_result_re.txt
+*_exclude_re.txt
 *.whl
 *.pyc
 stock_data.py
