@@ -13,6 +13,12 @@ DATA_DIR = PACKAGE_DIR / "data"
 CANDLES_DIR = DATA_DIR / "candles"
 CORPORATE_ACTIONS_DIR = DATA_DIR / "corporate_actions"
 FEATURES_DIR = DATA_DIR / "features"
+# Market-wide (not per-symbol) TAIFEX TX near-month night-session data, one
+# shared file keyed by date. Populated by `import_night_futures.py` from
+# manually-downloaded TAIFEX CSV exports (see night_futures.py) — there is no
+# automated daily fetch for this yet.
+NIGHT_FUTURES_PATH = DATA_DIR / "night_futures.jsonl"
+HISTORY_NIGHT_DIR = DATA_DIR / "history_night"
 CONFIG_PATH = Z_ORB_ONE_DIR / "config.ini"
 STOCK_DATA_PATH = Z_ORB_ONE_DIR / "stock_data.py"
 

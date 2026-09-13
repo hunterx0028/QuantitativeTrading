@@ -33,19 +33,12 @@ def load_evaluations() -> list[dict]:
 def print_window(label: str, evaluations: list[dict], args) -> None:
     signals = [signal for item in evaluations for signal in item.get("signals", [])]
     print(f"{label}: {len(evaluations)} 個交易日")
-    for key in ("conflicts",):
-        conflicts = [signal for item in evaluations for signal in item.get(key, [])]
-        both_hits = sum(bool(s["actual_hit_up"] and s["actual_hit_down"]) for s in conflicts)
-        print(f"{key}: {len(conflicts)} 筆，實際雙觸及={both_hits}，不計入單方向交易統計")
-    print_price_move_signals(signals, args)
+    print_directional_signals(signals, args)
 
 
-def print_price_move_signals(signals: list[dict], args) -> None:
+def print_directional_signals(signals: list[dict], args) -> None:
     print(f"漲跌訊號: {len(signals)} 筆")
-    for side in ("LONG", "SHORT"):
-        side_signals = [signal for signal in signals if signal["side"] == side]
-        print_trade_recommendation(f"漲跌訊號 {side}", side_signals, args)
-        print_reason_breakdown(side_signals)
+    print_trade_recommendation("漲跌訊號 LONG", signals, args)
 
 
 
@@ -74,24 +67,6 @@ def print_trade_recommendation(label: str, signals: list[dict], args) -> None:
         f"avg_best={avg_best:.2f}%, avg_close={avg_close:.2f}%, "
         f"avg_adverse={avg_adverse:.2f}% -> {recommendation}"
     )
-
-
-def print_reason_breakdown(signals: list[dict]) -> None:
-    if not signals:
-        return
-    for reason in ("hit", "price", "both"):
-        reason_signals = [signal for signal in signals if signal.get("reason") == reason]
-        if not reason_signals:
-            continue
-        count = len(reason_signals)
-        success_count = sum(1 for signal in reason_signals if signal["success"])
-        avg_best = sum(signal["best_profit_pct"] for signal in reason_signals) / count
-        avg_adverse = sum(signal["adverse_pct"] for signal in reason_signals) / count
-        print(
-            f"  reason={reason}: success={success_count}/{count}={success_count / count:.2%}, "
-            f"avg_best={avg_best:.2f}%, avg_adverse={avg_adverse:.2f}%"
-        )
-
 
 
 if __name__ == "__main__":

@@ -12,8 +12,9 @@ import torch
 
 from .checkpoint_gate import load_gate_status
 from .config import Settings
-from .dataset import encode_state
+from .dataset import NIGHT_FUTURES_TO_ID, encode_state
 from .device import describe_device, select_device
+from .night_futures import load_night_futures
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, PREDICTIONS_DIR, SIGNAL_REPORTS_DIR, ensure_runtime_dirs
 from .storage import read_jsonl
 from .training import build_model, ensure_checkpoint_compatible
@@ -21,21 +22,12 @@ from .universe import load_universe_snapshot
 from .paths import UNIVERSE_DIR
 
 
-PRICE_LABELS = [-2, -1, 0, 1, 2]
-
-
 @dataclass(frozen=True)
 class SignalThresholds:
     long_hit: float = 0.6
-    long_price: float = 0.6
-    short_hit: float = 0.6
-    short_price: float = 0.6
-    long_direction: float = 0.6
-    short_direction: float = 0.6
 
     def signal_values(self) -> dict[str, float]:
-        return {name: getattr(self, name) for name in
-                ("long_hit", "long_price", "short_hit", "short_price")}
+        return {"long_hit": self.long_hit}
 
 
 def latest_checkpoint() -> Path:
@@ -87,26 +79,18 @@ def select_prediction_inputs(
     return eligible, skipped
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="預測下一交易日狀態機率")
-    parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--prediction-date", default=date.today().isoformat())
-    parser.add_argument("--universe-date", default=date.today().isoformat())
-    parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-hit-threshold", type=float, default=None)
-    parser.add_argument("--long-price-threshold", type=float, default=None)
-    parser.add_argument("--short-hit-threshold", type=float, default=None)
-    parser.add_argument("--short-price-threshold", type=float, default=None)
-    parser.add_argument("--long-direction-threshold", type=float, default=None)
-    parser.add_argument("--short-direction-threshold", type=float, default=None)
-    args = parser.parse_args()
-    thresholds = build_signal_thresholds(args)
-    universe_date = date.fromisoformat(args.universe_date)
-    prediction_date = date.fromisoformat(args.prediction_date)
+def run_prediction(
+    checkpoint_path: Path,
+    universe_date: date,
+    prediction_date: date,
+    thresholds: SignalThresholds,
+) -> Path:
+    """Core prediction step, reusable both by the CLI (`main`) and by in-process
+    callers such as a walk-forward backtest that would otherwise pay a fresh
+    Python/torch interpreter startup cost for every simulated trading day."""
     if prediction_date <= universe_date:
         raise ValueError("prediction-date 必須晚於 universe-date")
     ensure_runtime_dirs()
-    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction()
     device = select_device()
     print(f"device={describe_device(device)}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -121,7 +105,23 @@ def main() -> None:
     model = build_model(settings).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    universe_path = UNIVERSE_DIR / f"{args.universe_date}.json"
+    # The night session immediately before `prediction_date`'s own open — known
+    # before that day's market opens (not leakage), but not part of any day in
+    # the context sequence since it belongs to the day being predicted, not a
+    # past day. Required, same as every other night-futures lookup: fail loud
+    # rather than silently predicting without it.
+    prediction_date_str = prediction_date.isoformat()
+    target_night_futures_bucket = load_night_futures().get(prediction_date_str)
+    if target_night_futures_bucket is None:
+        raise RuntimeError(
+            f"找不到 {prediction_date_str} 開盤前的夜盤資料；"
+            f"請先用 set_night_futures.py（或 import_night_futures.py）匯入 {prediction_date_str} 這筆，"
+            "再重新預測——這是被預測日當天的必要輸入，不能省略"
+        )
+    target_night_futures = torch.tensor(
+        [NIGHT_FUTURES_TO_ID[target_night_futures_bucket]], dtype=torch.long, device=device,
+    )
+    universe_path = UNIVERSE_DIR / f"{universe_date.isoformat()}.json"
     if not universe_path.exists():
         raise RuntimeError(f"找不到當日股票清單快照: {universe_path}")
     active_symbols = {stock.symbol for stock in load_universe_snapshot(universe_path)}
@@ -139,7 +139,6 @@ def main() -> None:
 
     predictions: list[dict] = []
     signals: list[dict] = []
-    direction_signals: list[dict] = []
     with torch.no_grad():
         for symbol, rows in eligible.items():
             states = torch.tensor(
@@ -147,128 +146,89 @@ def main() -> None:
                 dtype=torch.long,
                 device=device,
             )
-            outputs = model(states)
+            outputs = model(states, target_night_futures)
             probabilities = {key: torch.softmax(value, dim=-1)[0].cpu().tolist() for key, value in outputs.items()}
             prediction = {
                 "symbol": symbol,
                 "prediction_date": prediction_date.isoformat(),
                 "input_last_date": rows[-1]["date"],
                 "checkpoint": checkpoint_path.name,
-                "price": dict(zip(map(str, PRICE_LABELS), probabilities["price"])),
                 "hit_up": _probabilities(probabilities["hit_up"]),
-                "hit_down": _probabilities(probabilities["hit_down"]),
             }
             predictions.append(prediction)
             signal = detect_signal(prediction, thresholds)
             if signal:
                 signals.append(signal)
-            direction_signal = detect_direction_signal(prediction, thresholds)
-            if direction_signal:
-                direction_signals.append(direction_signal)
+    naive_baseline = checkpoint.get("naive_baseline")
+    # The checkpoint's own last-epoch, in-sample (training-window) unweighted
+    # loss per target — surfaced alongside the prediction so a caller such as a
+    # walk-forward backtest can compare it against tomorrow's actual
+    # out-of-sample loss to check for overfitting (low in-sample, high
+    # out-of-sample is the classic symptom).
+    in_sample_loss = checkpoint.get("loss_components")
     output = PREDICTIONS_DIR / f"{prediction_date.isoformat()}.json"
     payload = {"created_at": datetime.now().isoformat(timespec="seconds"), "predictions": predictions,
                "universe_date": universe_date.isoformat(), "active_count": len(active_symbols),
                "predicted_count": len(predictions), "skipped": skipped,
                "signal_thresholds": thresholds.signal_values(),
                "atr_boundaries_pct": settings.atr_boundaries_pct,
+               "target_night_futures_bucket": target_night_futures_bucket,
+               "naive_baseline": naive_baseline,
+               "in_sample_loss": in_sample_loss,
                "signals": signals}
     output.write_text(dumps_json_no_scientific(payload) + "\n", encoding="utf-8")
     print(f"預測已儲存: {output} ({len(predictions)}支)")
-    report_lines = build_signal_report_lines(prediction_date, thresholds, signals, direction_signals)
+    report_lines = build_signal_report_lines(prediction_date, thresholds, signals)
     report_lines[1:1] = coverage_lines
     for line in report_lines:
         print(line)
     report_path = SIGNAL_REPORTS_DIR / f"{prediction_date.isoformat()}.txt"
     report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
     print(f"訊號報告已儲存: {report_path}")
+    return output, naive_baseline, in_sample_loss
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="預測下一交易日狀態機率")
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--prediction-date", default=date.today().isoformat())
+    parser.add_argument("--universe-date", default=date.today().isoformat())
+    parser.add_argument("--signal-threshold", type=float, default=0.6)
+    parser.add_argument("--long-hit-threshold", type=float, default=None)
+    args = parser.parse_args()
+    thresholds = build_signal_thresholds(args)
+    universe_date = date.fromisoformat(args.universe_date)
+    prediction_date = date.fromisoformat(args.prediction_date)
+    ensure_runtime_dirs()
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction()
+    run_prediction(checkpoint_path, universe_date, prediction_date, thresholds)
 
 
 def build_signal_report_lines(
     prediction_date: date,
     thresholds: SignalThresholds,
     signals: list[dict],
-    direction_signals: list[dict],
 ) -> list[str]:
     lines = [
         f"prediction_date={prediction_date.isoformat()}",
     ]
     if signals:
-        lines.append(
-            "符合訊號門檻: "
-            f"long_hit>={thresholds.long_hit:.2f}, "
-            f"long_price>={thresholds.long_price:.2f}, "
-            f"short_hit>={thresholds.short_hit:.2f}, "
-            f"short_price>={thresholds.short_price:.2f}"
-        )
+        lines.append(f"符合訊號門檻: long_hit>={thresholds.long_hit:.2f}")
         for signal in signals:
-            if signal["side"] == "CONFLICT":
-                lines.append(format_conflict(signal, "SIGNAL"))
-                continue
             lines.append(
                 f"[{signal['side']}] {signal['symbol']} "
-                f"reason={signal['reason']} "
                 f"prediction_date={signal['prediction_date']} "
-                f"{signal['hit_key']}={signal['hit_probability']:.4f} "
-                f"{signal['price_key']}={signal['price_probability']:.4f}"
+                f"{signal['hit_key']}={signal['hit_probability']:.4f}"
             )
     else:
         lines.append("沒有符合訊號門檻的標的")
-    if direction_signals:
-        lines.append(
-            "符合方向訊號門檻: "
-            f"long_direction>={thresholds.long_direction:.2f}, "
-            f"short_direction>={thresholds.short_direction:.2f}"
-        )
-        for signal in direction_signals:
-            if signal["side"] == "CONFLICT":
-                lines.append(format_conflict(signal, "DIRECTION"))
-                continue
-            lines.append(
-                f"[DIRECTION {signal['side']}] {signal['symbol']} "
-                f"prediction_date={signal['prediction_date']} "
-                f"{signal['price_key']}={signal['price_probability']:.4f} "
-                f"price.-1={signal['price_minus_1_probability']:.4f} "
-                f"price.-2={signal['price_minus_2_probability']:.4f} "
-                f"price.1={signal['price_1_probability']:.4f} "
-                f"price.2={signal['price_2_probability']:.4f}"
-            )
-    else:
-        lines.append("沒有符合方向訊號門檻的標的")
     return lines
-
-
-def format_conflict(signal: dict, kind: str) -> str:
-    evidence = []
-    for side in ("long", "short"):
-        item = signal[side]
-        text = f"{side.upper()} reason={item.get('reason', 'direction')} "
-        if "hit_key" in item:
-            text += f"{item['hit_key']}={item['hit_probability']:.4f} "
-        text += f"{item['price_key']}={item['price_probability']:.4f}"
-        evidence.append(text)
-    return (f"[{kind} CONFLICT] {signal['symbol']} "
-            f"prediction_date={signal['prediction_date']} 暫不選邊 | " + " | ".join(evidence))
-
-
-def combine_sides(long_signal: dict | None, short_signal: dict | None) -> dict | None:
-    if long_signal and short_signal:
-        return {"side": "CONFLICT", "symbol": long_signal["symbol"],
-                "prediction_date": long_signal["prediction_date"],
-                "long": long_signal, "short": short_signal}
-    return long_signal or short_signal
 
 
 def build_signal_thresholds(args) -> SignalThresholds:
     threshold = args.signal_threshold
-    long_direction = getattr(args, "long_direction_threshold", None)
-    short_direction = getattr(args, "short_direction_threshold", None)
     values = SignalThresholds(
         long_hit=args.long_hit_threshold if args.long_hit_threshold is not None else threshold,
-        long_price=args.long_price_threshold if args.long_price_threshold is not None else threshold,
-        short_hit=args.short_hit_threshold if args.short_hit_threshold is not None else threshold,
-        short_price=args.short_price_threshold if args.short_price_threshold is not None else threshold,
-        long_direction=long_direction if long_direction is not None else threshold,
-        short_direction=short_direction if short_direction is not None else threshold,
     )
     for name, value in values.__dict__.items():
         if not 0.0 <= value <= 1.0:
@@ -278,84 +238,17 @@ def build_signal_thresholds(args) -> SignalThresholds:
 
 def detect_signal(prediction: dict, thresholds: SignalThresholds | float = SignalThresholds()) -> dict | None:
     if isinstance(thresholds, float):
-        thresholds = SignalThresholds(thresholds, thresholds, thresholds, thresholds, thresholds, thresholds)
+        thresholds = SignalThresholds(thresholds)
     long_hit = prediction["hit_up"]["T"]
-    long_price = prediction["price"]["2"]
-    short_hit = prediction["hit_down"]["T"]
-    short_price = prediction["price"]["-2"]
-    long_hit_pass = long_hit >= thresholds.long_hit
-    long_price_pass = long_price >= thresholds.long_price
-    short_hit_pass = short_hit >= thresholds.short_hit
-    short_price_pass = short_price >= thresholds.short_price
-    long_signal = short_signal = None
-    if long_hit_pass or long_price_pass:
-        long_signal = {
-            "side": "LONG",
-            "reason": signal_reason(long_hit_pass, long_price_pass),
-            "symbol": prediction["symbol"],
-            "prediction_date": prediction["prediction_date"],
-            "hit_key": "hit_up.T",
-            "hit_probability": long_hit,
-            "price_key": "price.2",
-            "price_probability": long_price,
-        }
-    if short_hit_pass or short_price_pass:
-        short_signal = {
-            "side": "SHORT",
-            "reason": signal_reason(short_hit_pass, short_price_pass),
-            "symbol": prediction["symbol"],
-            "prediction_date": prediction["prediction_date"],
-            "hit_key": "hit_down.T",
-            "hit_probability": short_hit,
-            "price_key": "price.-2",
-            "price_probability": short_price,
-        }
-    return combine_sides(long_signal, short_signal)
-
-
-def detect_direction_signal(prediction: dict, thresholds: SignalThresholds | float = SignalThresholds()) -> dict | None:
-    if isinstance(thresholds, float):
-        thresholds = SignalThresholds(thresholds, thresholds, thresholds, thresholds, thresholds, thresholds)
-    price_minus_1 = prediction["price"]["-1"]
-    price_minus_2 = prediction["price"]["-2"]
-    price_1 = prediction["price"]["1"]
-    price_2 = prediction["price"]["2"]
-    long_probability = price_1 + price_2
-    short_probability = price_minus_1 + price_minus_2
-    long_signal = short_signal = None
-    if long_probability >= thresholds.long_direction:
-        long_signal = {
-            "side": "LONG",
-            "symbol": prediction["symbol"],
-            "prediction_date": prediction["prediction_date"],
-            "price_key": "price.1+2",
-            "price_probability": long_probability,
-            "price_minus_1_probability": price_minus_1,
-            "price_minus_2_probability": price_minus_2,
-            "price_1_probability": price_1,
-            "price_2_probability": price_2,
-        }
-    if short_probability >= thresholds.short_direction:
-        short_signal = {
-            "side": "SHORT",
-            "symbol": prediction["symbol"],
-            "prediction_date": prediction["prediction_date"],
-            "price_key": "price.-1+-2",
-            "price_probability": short_probability,
-            "price_minus_1_probability": price_minus_1,
-            "price_minus_2_probability": price_minus_2,
-            "price_1_probability": price_1,
-            "price_2_probability": price_2,
-        }
-    return combine_sides(long_signal, short_signal)
-
-
-def signal_reason(hit_pass: bool, price_pass: bool) -> str:
-    if hit_pass and price_pass:
-        return "both"
-    if hit_pass:
-        return "hit"
-    return "price"
+    if long_hit < thresholds.long_hit:
+        return None
+    return {
+        "side": "LONG",
+        "symbol": prediction["symbol"],
+        "prediction_date": prediction["prediction_date"],
+        "hit_key": "hit_up.T",
+        "hit_probability": long_hit,
+    }
 
 
 def dumps_json_no_scientific(value, indent: int = 2) -> str:

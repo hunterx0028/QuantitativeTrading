@@ -5,7 +5,15 @@ from torch import nn
 
 
 class StockAutoregressiveModel(nn.Module):
-    """每個 timestep 是一天；輸出為隔日三項交易核心狀態。"""
+    """每個 timestep 是一天；輸出為隔日 hit_up 一項交易核心狀態。
+    price、hit_down 仍是輸入之一（categorical[...,0]／[...,2]），只是不再是預測目標
+    （hit_down 在多個時間區間的回測裡都不穩定，recall 大幅震盪，判斷不可信任）。
+    第 7 項輸入是台指期近月夜盤（相對於前一日盤收盤的漲跌幅五級刻度）。
+
+    `target_night_futures` 是另一個獨立輸入，代表「被預測那一天」開盤前的夜盤
+    （不是 context 裡任何一天自己的夜盤）——這個資訊在被預測的那天開盤前就已經
+    知道，不算資訊外洩，但因為它不屬於過去 N 天的歷史序列，不能塞進 causal
+    transformer 的序列輸入，而是在算完 context 的 hidden state 之後直接疊加上去。"""
 
     def __init__(
         self,
@@ -23,6 +31,8 @@ class StockAutoregressiveModel(nn.Module):
         self.close_embedding = nn.Embedding(3, d_model)
         self.volume_embedding = nn.Embedding(6, d_model)
         self.atr_embedding = nn.Embedding(5, d_model)
+        self.night_futures_embedding = nn.Embedding(5, d_model)
+        self.target_night_futures_embedding = nn.Embedding(5, d_model)
         self.position_embedding = nn.Embedding(context_days, d_model)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -39,15 +49,17 @@ class StockAutoregressiveModel(nn.Module):
             enable_nested_tensor=False,
         )
         self.norm = nn.LayerNorm(d_model)
-        self.price_head = nn.Linear(d_model, 5)
         self.hit_up_head = nn.Linear(d_model, 2)
-        self.hit_down_head = nn.Linear(d_model, 2)
 
-    def forward(self, states: torch.Tensor) -> dict[str, torch.Tensor]:
-        if states.ndim != 3 or states.shape[-1] != 6:
-            raise ValueError("states shape 必須是 [batch, days, 6]，含 ATR(14)")
+    def forward(self, states: torch.Tensor, target_night_futures: torch.Tensor) -> dict[str, torch.Tensor]:
+        if states.ndim != 3 or states.shape[-1] != 7:
+            raise ValueError("states shape 必須是 [batch, days, 7]，含 ATR(14) 與夜盤期指")
         if states.dtype != torch.long:
-            raise ValueError("六項輸入必須為 torch.long 離散刻度，ATR 不接受連續值")
+            raise ValueError("七項輸入必須為 torch.long 離散刻度，ATR 不接受連續值")
+        if target_night_futures.ndim != 1 or target_night_futures.shape[0] != states.shape[0]:
+            raise ValueError("target_night_futures shape 必須是 [batch]")
+        if target_night_futures.dtype != torch.long:
+            raise ValueError("target_night_futures 必須為 torch.long 離散刻度")
         days = states.shape[1]
         if days > self.context_days:
             raise ValueError(f"輸入 {days} 日超過模型上限 {self.context_days}")
@@ -60,14 +72,14 @@ class StockAutoregressiveModel(nn.Module):
             + self.close_embedding(categorical[..., 3])
             + self.volume_embedding(categorical[..., 4])
             + self.atr_embedding(states[..., 5])
+            + self.night_futures_embedding(states[..., 6])
             + self.position_embedding(positions)[None, :, :]
         )
         causal_mask = torch.triu(
             torch.ones(days, days, device=states.device, dtype=torch.bool), diagonal=1
         )
         hidden = self.norm(self.transformer(hidden, mask=causal_mask)[:, -1, :])
+        hidden = hidden + self.target_night_futures_embedding(target_night_futures)
         return {
-            "price": self.price_head(hidden),
             "hit_up": self.hit_up_head(hidden),
-            "hit_down": self.hit_down_head(hidden),
         }

@@ -25,6 +25,8 @@ class Settings:
     daily_learning_rate: float = 0.00003
     epochs: int = 20
     daily_epochs: int = 1
+    validation_days: int = 20
+    early_stopping_patience: int = 3
     daily_training_mode: str = "incremental_replay"
     daily_replay_ratio: float = 1.0
     daily_replay_max_sequences: int = 4096
@@ -35,9 +37,7 @@ class Settings:
     n_layers: int = 4
     dropout: float = 0.1
     seed: int = 42
-    loss_price: float = 2.0
     loss_hit_up: float = 4.0
-    loss_hit_down: float = 4.0
     focal_gamma: float = 2.0
     gate_window_days: int = 20
     gate_short_window_days: int = 5

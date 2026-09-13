@@ -24,6 +24,10 @@ def main() -> None:
     parser.add_argument("--as-of", default=date.today().isoformat())
     parser.add_argument("--training-mode", choices=("incremental_replay", "full_history"), default=None)
     parser.add_argument("--force-retrain", action="store_true", help="明確允許重跑同日期或只有歷史資料的訓練")
+    parser.add_argument(
+        "--training-window-days", type=int, default=None,
+        help="只用截止日往前數的 N 個交易日續訓（滾動視窗，含重播樣本池）；預設不限制",
+    )
     args = parser.parse_args()
     settings = Settings.load(args.settings) if args.settings else Settings.load()
     if args.training_mode:
@@ -35,6 +39,7 @@ def main() -> None:
         daily=True,
         as_of=date.fromisoformat(args.as_of),
         force_retrain=args.force_retrain,
+        training_window_days=args.training_window_days,
     )
     print(f"來源模型: {source}")
     print(f"候選模型: {output}")

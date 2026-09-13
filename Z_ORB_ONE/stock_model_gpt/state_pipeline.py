@@ -2,6 +2,7 @@ from pathlib import Path
 
 from .features import DailyState, encode_candles
 from .finmind import apply_corporate_actions
+from .night_futures import load_night_futures
 from .storage import corporate_action_path, read_jsonl
 
 
@@ -16,4 +17,5 @@ def load_candle_states(
     actions = [row for row in read_jsonl(corporate_action_path(path.stem))
                if row["date"] <= cutoff]
     candles = apply_corporate_actions(candles, actions)
-    return candles, encode_candles(candles, warmup_days)
+    night_futures_by_date = load_night_futures()
+    return candles, encode_candles(candles, warmup_days, night_futures_by_date)

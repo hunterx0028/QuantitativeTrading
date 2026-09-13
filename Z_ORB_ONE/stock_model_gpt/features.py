@@ -23,6 +23,7 @@ class DailyState:
     volume: int | str
     atr: float
     atr_ratio: float
+    night_futures: int
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -125,14 +126,26 @@ def calculate_atr(candles: list[dict]) -> list[float | None]:
     return values
 
 
-def encode_candles(candles: Iterable[dict], warmup_days: int = 20) -> list[DailyState]:
+def encode_candles(
+    candles: Iterable[dict],
+    warmup_days: int = 20,
+    night_futures_by_date: dict[str, int] | None = None,
+) -> list[DailyState]:
     if warmup_days < 1:
         raise ValueError("warmup_days 必須至少為 1")
     rows = sorted(candles, key=lambda item: item["date"])
     atr_values = calculate_atr(rows)
+    night_futures_by_date = night_futures_by_date or {}
     states: list[DailyState] = []
     for index in range(max(warmup_days, ATR_PERIOD), len(rows)):
         row = rows[index]
+        # TX night session only exists from 2017-05-15 onward; a date without
+        # coverage here simply can't produce a state for this 7-input model,
+        # same as a date without enough ATR/volume warmup can't either — skip
+        # rather than guessing a "flat" bucket for missing data.
+        night_futures = night_futures_by_date.get(row["date"])
+        if night_futures is None:
+            continue
         previous = rows[index - 1]
         prior_volumes = [int(item.get("volume", 0) or 0) for item in rows[index - warmup_days:index]]
         positive_prior_volumes = [value for value in prior_volumes if value > 0]
@@ -157,6 +170,7 @@ def encode_candles(candles: Iterable[dict], warmup_days: int = 20) -> list[Daily
                 volume=volume_bucket(int(row.get("volume", 0) or 0), baseline),
                 atr=atr,
                 atr_ratio=atr / close,
+                night_futures=night_futures,
             )
         )
     return states
