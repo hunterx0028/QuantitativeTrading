@@ -69,10 +69,10 @@ ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 7.0 # limit down 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 6.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
+OPTIMIZE_PROFIT_PER_LIMIT_UP = 6.0 # limit up 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 
 PROTECT_PROFIT_SWITCH_LOWER = False # False 時 lower 不啟動獲利保護；True 維持原本獲利保護
@@ -107,7 +107,8 @@ ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 41.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
 
 LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
 LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
@@ -651,9 +652,14 @@ def validate_market_reversal_time_config() -> None:
         raise ValueError(
             "LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 LOWER_STRATEGY_DECISION"
         )
-    if LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < 0:
+    if not (
+        0 <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+        < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100
+    ):
         raise ValueError(
-            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD 不可小於 0"
+            "lower 股票比例門檻須符合 0 <= "
+            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < "
+            "LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100"
         )
     if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
         raise ValueError("INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0")
@@ -1421,16 +1427,22 @@ def summarize_lower_strategy_decision_candidates(
         "decline_percent": decline_percent,
         "data_missing_count": data_missing_count,
         "threshold": LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
-        "passed": decline_percent > LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
+        "max_threshold": LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD,
+        "passed": (
+            LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+            < decline_percent
+            <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
+        ),
     }
 
 
 def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
     return (
+        f"數量門檻={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% < 比例 "
+        f"<= {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
         f"候選={summary.get('candidate_count', 0)} "
         f"下降={summary.get('decline_count', 0)} "
-        f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}% "
-        f"threshold={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}%"
+        f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}%"
     )
 
 
@@ -1472,13 +1484,7 @@ def decide_entry_mode_by_market_gate(
         if not result.get("early_breakout_passed")
     ]
     if early_breakout_failed:
-        failed_indices = ", ".join(result["index_key"] for result in early_breakout_failed)
-        print(
-            f"[MODE] {failed_indices} 未於早盤截止時間前向下突破各自 LOWER 門檻 "
-            f"(截止 {LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:"
-            f"{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d})"
-        )
-        return fallback_no_trade("上市或上櫃指數未於早盤截止時間前向下突破 LOWER 門檻")
+        return ENTRY_MODE_NO_TRADE, gate_results
 
     reversal_blocked = any(result["previous_close_reversal_blocked"] for result in gate_results)
     if reversal_blocked:
@@ -1496,7 +1502,7 @@ def decide_entry_mode_by_market_gate(
         lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
         if not lower_decision_summary["passed"]:
             print(
-                "[MODE] LOWER 個股池下降比例不足："
+                "[MODE] LOWER 個股池下降比例未落在允許範圍："
                 f"{format_lower_decision_summary(lower_decision_summary)}，"
                 "判定為 NO_TRADE"
             )
@@ -1581,8 +1587,6 @@ def print_lower_strategy_early_breakout_deadline_summary(
         drop_percent = get_strategy_decision_drop_percent(index_key)
         previous_close = index_config.get("previous_close")
         passed = bool(market_state.get("early_breakout_passed"))
-        breakout_index = market_state.get("early_breakout_index")
-        breakout_time = market_state.get("early_breakout_time")
         _, age_seconds, data_error = get_fresh_market_index_value_from_snapshot(
             index_key,
             market_state,
@@ -1613,19 +1617,13 @@ def print_lower_strategy_early_breakout_deadline_summary(
         else:
             display_last_index = None
 
-        extra_breakout = ""
-        if passed:
-            extra_breakout = (
-                f" 突破值={format_market_gate_value(breakout_index)}"
-                f" 突破時間={format_market_gate_time(breakout_time)}"
-            )
         print(
             f"[MODE] {index_key} {index_config.get('symbol') or ''} "
-            f"門檻跌幅={format_market_gate_percent(drop_percent, threshold_drop=True)} "
-            f"門檻值={format_market_gate_value(threshold)} "
-            f"當前值={format_market_gate_value(display_last_index)} "
-            f"當前漲跌={format_market_gate_percent(latest_change_percent)} "
-            f"早盤突破={'YES' if passed else 'NO'}{extra_breakout}"
+            f"價位門檻={format_market_gate_value(threshold)}"
+            f"({format_market_gate_percent(drop_percent, threshold_drop=True)}) "
+            f"當前值={format_market_gate_value(display_last_index)}"
+            f"({format_market_gate_percent(latest_change_percent)}) "
+            f"早盤突破={'YES' if passed else 'NO'}"
         )
         if data_error:
             trade_log(
@@ -1650,9 +1648,7 @@ def print_entry_mode_decision(
     states: Dict[str, Dict[str, Any]],
 ) -> None:
     mode_text = get_entry_mode_text(entry_mode)
-    print(f"[MODE] LOWER_STRATEGY_DECISION 模式判斷：{mode_text}")
     lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
-    print(f"[MODE] LOWER 個股池：{format_lower_decision_summary(lower_decision_summary)}")
     for result in gate_results:
         drop_percent = get_strategy_decision_drop_percent(result["index_key"])
         rebound_percent = get_strategy_decision_rebound_percent(result["index_key"])
@@ -1664,14 +1660,14 @@ def print_entry_mode_decision(
             rebound_maintained_text = "NO"
         print(
             f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
-            f"門檻跌幅={format_market_gate_percent(drop_percent, threshold_drop=True)} "
-            f"門檻值={format_market_gate_value(result.get('drop_threshold'))} "
-            f"當前值={format_market_gate_value(result.get('last_index'))} "
-            f"當前漲跌={format_market_gate_percent(result.get('current_change_percent'))} "
+            f"價位門檻={format_market_gate_value(result.get('drop_threshold'))}"
+            f"({format_market_gate_percent(drop_percent, threshold_drop=True)}) "
+            f"反彈門檻={format_market_gate_value(result.get('rebound_threshold'))}"
+            f"({format_market_gate_percent(rebound_percent, threshold_drop=True)}) "
+            f"當前值={format_market_gate_value(result.get('last_index'))}"
+            f"({format_market_gate_percent(result.get('current_change_percent'))}) "
             f"早盤突破={'YES' if result.get('early_breakout_passed') else 'NO'} "
-            f"反彈失效門檻={format_market_gate_percent(rebound_percent, threshold_drop=True)}"
-            f"/{format_market_gate_value(result.get('rebound_threshold'))} "
-            f"決策門檻維持={rebound_maintained_text}"
+            f"決策維持={rebound_maintained_text}"
         )
         if not result.get("index_fresh") or result.get("last_index") is None:
             trade_log(
@@ -1688,6 +1684,8 @@ def print_entry_mode_decision(
                 reason=result.get("lower_reason") or "市場指數資料不足",
                 action="fail_closed",
             )
+    print(f"[MODE] LOWER {format_lower_decision_summary(lower_decision_summary)}")
+    print(f"[MODE] LOWER_STRATEGY_DECISION 模式判斷：{mode_text}")
 
 
 def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: int) -> None:
