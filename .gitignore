@@ -8,12 +8,12 @@ __pycache__/
 /Z_ORB_ONE/stock_list/aggregate_json_cache/
 /Z_ORB_ONE/daily_report/pdf_folder/
 /Z_ORB_ONE/stock_state/
-/Z_ORB_ONE/stock_model_gpt/signal_reports/
 /Z_ORB_ONE/stock_list/st_db/
 config.ini
 *.p12
 *_result.txt
 *_result_re.txt
+*_exclude_re.txt
 *.whl
 *.pyc
 stock_data.py
@@ -24,3 +24,4 @@ Z_ORB_ONE/twse_indices.json
 Z_ORB_ONE/industry_index_map.json
 execute_strategy_broken_high_falling_docker_v17.py
 *.pdf
+Z_ORB_ONE/stock_model_gpt
