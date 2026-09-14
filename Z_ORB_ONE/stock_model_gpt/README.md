@@ -477,3 +477,26 @@ python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest_v2 --output-dir C:\tmp
 - **3%/2% 停損停利規則已經不是主要判斷依據**：`evaluate_signal_trade` 跟 `success` 欄位還留著（`post_training_gate.py` 也還在用），但因為沒有日內先後順序資訊會系統性偏樂觀，回測跟驗證都改看 recall/precision/log-loss；這組舊邏輯之後可以考慮整個拿掉。
 - **`price`／`hit_up`／`hit_down` 仍是輸入特徵，但模型不會拿它們當答案去學**：目前唯一答案是 `intraday_up_1plus`。如果之後想重新啟用其中一項當輸出目標，回去看這份 README 開頭跟 `training.py`/`model.py` 的 `ensure_checkpoint_compatible()`，裡面有擋掉舊 checkpoint 相容性的判斷邏輯可以參考怎麼加回去。
 - **定期重新訓練沒有自動排程**：第 6 節提到大約每 20 個交易日重跑一次 `train_initial`，目前是要人工記得執行，`run_daily.py` 不會自動觸發。
+
+
+初始訓練
+python -m Z_ORB_ONE.stock_model_gpt.update_data --as-of 2026-09-14
+python -m Z_ORB_ONE.stock_model_gpt.prepare_features --as-of 2026-09-14
+python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-14 --training-window-days 150
+初次預測
+python -m Z_ORB_ONE.stock_model_gpt.set_night_futures --date 2026-09-15 --change-pct <夜盤漲跌百分比>
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-14 --prediction-date 2026-09-15
+
+
+預設門檻報告為 0.6 , 改變預測門檻的指令。
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-14 --prediction-date 2026-09-15 --signal-threshold 0.5
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-14 --prediction-date 2026-09-15 --signal-threshold 0.7
+
+
+每日更新順序，以 9/15 這個營業日為例
+1. 下午 15:30 先更新stock_data.py, 再更新股票指數續訓
+python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-15 --prediction-date 2026-09-16 --training-window-days 150 --skip-predict
+2. 隔日（9/16）上午 05:00 後更新夜盤指數
+python -m Z_ORB_ONE.stock_model_gpt.set_night_futures --date 2026-09-16 --change-pct <夜盤漲跌百分比>
+3. 接著預測次一營業日 9/16
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-15 --prediction-date 2026-09-16
