@@ -1910,7 +1910,7 @@ def summarize_lower_strategy_decision_candidates(
     target_date: date,
     minute_bars_by_symbol: dict[str, dict[str, list]],
 ) -> tuple[int, int]:
-    """統計 LOWER 模式判斷完成時，股票池與已落入 lower 入場區間的數量。"""
+    """以判斷時間同根或之前最近分 K 的 close，統計落入 lower 入場區間的股票數。"""
     decline_count = 0
     decision_dt = datetime(
         target_date.year,
