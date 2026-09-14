@@ -37,6 +37,15 @@ def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int
     ]
 
 
+def target_intraday_up_1plus(row: dict) -> bool:
+    if "intraday_up_1plus" not in row:
+        raise ValueError(
+            "特徵缺少 intraday_up_1plus，請先重新執行 prepare_features；"
+            "此目標代表目標日盤中 high 曾達 price bucket 1 或 2"
+        )
+    return bool(row["intraday_up_1plus"])
+
+
 @dataclass(frozen=True)
 class SequenceRef:
     feature_path: Path
@@ -87,7 +96,7 @@ class StockSequenceDataset(Dataset):
         # either since it belongs to the day being predicted, not a past day.
         target_night_futures = torch.tensor(target[6], dtype=torch.long)
         return inputs, target_night_futures, {
-            "hit_up": torch.tensor(target[1], dtype=torch.long),
+            "intraday_up_1plus": torch.tensor(target_intraday_up_1plus(rows[ref.end]), dtype=torch.long),
         }
 
 

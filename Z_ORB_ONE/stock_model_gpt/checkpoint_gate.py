@@ -35,7 +35,7 @@ def signal_success_rate(evaluations: list[dict]) -> tuple[int, float | None]:
 
 
 def pooled_recall_precision(evaluations: list[dict], field: str) -> dict:
-    """Sum tp/fp/fn across evaluation days for `field` ('hit_up' or 'hit_down'),
+    """Sum tp/fp/fn across evaluation days for `field` (e.g. 'intraday_up_1plus'),
     then derive recall/precision from the pooled counts (not an average of
     per-day rates, which would overweight low-volume days)."""
     tp = sum(item.get("signal_recall_precision", {}).get(field, {}).get("tp", 0) for item in evaluations)

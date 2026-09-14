@@ -17,6 +17,7 @@ ATR_PERIOD = 14
 class DailyState:
     date: str
     price: int
+    intraday_up_1plus: bool
     hit_up: bool
     hit_down: bool
     close_limit: str
@@ -157,13 +158,16 @@ def encode_candles(
         limit_down = float(row.get("limit_down") or calculated_down)
 
         close = float(row["close"])
+        high = float(row["high"])
         atr = atr_values[index]
         assert atr is not None
         close_limit = "U" if _is_same_price(close, limit_up) else "D" if _is_same_price(close, limit_down) else "N"
+        high_bucket = price_bucket(reference_price, high)
         states.append(
             DailyState(
                 date=row["date"],
                 price=price_bucket(reference_price, close),
+                intraday_up_1plus=high_bucket in (1, 2),
                 hit_up=float(row["high"]) >= limit_up,
                 hit_down=float(row["low"]) <= limit_down,
                 close_limit=close_limit,

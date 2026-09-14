@@ -5,9 +5,9 @@ from torch import nn
 
 
 class StockAutoregressiveModel(nn.Module):
-    """每個 timestep 是一天；輸出為隔日 hit_up 一項交易核心狀態。
-    price、hit_down 仍是輸入之一（categorical[...,0]／[...,2]），只是不再是預測目標
-    （hit_down 在多個時間區間的回測裡都不穩定，recall 大幅震盪，判斷不可信任）。
+    """每個 timestep 是一天；輸出為隔日 intraday_up_1plus 一項交易核心狀態。
+    intraday_up_1plus 代表目標日盤中 high 曾達 price bucket 1 或 2。
+    price、hit_up、hit_down 仍是輸入之一，只是不再是預測目標。
     第 7 項輸入是台指期近月夜盤（相對於前一日盤收盤的漲跌幅五級刻度）。
 
     `target_night_futures` 是另一個獨立輸入，代表「被預測那一天」開盤前的夜盤
@@ -49,7 +49,7 @@ class StockAutoregressiveModel(nn.Module):
             enable_nested_tensor=False,
         )
         self.norm = nn.LayerNorm(d_model)
-        self.hit_up_head = nn.Linear(d_model, 2)
+        self.intraday_up_1plus_head = nn.Linear(d_model, 2)
 
     def forward(self, states: torch.Tensor, target_night_futures: torch.Tensor) -> dict[str, torch.Tensor]:
         if states.ndim != 3 or states.shape[-1] != 7:
@@ -81,5 +81,5 @@ class StockAutoregressiveModel(nn.Module):
         hidden = self.norm(self.transformer(hidden, mask=causal_mask)[:, -1, :])
         hidden = hidden + self.target_night_futures_embedding(target_night_futures)
         return {
-            "hit_up": self.hit_up_head(hidden),
+            "intraday_up_1plus": self.intraday_up_1plus_head(hidden),
         }

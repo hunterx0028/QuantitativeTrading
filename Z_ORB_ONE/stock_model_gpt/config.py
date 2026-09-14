@@ -37,7 +37,7 @@ class Settings:
     n_layers: int = 4
     dropout: float = 0.1
     seed: int = 42
-    loss_hit_up: float = 4.0
+    loss_intraday_up_1plus: float = 4.0
     focal_gamma: float = 2.0
     gate_window_days: int = 20
     gate_short_window_days: int = 5

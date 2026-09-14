@@ -1,6 +1,6 @@
 # stock_model_gpt
 
-以台股日 K 七項離散狀態訓練的輕量 causal Transformer，預測下一交易日**盤中觸漲停（`hit_up`）**這一項。`price`（隔日收盤價分類）與 `hit_down`（觸跌停）先前都試過當預測目標，但回測發現 `price` 連瞎猜都贏不了、`hit_down` 的 recall 在不同時間區間會從 1.6% 大幅震盪到 21.4%，兩個都不可信任，所以移除輸出、只留作輸入特徵；只有 `hit_up` 在多個不重疊的時間區間都穩定有預測力（precision 穩定在基期的 2.5～5 倍）。
+以台股日 K 七項離散狀態訓練的輕量 causal Transformer，預測下一交易日**盤中 high 是否曾達 price bucket 1 或 2（`intraday_up_1plus`）**這一項。換句話說，目標是「盤中曾經達到 +2% 以上區間，包含 bucket 1、bucket 2，以及自然涵蓋漲停」。`price`（收盤價分類）、`hit_up`（觸漲停）與 `hit_down`（觸跌停）都只作為歷史輸入特徵，不再作為輸出目標。
 
 操作順序：**首次執行第 5 節；之後每個交易日分兩段——收盤後依序執行第 4（當天）、7、8 節的資料更新與續訓（`run_daily --skip-predict`），隔天開盤前再執行第 4 節（`prediction_date` 當天）＋單獨的 `predict`；每隔約 20 個已驗證交易日重新校準一次（第 6 節「定期重新訓練」）、也可執行第 9 節查看訊號統計。** 首次訓練前可先依第 3 節確認 GPU。所有指令均從專案根目錄執行，範例日期請替換為自己的完整交易日與下一預測交易日。**為什麼要分兩段：見第 2 節「第八項輸入」——預測用的夜盤資料是被預測那天自己開盤前的那一次，收盤當下還沒發生，要等到隔天凌晨才有。**
 
@@ -36,11 +36,11 @@ python -m pytest Z_ORB_ONE/stock_model_gpt/tests -q
 - `resync_corporate_actions.py`：忽略既有同步狀態，重新同步並覆寫 FinMind 公司行動快取。
 - `prepare_features.py`：將 OHLCV（＋當日夜盤期指桶）轉成七項離散狀態；某天沒有對應的夜盤資料就直接跳過那天，不會硬猜一個值（見第 4 節）。
 - `atr_calibration.py`：ATR 五級界線**固定寫死**在程式裡（見第 2 節），初始訓練與每日續訓都直接套用同一組，不再自動分析或產生報告。
-- `model.py`：七項離散輸入（含夜盤期指）的 causal Transformer，加上被預測日當天盤前夜盤的獨立輸入（`target_night_futures`，見第 2 節），單一 `hit_up` 輸出頭。
+- `model.py`：七項離散輸入（含夜盤期指）的 causal Transformer，加上被預測日當天盤前夜盤的獨立輸入（`target_night_futures`，見第 2 節），單一 `intraday_up_1plus` 輸出頭。
 - `train_initial.py`：由隨機權重訓練初始模型（或重新校準）；可用 `--training-window-days` 指定只用最近 N 個交易日的滾動視窗，見第 6 節。
 - `train_daily.py`：載入前一 checkpoint，以新增目標序列加部分歷史重播續訓；同樣支援 `--training-window-days`；可選全部歷史模式。
-- `predict.py`：保存下一交易日 `hit_up` 的完整機率，並產生 `hit_up` 訊號。
-- `validate_predictions.py`：用實際日 K 驗證 `hit_up` 預測與 `signals`。
+- `predict.py`：保存下一交易日 `intraday_up_1plus` 的完整機率，並產生 LONG 訊號。
+- `validate_predictions.py`：用實際日 K 驗證 `intraday_up_1plus` 預測與 `signals`。
 - `post_training_gate.py`：彙整 `signals` 交易結果，打印門檻建議。
 - `run_daily.py`：串接資料更新、特徵產生、每日續訓與預測；**執行前必須已經匯入當天的夜盤期指資料**，見第 4 節。
 - `checkpoint_gate.py`：每次 `validate_predictions` 完自動判定近期 `signals` 成功率是否明顯退化；退化時 `predict.py` 在沒有明確指定 `--checkpoint` 的情況下會拒絕自動選用最新 checkpoint。
@@ -55,7 +55,7 @@ python -m pytest Z_ORB_ONE/stock_model_gpt/tests -q
 ```
 
 - `price`: `-2,-1,0,1,2`，以當日收盤價相對當日交易參考價分箱。**只作輸入，不是預測目標。**
-- `hit_up`, `hit_down`: 可同時為真，使用實際價格與台股升降單位計算。`hit_up` 是預測目標；`hit_down` 只作輸入（回測發現不穩定，見開頭說明）。
+- `hit_up`, `hit_down`: 可同時為真，使用實際價格與台股升降單位計算。兩者都只作為歷史輸入，不是預測目標。
 - `close_limit`: `U,N,D`，只作輸入。
 - `volume`: 相對此前20個有效日成交量中位數的 `-2,-1,0,1,2`；零量或無有效基準為 `X`，只作輸入。
 - `ATR`: 固定 14 日、依交易參考價調整尺度的 Wilder ATR，換算成當日 `atr_ratio = atr / 當日收盤價`，再依**固定**四個百分比界線分成 `0,1,2,3,4` 五級：
@@ -96,24 +96,31 @@ ATR_t = (13 * ATR_{t-1} * factor + TR) / 14
 
 操作上：跑 `predict.py` 之前，要先確保 `night_futures.jsonl` 裡有 `prediction_date` 這一天的資料（不是 `universe_date` 那天，是要被預測的那天），用第 4 節的 `set_night_futures.py` 手動輸入。**沒有這筆資料，`predict.py` 會直接報錯拒絕預測**，不會猜一個值頂著跑。訓練時每一筆訓練序列的目標日，本身的 `night_futures` 也是用同樣方式帶入（`dataset.py` 的 `target_night_futures`），確保訓練跟預測看到的是同一種輸入。
 
-模型只預測下一交易日的 `hit_up`：
+模型只預測下一交易日的 `intraday_up_1plus`：
 
 ```text
-(hit_up,)
+(intraday_up_1plus,)
 ```
 
-`price`、`hit_down`、`close_limit`、`volume`、`ATR`、`night_futures` 都只作為歷史輸入特徵，不作為輸出目標。
+`intraday_up_1plus` 是二分類：
+
+```text
+T = 目標日 high 相對交易參考價進入 price bucket 1 或 2（約 +2% 以上，漲停自然包含）
+F = 目標日 high 未達 price bucket 1
+```
+
+`price`、`hit_up`、`hit_down`、`close_limit`、`volume`、`ATR`、`night_futures` 都只作為歷史輸入特徵，不作為輸出目標。
 
 loss 只有一項：
 
 ```text
-loss_hit_up = 4.0
+loss_intraday_up_1plus = 4.0
 ```
 
-`hit_up` 是稀有事件（多數交易日都不會觸及），只靠上面的權重不足以處理正負樣本不平衡，因此另外疊加兩層機制：
+`intraday_up_1plus` 仍可能有正負樣本不平衡，因此另外疊加兩層機制：
 
-- **Class weight**：每次訓練（初始或每日續訓）依當次實際訓練集裡 `hit_up` 的正負樣本比例，自動算出 inverse-frequency 權重，不是固定值。
-- **Focal loss**（`focal_gamma`，預設 `2.0`）：取代 `hit_up` 原本的 `CrossEntropyLoss`，公式為 `loss = -(1-p_t)^γ * log(p_t)`，讓模型已經很有把握答對的樣本梯度貢獻變小，聚焦在難分的稀有正樣本上。`γ=0` 時等同沒有 class weight 的普通 `CrossEntropyLoss`。
+- **Class weight**：每次訓練（初始或每日續訓）依當次實際訓練集裡 `intraday_up_1plus` 的正負樣本比例，自動算出 inverse-frequency 權重，不是固定值。
+- **Focal loss**（`focal_gamma`，預設 `2.0`）：取代普通 `CrossEntropyLoss`，公式為 `loss = -(1-p_t)^γ * log(p_t)`，讓模型已經很有把握答對的樣本梯度貢獻變小，聚焦在難分樣本上。`γ=0` 時等同沒有 class weight 的普通 `CrossEntropyLoss`。
 
 這兩層機制沒有上限保護；如果實際正樣本比例極低（例如 <1%），算出的 class weight 可能到十幾甚至上百倍。**這個機制是刻意犧牲「機率校準」（log-loss）去換「抓得到稀有事件」（recall/precision）**——回測會看到模型的 log-loss 輸給「什麼都不看、只猜訓練視窗多數類別」的笨方法，這是預期中的設計取捨，不代表模型沒用，只是代表模型輸出的機率不該當成一個校準過的真實機率去解讀，該看的是 recall/precision（見第 7 節）。
 
@@ -124,14 +131,14 @@ loss_hit_up = 4.0
 `predict.py` 會保存 JSON，機率欄位仍是數字，但小機率不使用科學記號，方便目視檢查；保存後會同步於控制台列出符合訊號門檻的標的，並將同一批訊號摘要另存至 `signal_reports/YYYY-MM-DD.txt`。訊號只有一種（原本 LONG/SHORT 雙邊、CONFLICT、方向參考訊號都隨 `hit_down`／`price` 輸出一起移除了）：
 
 ```text
-LONG: hit_up.T >= long_hit_threshold（預設 0.6）
+LONG: intraday_up_1plus.T >= long_intraday_up_1plus（預設 0.6）
 ```
 
-`predict`／`validate_predictions` 的 `--signal-threshold` 可設定門檻，也可用 `--long-hit-threshold` 單獨覆寫。同一股票只會打印一筆訊號。
+`predict`／`validate_predictions` 的 `--signal-threshold` 可設定門檻，也可用 `--long-up-threshold` 單獨覆寫。同一股票只會打印一筆訊號。`--long-hit-threshold` 仍保留為舊參數 alias，等同 `--long-up-threshold`。
 
 ### `--signal-threshold` 只是事後的報告門檻，不影響訓練或模型
 
-`--signal-threshold`（及 `--long-hit-threshold`）**只出現在 `predict.py` 跟 `validate_predictions.py`**，`training.py`／`train_initial`／`train_daily` 完全不會用到、也不知道這個參數的存在。訓練只針對 `hit_up` 的 0/1 標籤最小化 FocalLoss，學的是把機率預測準，不涉及任何門檻；同一個 checkpoint 不管你之後設門檻是 0.5 還是 0.7，模型算出來的 `hit_up.T` 機率值都完全一樣。門檻只是「機率算完之後，用哪一條線去判斷要不要列為訊號」，純屬報告/評估層的後處理，不需要重新訓練就能換一個門檻重看。
+`--signal-threshold`（及 `--long-up-threshold`）**只出現在 `predict.py` 跟 `validate_predictions.py`**，`training.py`／`train_initial`／`train_daily` 完全不會用到、也不知道這個參數的存在。訓練只針對 `intraday_up_1plus` 的 0/1 標籤最小化 FocalLoss，學的是把機率預測準，不涉及任何門檻；同一個 checkpoint 不管你之後設門檻是 0.5 還是 0.7，模型算出來的 `intraday_up_1plus.T` 機率值都完全一樣。門檻只是「機率算完之後，用哪一條線去判斷要不要列為訊號」，純屬報告/評估層的後處理，不需要重新訓練就能換一個門檻重看。
 
 因此可以用同一個 checkpoint、不同門檻去比較不同的觀點：
 
@@ -139,9 +146,9 @@ LONG: hit_up.T >= long_hit_threshold（預設 0.6）
   ```powershell
   python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-11 --prediction-date 2026-09-14 --signal-threshold 0.5
   ```
-- 想系統性比較不同門檻在歷史上的 recall/precision 取捨（門檻拉低抓得多但精準度下降，拉高則相反），用 `walk_forward_backtest_v2.py` 的 `--long-hit-threshold` 掃幾個值比較（見第 11 節），不用真的跑 `predict`：
+- 想系統性比較不同門檻在歷史上的 recall/precision 取捨（門檻拉低抓得多但精準度下降，拉高則相反），用 `walk_forward_backtest_v2.py` 的 `--long-up-threshold` 掃幾個值比較（見第 11 節），不用真的跑 `predict`：
   ```powershell
-  python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest_v2 --output-dir C:\tmp\threshold_test --training-window-days 150 --reseed-interval-days 20 --backtest-days 80 --long-hit-threshold 0.55
+  python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest_v2 --output-dir C:\tmp\threshold_test --training-window-days 150 --reseed-interval-days 20 --backtest-days 80 --long-up-threshold 0.55
   ```
 - `validate_predictions.py` 事後重算某天的 recall/precision 時，也可以用同一個參數換一個門檻重新檢視同一批已保存的預測（見第 7 節）。
 
@@ -250,6 +257,34 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-03 --predict
 
 `--as-of` 是強制的資料時間邊界，應填「最後一個已有完整日 K 的交易日」，不是執行程式當天的日期；特徵及訓練目標都只會使用該日以前的資料。`prediction-date` 必須由交易日曆或操作者提供，程式不把曆日的明天誤認為交易日。預測程式也會拒絕載入訓練截止日晚於 `--universe-date` 的 checkpoint，防止本地快取已有未來日 K 時發生資訊洩漏。
 
+### 查看初始訓練結果
+
+`train_initial` 完成後會在 `checkpoints/` 產生新的 `stock_model_gpt_*.pt`。可先用 PowerShell 看最新模型：
+
+```powershell
+Get-ChildItem Z_ORB_ONE\stock_model_gpt\checkpoints | Sort-Object LastWriteTime -Descending | Select-Object -First 5
+```
+
+這次切換到 `intraday_up_1plus` 後，2026-09-14 的初訓練結果如下，可作為之後檢查格式是否正常的參考：
+
+```text
+checkpoint: stock_model_gpt_20260914_214607_388077.pt
+training_as_of: 2026-09-14
+target_names: intraday_up_1plus
+model head: intraday_up_1plus_head
+samples: 16636
+intraday_up_1plus=True: 10118（約 60.8%）
+intraday_up_1plus=False: 6518（約 39.2%）
+majority baseline: true
+validation_days: 20
+best_epoch: 2
+best validation CE loss: 0.659591
+train CE loss at best epoch: 0.640325
+early_stopped: true（第 5 個 epoch 停止，回滾採用第 2 個 epoch）
+```
+
+這代表新目標不是原本 `hit_up` 那種極稀有事件，正樣本反而是多數；判讀時不要只看 accuracy，仍要等隔天驗證後看 `signal_recall_precision.intraday_up_1plus.recall` / `.precision`。`val_loss` 若看到約 `2.638` 是因為乘上 `loss_intraday_up_1plus = 4.0`，若要看一般 cross-entropy，請看 `val_components.intraday_up_1plus`。
+
 ## 6. 訓練視窗與定期重新訓練
 
 這節是這一版跟最早期版本最大的行為差異，操作上要記住兩件事：**續訓永遠只用最近一段滾動視窗的資料（不是全部歷史），而且要每隔一段時間整個重新訓練一次（不是永遠續訓下去）。**
@@ -295,7 +330,7 @@ python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-
 
 ### 驗證內容與輸出
 
-驗證計算 `hit_up` 的命中率（argmax 對答案，門檻等同 0.5）；另外用實際訊號門檻（`--long-hit-threshold`，預設 0.6）計算 recall（實際觸及中抓到幾成）與 precision（觸發訊號中真的觸及的比例），存在 `signal_recall_precision` 欄位並同步印在控制台。
+驗證計算 `intraday_up_1plus` 的命中率（argmax 對答案，門檻等同 0.5）；另外用實際訊號門檻（`--long-up-threshold`，預設 0.6）計算 recall（實際達標中抓到幾成）與 precision（觸發訊號中真的達標的比例），存在 `signal_recall_precision` 欄位並同步印在控制台。
 
 **這兩組數字門檻不一樣，數字看起來會有落差是正常的**：命中率用比較寬鬆的 0.5 門檻算（模型自己覺得比較可能的答案），recall/precision 用比較嚴格的 0.6 門檻算（真正決定要不要出訊號的那條線）。稀有事件下命中率容易失真（模型永遠猜「不觸及」也能有 87% 以上的命中率），**recall/precision 才是判斷訊號品質有沒有改善的依據**，尤其是 precision 相對於「訓練視窗多數類別」基期的倍數（回測驗證過的三個區間都有 2.5～5 倍的提升）。
 
@@ -346,7 +381,7 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-11 --predict
 
 （如果不想分兩段、想維持原本一次跑完的習慣，也可以不加 `--skip-predict`，但那樣 `predict` 那一步幾乎一定會因為當天夜盤資料還沒出現而報錯——分兩段是配合這個限制的正確用法。）
 
-每日續訓預設 `daily_training_mode="incremental_replay"`：新增序列依「目標日」判定，範圍為前一 checkpoint 的 `training_as_of` 之後至本次 `--as-of`，全部納入；輸入仍保留每筆目標日前完整的 context。歷史重播從前次截止日以前、且落在 `--training-window-days` 滾動視窗內的序列抽樣，預設最多為新增筆數的 1 倍（`daily_replay_ratio=1.0`），總上限 4096（`daily_replay_max_sequences`），每股最多 128（`daily_replay_per_symbol`）。抽樣時 `hit_up` 為真的日子權重是一般日子的 `daily_replay_hit_oversample`（預設 `4.0`）倍。
+每日續訓預設 `daily_training_mode="incremental_replay"`：新增序列依「目標日」判定，範圍為前一 checkpoint 的 `training_as_of` 之後至本次 `--as-of`，全部納入；輸入仍保留每筆目標日前完整的 context。歷史重播從前次截止日以前、且落在 `--training-window-days` 滾動視窗內的序列抽樣，預設最多為新增筆數的 1 倍（`daily_replay_ratio=1.0`），總上限 4096（`daily_replay_max_sequences`），每股最多 128（`daily_replay_per_symbol`）。抽樣時 `intraday_up_1plus` 為真的日子權重是一般日子的 `daily_replay_hit_oversample`（預設 `4.0`）倍。
 
 同一模型已訓練到本次截止日時，預設跳過；沒有新增目標時預設跳過，不產生新模型（最常見原因就是忘記匯入當天夜盤資料，見第 4 節）。如需明確重做，可加 `--force-retrain`。
 
@@ -355,14 +390,14 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-11 --predict
 上面第二段的 `predict` 跑完，會產生三個東西，依「想快速看還是想細看」選：
 
 1. **最快**：直接看 `predict.py` 執行時的控制台輸出，會列出「預測資料覆蓋 X/Y 支」跟每一筆符合門檻的訊號。
-2. **人看的摘要**：`signal_reports/<prediction-date>.txt`——只列出符合 `long_hit >= 0.6`（或你設定的門檻）的股票跟機率，格式是：
+2. **人看的摘要**：`signal_reports/<prediction-date>.txt`——只列出符合 `long_intraday_up_1plus >= 0.6`（或你設定的門檻）的股票跟機率，格式是：
    ```text
-   [LONG] <股票代號> prediction_date=2026-09-07 hit_up.T=0.7231
+   [LONG] <股票代號> prediction_date=2026-09-07 intraday_up_1plus.T=0.7231
    ```
    沒有訊號的股票不會出現在這個檔案裡；如果整批都沒有訊號，會印「沒有符合訊號門檻的標的」。
-3. **完整資料**：`predictions/<prediction-date>.json`——每一支有納入預測的股票的完整機率（`hit_up.T`/`hit_up.F`），還有被跳過的股票清單跟原因（`skipped`，例如 `insufficient_history`、`stale_features`）、這次用的 checkpoint 的 `naive_baseline`（訓練視窗多數類別是什麼）跟 `in_sample_loss`（訓練視窗內的 loss，可以跟隔天驗證後的 `evaluations/<date>.json` 裡的 log-loss 對照，檢查有沒有過擬合，見第 11 節的回測報告說明，觀念相通）。
+3. **完整資料**：`predictions/<prediction-date>.json`——每一支有納入預測的股票的完整機率（`intraday_up_1plus.T`/`intraday_up_1plus.F`），還有被跳過的股票清單跟原因（`skipped`，例如 `insufficient_history`、`stale_features`）、這次用的 checkpoint 的 `naive_baseline`（訓練視窗多數類別是什麼）跟 `in_sample_loss`（訓練視窗內的 loss，可以跟隔天驗證後的 `evaluations/<date>.json` 裡的 log-loss 對照，檢查有沒有過擬合，見第 11 節的回測報告說明，觀念相通）。
 
-隔天（第 7 節）驗證完，`data/evaluations/<prediction-date>.json` 會補上這批訊號的實際結果（`actual_hit`）跟 recall/precision，這時候才知道昨天的訊號準不準。
+隔天（第 7 節）驗證完，`data/evaluations/<prediction-date>.json` 會補上這批訊號的實際結果（`actual_intraday_up_1plus`）跟 recall/precision，這時候才知道昨天的訊號準不準。
 
 ### 預測資料檢查
 
@@ -427,10 +462,10 @@ python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest_v2 --output-dir C:\tmp
 
 結果存在 `<output-dir>/backtest_report_v2.json`：
 
-- `overall.hit_up_accuracy` / `overall.naive_baseline.hit_up_accuracy`：模型 vs. 「只猜訓練視窗多數類別」的命中率對照。
-- `overall.hit_up.recall` / `.precision`：實際交易會用到的門檻下，抓得到幾成、喊中幾成。
-- `overall.log_loss.hit_up` / `.baseline_hit_up`：隔天實際結果的機率校準對照（out-of-sample）。
-- `overall.in_sample_loss.hit_up`：訓練視窗內的機率校準（in-sample）；跟上面的 `log_loss` 一起看可以判斷有沒有過擬合——差距很小代表沒有，差距很大（例如好幾倍）才要擔心。
+- `overall.intraday_up_1plus_accuracy` / `overall.naive_baseline.intraday_up_1plus_accuracy`：模型 vs. 「只猜訓練視窗多數類別」的命中率對照。
+- `overall.intraday_up_1plus.recall` / `.precision`：實際交易會用到的門檻下，抓得到幾成、喊中幾成。
+- `overall.log_loss.intraday_up_1plus` / `.baseline_intraday_up_1plus`：隔天實際結果的機率校準對照（out-of-sample）。
+- `overall.in_sample_loss.intraday_up_1plus`：訓練視窗內的機率校準（in-sample）；跟上面的 `log_loss` 一起看可以判斷有沒有過擬合——差距很小代表沒有，差距很大（例如好幾倍）才要擔心。
 - `days[]`：每個交易日的細項，包含當天是不是「重新訓練」那天（`reseeded`）、用的是哪個 checkpoint。
 
 ## 12. 已知限制
@@ -440,5 +475,5 @@ python -m Z_ORB_ONE.stock_model_gpt.walk_forward_backtest_v2 --output-dir C:\tmp
 - **股票清單的 look-ahead / survivorship bias**：見第 11 節，回測結果用的是現在的股票清單回頭套用到歷史，不是當時真正的清單。
 - **checkpoint gate 只是煞車，不是完整的模型比較機制**：見第 7 節，`DEGRADED` 只代表「最近變差了，人去看一下」，沒有離線回測驅動的自動發布/回退決策。
 - **3%/2% 停損停利規則已經不是主要判斷依據**：`evaluate_signal_trade` 跟 `success` 欄位還留著（`post_training_gate.py` 也還在用），但因為沒有日內先後順序資訊會系統性偏樂觀，回測跟驗證都改看 recall/precision/log-loss；這組舊邏輯之後可以考慮整個拿掉。
-- **`hit_down`／`price` 仍是輸入特徵，但已知模型不會拿它們當答案去學**：如果之後想重新啟用其中一項當輸出目標，回去看這份 README 開頭跟 `training.py`/`model.py` 的 `ensure_checkpoint_compatible()`，裡面有擋掉舊 checkpoint 相容性的判斷邏輯可以參考怎麼加回去。
+- **`price`／`hit_up`／`hit_down` 仍是輸入特徵，但模型不會拿它們當答案去學**：目前唯一答案是 `intraday_up_1plus`。如果之後想重新啟用其中一項當輸出目標，回去看這份 README 開頭跟 `training.py`/`model.py` 的 `ensure_checkpoint_compatible()`，裡面有擋掉舊 checkpoint 相容性的判斷邏輯可以參考怎麼加回去。
 - **定期重新訓練沒有自動排程**：第 6 節提到大約每 20 個交易日重跑一次 `train_initial`，目前是要人工記得執行，`run_daily.py` 不會自動觸發。

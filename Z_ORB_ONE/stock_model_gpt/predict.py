@@ -24,10 +24,10 @@ from .paths import UNIVERSE_DIR
 
 @dataclass(frozen=True)
 class SignalThresholds:
-    long_hit: float = 0.6
+    long_intraday_up_1plus: float = 0.6
 
     def signal_values(self) -> dict[str, float]:
-        return {"long_hit": self.long_hit}
+        return {"long_intraday_up_1plus": self.long_intraday_up_1plus}
 
 
 def latest_checkpoint() -> Path:
@@ -153,7 +153,7 @@ def run_prediction(
                 "prediction_date": prediction_date.isoformat(),
                 "input_last_date": rows[-1]["date"],
                 "checkpoint": checkpoint_path.name,
-                "hit_up": _probabilities(probabilities["hit_up"]),
+                "intraday_up_1plus": _probabilities(probabilities["intraday_up_1plus"]),
             }
             predictions.append(prediction)
             signal = detect_signal(prediction, thresholds)
@@ -194,7 +194,8 @@ def main() -> None:
     parser.add_argument("--prediction-date", default=date.today().isoformat())
     parser.add_argument("--universe-date", default=date.today().isoformat())
     parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-hit-threshold", type=float, default=None)
+    parser.add_argument("--long-up-threshold", type=float, default=None)
+    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
     args = parser.parse_args()
     thresholds = build_signal_thresholds(args)
     universe_date = date.fromisoformat(args.universe_date)
@@ -213,12 +214,12 @@ def build_signal_report_lines(
         f"prediction_date={prediction_date.isoformat()}",
     ]
     if signals:
-        lines.append(f"符合訊號門檻: long_hit>={thresholds.long_hit:.2f}")
+        lines.append(f"符合訊號門檻: long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}")
         for signal in signals:
             lines.append(
                 f"[{signal['side']}] {signal['symbol']} "
                 f"prediction_date={signal['prediction_date']} "
-                f"{signal['hit_key']}={signal['hit_probability']:.4f}"
+                f"{signal['target_key']}={signal['target_probability']:.4f}"
             )
     else:
         lines.append("沒有符合訊號門檻的標的")
@@ -227,8 +228,13 @@ def build_signal_report_lines(
 
 def build_signal_thresholds(args) -> SignalThresholds:
     threshold = args.signal_threshold
+    explicit_threshold = (
+        args.long_up_threshold
+        if getattr(args, "long_up_threshold", None) is not None
+        else getattr(args, "long_hit_threshold", None)
+    )
     values = SignalThresholds(
-        long_hit=args.long_hit_threshold if args.long_hit_threshold is not None else threshold,
+        long_intraday_up_1plus=explicit_threshold if explicit_threshold is not None else threshold,
     )
     for name, value in values.__dict__.items():
         if not 0.0 <= value <= 1.0:
@@ -239,15 +245,15 @@ def build_signal_thresholds(args) -> SignalThresholds:
 def detect_signal(prediction: dict, thresholds: SignalThresholds | float = SignalThresholds()) -> dict | None:
     if isinstance(thresholds, float):
         thresholds = SignalThresholds(thresholds)
-    long_hit = prediction["hit_up"]["T"]
-    if long_hit < thresholds.long_hit:
+    long_target = prediction["intraday_up_1plus"]["T"]
+    if long_target < thresholds.long_intraday_up_1plus:
         return None
     return {
         "side": "LONG",
         "symbol": prediction["symbol"],
         "prediction_date": prediction["prediction_date"],
-        "hit_key": "hit_up.T",
-        "hit_probability": long_hit,
+        "target_key": "intraday_up_1plus.T",
+        "target_probability": long_target,
     }
 
 

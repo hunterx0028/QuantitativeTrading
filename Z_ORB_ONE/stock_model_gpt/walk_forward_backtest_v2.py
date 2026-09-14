@@ -17,12 +17,10 @@ Design, in contrast to `walk_forward_backtest.py` / `walk_forward_backtest_resum
   incremental step (inherited weights/optimizer/ATR, small learning rate,
   replay-sampled recent history) instead of standing still.
 - Evaluation ignores the target-profit/max-adverse trade simulation entirely.
-  It only pools `validate_predictions.py`'s `accuracy` (hit_up match rate) and
-  `signal_recall_precision` (hit_up tp/fp/fn) across days, rather than one
-  blended "signal success rate". The model predicts hit_up only — price and
-  hit_down were both dropped as outputs (see `model.py`) after backtests
-  showed price losing to a naive baseline and hit_down's recall swinging
-  wildly (1.6%-21.4%) across different time periods; both remain inputs.
+  It only pools `validate_predictions.py`'s `accuracy` and
+  `signal_recall_precision` for intraday_up_1plus across days, rather than one
+  blended "signal success rate". The model predicts whether the next day's high
+  reaches price bucket 1 or 2; price/hit_up/hit_down remain historical inputs.
 
 All predict/validate/train steps run in-process (direct function calls, not
 `python -m module` subprocesses) because the day-by-day design multiplies the
@@ -83,7 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--settings", default=None, help="傳給 train/predict/validate 的 settings 路徑")
     parser.add_argument("--restart", action="store_true", help="忽略既有進度，從第一天重跑；會覆寫 prediction/evaluation")
     parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-hit-threshold", type=float, default=None)
+    parser.add_argument("--long-up-threshold", type=float, default=None)
+    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
     return parser.parse_args()
 
 
@@ -205,10 +204,10 @@ def main() -> None:
         # Score a same-day, no-lookahead "always guess the majority class from
         # the model's own training window" baseline, so accuracy above can be
         # read against "better than guessing nothing" instead of in isolation.
-        baseline_hit_up = naive_baseline.get("majority_hit_up") if naive_baseline else None
-        baseline_hit_up_hits = (
-            actual_dist["hit_up_true"] if baseline_hit_up == "true"
-            else actual_dist["evaluated"] - actual_dist["hit_up_true"]
+        baseline_target = naive_baseline.get("majority_intraday_up_1plus") if naive_baseline else None
+        baseline_target_hits = (
+            actual_dist["intraday_up_1plus_true"] if baseline_target == "true"
+            else actual_dist["evaluated"] - actual_dist["intraday_up_1plus_true"]
         )
 
         days_done.append({
@@ -218,18 +217,18 @@ def main() -> None:
             "reseeded": reseed,
             "checkpoint": checkpoint_path.name,
             "evaluated": counts["evaluated"],
-            "hit_up_hits": counts["hit_up"],
-            "hit_up": summary["signal_recall_precision"]["hit_up"],
-            "naive_baseline_hit_up": baseline_hit_up,
-            "baseline_hit_up_hits": baseline_hit_up_hits,
+            "intraday_up_1plus_hits": counts["intraday_up_1plus"],
+            "intraday_up_1plus": summary["signal_recall_precision"]["intraday_up_1plus"],
+            "naive_baseline_intraday_up_1plus": baseline_target,
+            "baseline_intraday_up_1plus_hits": baseline_target_hits,
             "log_loss_sum": summary["log_loss_sum"],
             "in_sample_loss": in_sample_loss,
         })
         write_progress("running")
 
     total_evaluated = sum(day["evaluated"] for day in days_done)
-    total_hit_up_hits = sum(day["hit_up_hits"] for day in days_done)
-    total_baseline_hit_up_hits = sum(day["baseline_hit_up_hits"] for day in days_done)
+    total_target_hits = sum(day["intraday_up_1plus_hits"] for day in days_done)
+    total_baseline_target_hits = sum(day["baseline_intraday_up_1plus_hits"] for day in days_done)
 
     def _mean_log_loss(field: str) -> float | None:
         total = sum(
@@ -249,8 +248,8 @@ def main() -> None:
                         "log-loss 不會像 accuracy 那樣直接算全錯。baseline 用的是同一次訓練視窗的固定"
                         "類別機率分佈（不看當天輸入），兩者可以直接比大小：模型如果比 baseline 低，"
                         "代表機率分佈上真的學到條件訊號；就算 accuracy 追不上 baseline，這裡贏了也算數。",
-        "hit_up": _mean_log_loss("hit_up"),
-        "baseline_hit_up": _mean_log_loss("baseline_hit_up"),
+        "intraday_up_1plus": _mean_log_loss("intraday_up_1plus"),
+        "baseline_intraday_up_1plus": _mean_log_loss("baseline_intraday_up_1plus"),
     }
 
     def _mean_in_sample_loss(field: str) -> float | None:
@@ -271,7 +270,7 @@ def main() -> None:
                         "跟上面 log_loss 的 model 數字（隔天、out-of-sample）對照："
                         "如果 in-sample 壓得很低、out-of-sample 卻沒有跟著低，就是過擬合的訊號"
                         "——模型把訓練視窗裡的雜訊背起來，但沒有學到能類推到隔天的東西。",
-        "hit_up": _mean_in_sample_loss("hit_up"),
+        "intraday_up_1plus": _mean_in_sample_loss("intraday_up_1plus"),
     }
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -285,15 +284,15 @@ def main() -> None:
         "days": days_done,
         "overall": {
             "evaluated": total_evaluated,
-            "hit_up_accuracy": total_hit_up_hits / total_evaluated if total_evaluated else None,
-            "hit_up": _pool(days_done, "hit_up"),
+            "intraday_up_1plus_accuracy": total_target_hits / total_evaluated if total_evaluated else None,
+            "intraday_up_1plus": _pool(days_done, "intraday_up_1plus"),
             "log_loss": log_loss,
             "in_sample_loss": in_sample_loss,
             "naive_baseline": {
-                "description": "每日用該次訓練視窗的多數類別（hit_up 多數類別，通常就是 False）"
+                "description": "每日用該次訓練視窗的多數類別（intraday_up_1plus 多數類別）"
                                 "當作固定猜測，跟真正模型的準確率做對照，藉此判斷模型是否"
                                 "真的學到東西、還是連瞎猜多數類別都比不上。",
-                "hit_up_accuracy": total_baseline_hit_up_hits / total_evaluated if total_evaluated else None,
+                "intraday_up_1plus_accuracy": total_baseline_target_hits / total_evaluated if total_evaluated else None,
             },
         },
         "caveat": (
@@ -302,17 +301,26 @@ def main() -> None:
             "會偏樂觀（look-ahead / survivorship bias）。滾動訓練視窗已避免「訓練資料無限往回累積」"
             "這個問題，但不會消除這條 universe 偏誤。"
             "此報告不含停損/停利交易模擬（target_profit/max_adverse），"
-            "只比較 hit_up 這項預測本身跟實際值（price、hit_down 已不再是預測目標，只留作輸入特徵）。"
+            "只比較 intraday_up_1plus 這項預測本身跟實際值（price、hit_up、hit_down 留作歷史輸入特徵）。"
         ),
     }
     report_path = output_dir / REPORT_FILENAME
     _atomic_write_json(report_path, report)
     write_progress("completed")
     print(f"=== 完成，共 {len(steps)} 個交易日，{report['reseed_count']} 次重新訓練 ===")
-    print(f"hit_up 準確率: {total_hit_up_hits}/{total_evaluated} = {report['overall']['hit_up_accuracy']} "
-          f"(naive baseline={report['overall']['naive_baseline']['hit_up_accuracy']})")
-    print(f"hit_up log-loss: model={log_loss['hit_up']} baseline={log_loss['baseline_hit_up']}")
-    print(f"hit_up in-sample loss={in_sample_loss['hit_up']} (跟上面 out-of-sample log-loss={log_loss['hit_up']} 對照)")
+    print(
+        f"intraday_up_1plus 準確率: {total_target_hits}/{total_evaluated} = "
+        f"{report['overall']['intraday_up_1plus_accuracy']} "
+        f"(naive baseline={report['overall']['naive_baseline']['intraday_up_1plus_accuracy']})"
+    )
+    print(
+        "intraday_up_1plus log-loss: "
+        f"model={log_loss['intraday_up_1plus']} baseline={log_loss['baseline_intraday_up_1plus']}"
+    )
+    print(
+        f"intraday_up_1plus in-sample loss={in_sample_loss['intraday_up_1plus']} "
+        f"(跟上面 out-of-sample log-loss={log_loss['intraday_up_1plus']} 對照)"
+    )
     print(f"報告已儲存: {report_path}")
     print(f"進度已儲存: {progress_path}")
 

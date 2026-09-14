@@ -66,7 +66,8 @@ def main() -> None:
     parser.add_argument("--predictions", default=None, help="預測 JSON 路徑，預設使用 predictions/<date>.json")
     parser.add_argument("--settings", default=None)
     parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-hit-threshold", type=float, default=None)
+    parser.add_argument("--long-up-threshold", type=float, default=None)
+    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
     parser.add_argument("--target-profit-pct", type=float, default=3.0)
     parser.add_argument("--max-adverse-pct", type=float, default=2.0)
     args = parser.parse_args()
@@ -156,11 +157,11 @@ def print_summary(
     naive_baseline: dict | None = None,
 ) -> dict:
     evaluated = 0
-    hit_up_hits = 0
-    hit_up_tp = hit_up_fp = hit_up_fn = 0
-    actual_hit_up_true = 0
-    hit_up_log_loss_sum = 0.0
-    baseline_hit_up_log_loss_sum = 0.0
+    target_hits = 0
+    target_tp = target_fp = target_fn = 0
+    actual_target_true = 0
+    target_log_loss_sum = 0.0
+    baseline_target_log_loss_sum = 0.0
     signal_rows: list[tuple[dict, dict, DailyState, dict]] = []
     signal_results: list[dict] = []
     actual_candles_by_symbol = {row["symbol"]: row for row in actual_candles}
@@ -171,60 +172,65 @@ def print_summary(
         if actual is None:
             continue
         evaluated += 1
-        actual_hit_up_true += int(actual.hit_up)
-        predicted_hit_up = prediction["hit_up"]["T"] >= prediction["hit_up"]["F"]
+        actual_target = actual.intraday_up_1plus
+        actual_target_true += int(actual_target)
+        predicted_target = prediction["intraday_up_1plus"]["T"] >= prediction["intraday_up_1plus"]["F"]
 
-        hit_up_ok = predicted_hit_up == actual.hit_up
-        hit_up_hits += int(hit_up_ok)
+        target_ok = predicted_target == actual_target
+        target_hits += int(target_ok)
 
         # Cross-entropy of the model's own predicted probabilities against what
         # actually happened, alongside the same score for a fixed baseline
         # distribution — unlike argmax accuracy, this rewards a model whose
         # probabilities are well-calibrated even when the argmax is wrong, so
         # it can tell "genuinely no signal" apart from "argmax got unlucky".
-        hit_up_key = "true" if actual.hit_up else "false"
-        hit_up_log_loss_sum += -math.log(
-            max(prediction["hit_up"]["T" if actual.hit_up else "F"], _LOG_LOSS_FLOOR)
+        target_key = "true" if actual_target else "false"
+        target_log_loss_sum += -math.log(
+            max(prediction["intraday_up_1plus"]["T" if actual_target else "F"], _LOG_LOSS_FLOOR)
         )
         if naive_baseline:
-            baseline_hit_up_log_loss_sum += -math.log(
-                _smoothed_probability(naive_baseline["hit_up_counts"], hit_up_key, 2)
+            baseline_target_log_loss_sum += -math.log(
+                _smoothed_probability(naive_baseline["intraday_up_1plus_counts"], target_key, 2)
             )
 
-        hit_up_signal = prediction["hit_up"]["T"] >= thresholds.long_hit
-        hit_up_tp += int(hit_up_signal and actual.hit_up)
-        hit_up_fp += int(hit_up_signal and not actual.hit_up)
-        hit_up_fn += int(not hit_up_signal and actual.hit_up)
+        target_signal = prediction["intraday_up_1plus"]["T"] >= thresholds.long_intraday_up_1plus
+        target_tp += int(target_signal and actual_target)
+        target_fp += int(target_signal and not actual_target)
+        target_fn += int(not target_signal and actual_target)
 
         signal = detect_signal(prediction, thresholds)
         if signal:
             candle = actual_candles_by_symbol[symbol]
             trade = evaluate_signal_trade(signal, candle, target_profit_pct, max_adverse_pct)
             signal_rows.append((prediction, signal, actual, trade))
-            signal_results.append({**signal, **trade, "actual_price": actual.price, "actual_hit": trade["actual_hit"]})
+            signal_results.append({
+                **signal, **trade,
+                "actual_price": actual.price,
+                "actual_intraday_up_1plus": trade["actual_intraday_up_1plus"],
+            })
 
-    hit_up_recall, hit_up_precision = _recall_precision(hit_up_tp, hit_up_fp, hit_up_fn)
+    target_recall, target_precision = _recall_precision(target_tp, target_fp, target_fn)
 
     print(f"驗證筆數: {evaluated}/{len(predictions)}")
     if evaluated:
-        print(f"hit_up 命中率: {hit_up_hits}/{evaluated} = {hit_up_hits / evaluated:.2%}")
+        print(f"intraday_up_1plus 命中率: {target_hits}/{evaluated} = {target_hits / evaluated:.2%}")
         print(
-            f"hit_up @ long_hit>={thresholds.long_hit:.2f}: "
-            f"recall={_format_rate(hit_up_recall)}({hit_up_tp}/{hit_up_tp + hit_up_fn}) "
-            f"precision={_format_rate(hit_up_precision)}({hit_up_tp}/{hit_up_tp + hit_up_fp})"
+            f"intraday_up_1plus @ long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}: "
+            f"recall={_format_rate(target_recall)}({target_tp}/{target_tp + target_fn}) "
+            f"precision={_format_rate(target_precision)}({target_tp}/{target_tp + target_fp})"
         )
 
     print(
         "漲跌訊號 "
-        f"long_hit>={thresholds.long_hit:.2f}, "
+        f"long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}, "
         f"target_profit >= {target_profit_pct:.2f}%, max_adverse <= {max_adverse_pct:.2f}%: "
         f"{len(signal_rows)}"
     )
     for prediction, signal, actual, trade in signal_rows:
         print(
             f"[SIGNAL {signal['side']}] {signal['symbol']} "
-            f"{signal['hit_key']}={signal['hit_probability']:.4f} | "
-            f"actual_hit={trade['actual_hit']} actual_price={actual.price} | "
+            f"{signal['target_key']}={signal['target_probability']:.4f} | "
+            f"actual_intraday_up_1plus={trade['actual_intraday_up_1plus']} actual_price={actual.price} | "
             f"O={trade['open']} H={trade['high']} L={trade['low']} C={trade['close']} | "
             f"best={trade['best_profit_pct']:.2f}% close={trade['close_profit_pct']:.2f}% "
             f"adverse={trade['adverse_pct']:.2f}% success={trade['success']}"
@@ -237,20 +243,20 @@ def print_summary(
         "target_profit_pct": target_profit_pct,
         "max_adverse_pct": max_adverse_pct,
         "accuracy": {
-            "hit_up": hit_up_hits / evaluated if evaluated else None,
+            "intraday_up_1plus": target_hits / evaluated if evaluated else None,
         },
         # Raw counts alongside the rates above so callers pooling accuracy across
         # many days (e.g. a walk-forward backtest) can weight by daily volume
         # instead of averaging already-divided per-day rates.
         "accuracy_counts": {
-            "hit_up": hit_up_hits, "evaluated": evaluated,
+            "intraday_up_1plus": target_hits, "evaluated": evaluated,
         },
         # Actual outcome distribution for the day, independent of what was predicted.
         # Lets a caller score a naive constant-guess baseline (e.g. "always False")
         # without needing every symbol's raw actual value.
         "actual_distribution": {
             "evaluated": evaluated,
-            "hit_up_true": actual_hit_up_true,
+            "intraday_up_1plus_true": actual_target_true,
         },
         # Sums (not per-day averages) of cross-entropy against the true label,
         # for the model's own predicted probabilities and, when a training-window
@@ -258,12 +264,12 @@ def print_summary(
         # Divide by `evaluated` for a day's mean; sum across days before dividing
         # by total evaluated to pool correctly across many days.
         "log_loss_sum": {
-            "hit_up": hit_up_log_loss_sum,
-            "baseline_hit_up": baseline_hit_up_log_loss_sum if naive_baseline else None,
+            "intraday_up_1plus": target_log_loss_sum,
+            "baseline_intraday_up_1plus": baseline_target_log_loss_sum if naive_baseline else None,
         },
         "signal_recall_precision": {
-            "hit_up": {"recall": hit_up_recall, "precision": hit_up_precision,
-                       "tp": hit_up_tp, "fp": hit_up_fp, "fn": hit_up_fn},
+            "intraday_up_1plus": {"recall": target_recall, "precision": target_precision,
+                                  "tp": target_tp, "fp": target_fp, "fn": target_fn},
         },
         "signals": signal_results,
     }
@@ -286,7 +292,7 @@ def evaluate_signal_trade(
     max_adverse_pct: float,
 ) -> dict:
     if signal["side"] != "LONG":
-        raise ValueError("交易評估只接受 LONG（hit_up 是唯一預測目標）")
+        raise ValueError("交易評估只接受 LONG（intraday_up_1plus 是唯一預測目標）")
     open_price = float(candle["open"])
     high = float(candle["high"])
     low = float(candle["low"])
@@ -294,7 +300,7 @@ def evaluate_signal_trade(
     best_profit_pct = (high - open_price) / open_price * 100.0
     close_profit_pct = (close - open_price) / open_price * 100.0
     adverse_pct = (open_price - low) / open_price * 100.0
-    actual_hit = bool(candle["actual_state"]["hit_up"])
+    actual_intraday_up_1plus = bool(candle["actual_state"]["intraday_up_1plus"])
     return {
         "open": open_price,
         "high": high,
@@ -303,7 +309,7 @@ def evaluate_signal_trade(
         "best_profit_pct": best_profit_pct,
         "close_profit_pct": close_profit_pct,
         "adverse_pct": adverse_pct,
-        "actual_hit": actual_hit,
+        "actual_intraday_up_1plus": actual_intraday_up_1plus,
         "success": best_profit_pct >= target_profit_pct and adverse_pct <= max_adverse_pct,
     }
 
