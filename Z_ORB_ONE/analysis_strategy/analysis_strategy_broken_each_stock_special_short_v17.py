@@ -20,7 +20,8 @@ LIMIT_DOWN 策略成立條件
 
 LOWER 模式個股入場條件
 1. 於 STRATEGY_START_LOWER～STRATEGY_END_LOWER（含）逐根尋找 low 落在「昨收到跌停價」之 LOWER_ENTRY_RANGE_START_PERCENT～LOWER_ENTRY_RANGE_END_PERCENT 區間內的分 K。
-2. 以上述分 K 的下一根分 K low 作為放空入場價。
+2. 以上述分 K 的下一根分 K low 作為入場價；判斷時股票占比在下限（不含）至上限（含）時做空，嚴格超過 LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD 時做多。
+   反向做多仍沿用 LOWER 的指數／產業篩選與出場時間，停損停利使用 LOWER_LONG 專用百分比，損益按做多方向計算。
 3. 入場當下 IX0001、IX0043 均仍須維持 LOWER；若個股所屬產業指數未通過，繼續檢查後續分 K。
 
 三種模式共同入場保護
@@ -80,6 +81,8 @@ EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each
 OUTPUT_BUFFER: list[str] = []
 DAILY_CANDLE_DATA_ISSUES: set[tuple[str, str, str]] = set()
 GATE_LOWER_PASSED = 'LOWER_PASSED'
+GATE_LOWER_LONG_PASSED = 'LOWER_LONG_PASSED'
+GATE_LOWER_RATIO_REJECTED = 'LOWER_RATIO_REJECTED' # 指數條件通過，但股票占比未符合任何 LOWER 入場區段
 GATE_NO_TRADE = 'NO_TRADE'
 GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
@@ -104,6 +107,9 @@ MIN_MINUTE_BARS_BEFORE_0930 = 20
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
+OPTIMIZE_LOSS_PER_LOWER_LONG = 2.0 # lower 反向做多停損百分比(%)，入場價減去 2%
+OPTIMIZE_PROFIT_PER_LOWER_LONG = 5.0 # lower 反向做多停利百分比(%)，入場價加上 6%
+
 OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 8.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
@@ -114,6 +120,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
+LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD = 75.0 # 同一比例嚴格超過此值時，沿用 LOWER 訊號反向做多
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
@@ -1216,12 +1223,14 @@ def get_strategy_market_decision_gate_status(
         minute_bars_by_symbol,
     )
     decline_percent = calculate_percent(decline_count, candidate_count)
+    if decline_percent > LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD:
+        return GATE_LOWER_LONG_PASSED
     if not (
         LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
         < decline_percent
         <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
     ):
-        return GATE_NO_TRADE
+        return GATE_LOWER_RATIO_REJECTED
     return GATE_LOWER_PASSED
 
 
@@ -1986,13 +1995,20 @@ def print_daily_optimization_results(
     }
     strategy_type_by_gate_status = {
         GATE_LOWER_PASSED: STRATEGY_LOWER,
+        GATE_LOWER_LONG_PASSED: STRATEGY_LOWER,
+        GATE_LOWER_RATIO_REJECTED: STRATEGY_LOWER,
         GATE_NO_TRADE: STRATEGY_NO_TRADE,
         GATE_DATA_INCOMPLETE: STRATEGY_NO_TRADE,
     }
     lower_gate_date_keys = {
         current_date.strftime('%Y-%m-%d')
         for current_date, gate_status in market_start_gate_cache.items()
-        if gate_status == GATE_LOWER_PASSED and INCLUDE_LOWER_IN_PRINT_STATS
+        if gate_status in (
+            GATE_LOWER_PASSED,
+            GATE_LOWER_LONG_PASSED,
+            GATE_LOWER_RATIO_REJECTED,
+        )
+        and INCLUDE_LOWER_IN_PRINT_STATS
     }
     if summary['total'] == 0 and not lower_gate_date_keys:
         print('固定參數下沒有交易結果。')
@@ -2056,10 +2072,13 @@ def print_daily_optimization_results(
                 )
                 decline_percent = calculate_percent(decline_count, candidate_count)
                 lower_decision_text = (
+                    f'方向={"做多" if gate_status_by_date_key.get(date_key) == GATE_LOWER_LONG_PASSED else "做空"}  '
                     f'候選={candidate_count}  '
                     f'下降={decline_count}  '
                     f'{decline_percent:.2f}%  '
                 )
+                if gate_status_by_date_key.get(date_key) == GATE_LOWER_RATIO_REJECTED:
+                    lower_decision_text += '未成立原因=股票占比未落入指定區段  '
             print(
                 f'{format_date_with_weekday(date_key)} '
                 f'模式={strategy_type}  '
@@ -2116,7 +2135,9 @@ def print_daily_optimization_results(
         f'LIMIT_UP_LOSS_PER={OPTIMIZE_LOSS_PER_LIMIT_UP:.1f}%  '
         f'LIMIT_UP_PROFIT_PER={OPTIMIZE_PROFIT_PER_LIMIT_UP:.1f}%  '
         f'LOWER_LOSS_PER={OPTIMIZE_LOSS_PER_LOWER:.1f}%  '
-        f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%'
+        f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%  '
+        f'LOWER_LONG_LOSS_PER={OPTIMIZE_LOSS_PER_LOWER_LONG:.1f}%  '
+        f'LOWER_LONG_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER_LONG:.1f}%'
     )
     print(
         f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}  '
@@ -2270,6 +2291,7 @@ def find_trade_candidate_on_date(
     index_minute_bars_by_key: dict[str, dict[str, list]],
     strategy_type: str,
     market_reversal_trigger_dt: datetime | None,
+    trade_side: str = TRADE_SIDE_SHORT,
 ):
     """找出單日候選交易；無訊號則回傳 None。"""
     stock_name = stock_item[0]
@@ -2291,7 +2313,6 @@ def find_trade_candidate_on_date(
     if strategy_type == STRATEGY_LOWER:
         entry_candidates = iter_entry_signal_lower_candidates(today_ordered, ystats)
         intraday_compare_end = INTRADAY_COMPARE_END_LOWER
-        trade_side = TRADE_SIDE_SHORT
     else:
         return None
 
@@ -2407,7 +2428,7 @@ def collect_trade_candidates(
                 stock_list,
             )
         gate_status = market_start_gate_cache[current_date]
-        if gate_status != GATE_LOWER_PASSED:
+        if gate_status not in (GATE_LOWER_PASSED, GATE_LOWER_LONG_PASSED):
             continue
         strategy_type = STRATEGY_LOWER
 
@@ -2427,6 +2448,11 @@ def collect_trade_candidates(
             index_minute_bars_by_key,
             strategy_type,
             market_reversal_trigger_dt,
+            trade_side=(
+                TRADE_SIDE_LONG
+                if gate_status == GATE_LOWER_LONG_PASSED
+                else TRADE_SIDE_SHORT
+            ),
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -2487,8 +2513,12 @@ def evaluate_candidates(
         trade_side = candidate.get('trade_side', TRADE_SIDE_SHORT)
         market_reversal_trigger_dt = candidate.get('market_reversal_trigger_dt')
         if strategy_type == STRATEGY_LOWER:
-            optimize_loss_percent = OPTIMIZE_LOSS_PER_LOWER
-            optimize_profit_percent = OPTIMIZE_PROFIT_PER_LOWER
+            if trade_side == TRADE_SIDE_LONG:
+                optimize_loss_percent = OPTIMIZE_LOSS_PER_LOWER_LONG
+                optimize_profit_percent = OPTIMIZE_PROFIT_PER_LOWER_LONG
+            else:
+                optimize_loss_percent = OPTIMIZE_LOSS_PER_LOWER
+                optimize_profit_percent = OPTIMIZE_PROFIT_PER_LOWER
         elif strategy_type == STRATEGY_LIMIT_DOWN:
             optimize_loss_percent = OPTIMIZE_LOSS_PER_LIMIT_DOWN
             optimize_profit_percent = OPTIMIZE_PROFIT_PER_LIMIT_DOWN
@@ -2965,12 +2995,14 @@ def main() -> None:
             sys.exit(1)
         if not (
             0 <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
-            < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100
+            < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
+            <= LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD <= 100
         ):
             print(
                 '[ERROR] lower 股票比例門檻須符合 0 <= '
                 'LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < '
-                'LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100',
+                'LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= '
+                'LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD <= 100',
                 file=sys.stderr,
             )
             sys.exit(1)
