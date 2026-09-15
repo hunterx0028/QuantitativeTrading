@@ -10,15 +10,42 @@ import torch
 from torch.utils.data import Dataset
 
 from .storage import read_jsonl
+from .night_futures import load_night_futures
 
 
 PRICE_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
 VOLUME_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4, "X": 5}
 CLOSE_TO_ID = {"D": 0, "N": 1, "U": 2}
 NIGHT_FUTURES_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
+INPUT_ALIGNMENT = "stock_nine_ohlc_next_trading_day_night_v2"
+PRICE_FIELDS = ("open_price", "high_price", "low_price", "close_price")
+
+
+def encode_sequence(rows: list[dict], prediction_date: str, night_by_date: dict[str, int],
+                    atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[list[int]]:
+    """Pair each stock row with the following trading day's dated night bucket.
+
+    Raw feature rows are never mutated. Night values are read by date from the
+    current store so corrections take effect without rebuilding feature files.
+    """
+    dates = [row["date"] for row in rows] + [prediction_date]
+    if any(left >= right for left, right in zip(dates, dates[1:])):
+        raise ValueError("股票序列與預測日期必須嚴格遞增")
+    encoded = []
+    for index, row in enumerate(rows):
+        night_date = dates[index + 1]
+        if index + 1 < len(rows) and rows[index + 1].get("previous_date") != row["date"]:
+            raise ValueError("歷史特徵缺少連續交易日或 previous_date；請重新執行 prepare_features")
+        if night_date not in night_by_date:
+            raise ValueError(f"找不到 {night_date} 開盤前的夜盤資料，請先匯入")
+        encoded.append(encode_state({**row, "night_futures": night_by_date[night_date]}, atr_boundaries_pct))
+    return encoded
 
 
 def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int]:
+    missing = [field for field in PRICE_FIELDS if field not in row]
+    if missing:
+        raise ValueError(f"特徵缺少開高低收欄位 {', '.join(missing)}；請重新執行 prepare_features")
     if "atr_ratio" not in row:
         raise ValueError("特徵缺少 ATR(14)，請先重新執行 prepare_features")
     if "night_futures" not in row:
@@ -27,7 +54,7 @@ def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int
     if not math.isfinite(atr_ratio) or atr_ratio < 0:
         raise ValueError("atr_ratio 必須是有限且非負的數值")
     return [
-        PRICE_TO_ID[row["price"]],
+        *(PRICE_TO_ID[row[field]] for field in PRICE_FIELDS),
         int(bool(row["hit_up"])),
         int(bool(row["hit_down"])),
         CLOSE_TO_ID[row["close_limit"]],
@@ -35,15 +62,6 @@ def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int
         bisect_right(atr_boundaries_pct, atr_ratio * 100),
         NIGHT_FUTURES_TO_ID[row["night_futures"]],
     ]
-
-
-def target_intraday_up_1plus(row: dict) -> bool:
-    if "intraday_up_1plus" not in row:
-        raise ValueError(
-            "特徵缺少 intraday_up_1plus，請先重新執行 prepare_features；"
-            "此目標代表目標日盤中 high 曾達 price bucket 1 或 2"
-        )
-    return bool(row["intraday_up_1plus"])
 
 
 @dataclass(frozen=True)
@@ -63,6 +81,7 @@ class StockSequenceDataset(Dataset):
     ):
         self.context_days = context_days
         self.atr_boundaries_pct = atr_boundaries_pct
+        self.night_by_date = load_night_futures()
         cutoff = max_target_date.isoformat() if max_target_date else None
         self.rows_by_path = {
             path: [
@@ -77,6 +96,13 @@ class StockSequenceDataset(Dataset):
             for end in range(context_days, len(rows)):
                 if floor is not None and rows[end]["date"] < floor:
                     continue
+                window = rows[end - context_days:end + 1]
+                if any("previous_date" not in row for row in window[1:]):
+                    raise ValueError("特徵缺少 previous_date；請重新執行 prepare_features")
+                if any(right["previous_date"] != left["date"] for left, right in zip(window, window[1:])):
+                    continue
+                if any(row["date"] not in self.night_by_date for row in window[1:]):
+                    continue
                 self.refs.append(SequenceRef(path, end))
 
     def __len__(self) -> int:
@@ -86,17 +112,12 @@ class StockSequenceDataset(Dataset):
         ref = self.refs[index]
         rows = self.rows_by_path[ref.feature_path]
         inputs = torch.tensor(
-            [encode_state(row, self.atr_boundaries_pct) for row in rows[ref.end - self.context_days:ref.end]],
+            encode_sequence(rows[ref.end - self.context_days:ref.end], rows[ref.end]["date"],
+                            self.night_by_date, self.atr_boundaries_pct),
             dtype=torch.long,
         )
-        target = encode_state(rows[ref.end], self.atr_boundaries_pct)
-        # target[6] is the target day's OWN night-futures bucket (the session
-        # immediately before that day's own open) — known before that day's
-        # market opens, not leakage, but not part of the context sequence
-        # either since it belongs to the day being predicted, not a past day.
-        target_night_futures = torch.tensor(target[6], dtype=torch.long)
-        return inputs, target_night_futures, {
-            "intraday_up_1plus": torch.tensor(target_intraday_up_1plus(rows[ref.end]), dtype=torch.long),
+        return inputs, {
+            "high_price": torch.tensor(PRICE_TO_ID[rows[ref.end]["high_price"]], dtype=torch.long),
         }
 
 
@@ -107,6 +128,7 @@ def subset(dataset: StockSequenceDataset, refs: list[SequenceRef]) -> StockSeque
     view = StockSequenceDataset.__new__(StockSequenceDataset)
     view.context_days = dataset.context_days
     view.atr_boundaries_pct = dataset.atr_boundaries_pct
+    view.night_by_date = dataset.night_by_date
     view.rows_by_path = dataset.rows_by_path
     view.refs = refs
     return view

@@ -16,7 +16,9 @@ from .paths import (
     ensure_runtime_dirs,
 )
 from .checkpoint_gate import compute_gate_status, save_gate_status
-from .predict import SignalThresholds, build_signal_thresholds, detect_signal
+from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds, add_signal_arguments,
+                      build_signal_thresholds, detect_signal, probabilities, predicted_class, sorted_signals)
+from .classification_metrics import rates, matrix_metrics
 from .storage import write_jsonl
 
 
@@ -24,8 +26,6 @@ def run_validation(
     prediction_date: str,
     settings: Settings,
     thresholds: SignalThresholds,
-    target_profit_pct: float = 3.0,
-    max_adverse_pct: float = 2.0,
     prediction_path: Path | None = None,
     update_gate: bool = True,
 ) -> dict:
@@ -39,6 +39,8 @@ def run_validation(
         raise RuntimeError(f"找不到預測檔: {prediction_path}")
 
     payload = json.loads(prediction_path.read_text(encoding="utf-8"))
+    if payload.get("output_schema") != OUTPUT_SCHEMA:
+        raise ValueError("預測檔不是 high_price 五分類版本，請重新預測")
     predictions = payload.get("predictions", [])
     naive_baseline = payload.get("naive_baseline")
     actual_states, actual_candles = load_actuals(predictions, prediction_date, settings)
@@ -48,9 +50,7 @@ def run_validation(
         actual_states,
         actual_candles,
         thresholds,
-        target_profit_pct,
-        max_adverse_pct,
-        naive_baseline,
+        naive_baseline=naive_baseline,
     )
     write_evaluation(prediction_date, summary)
     if update_gate:
@@ -65,13 +65,8 @@ def main() -> None:
     parser.add_argument("--prediction-date", required=True, help="要驗證的預測日期 YYYY-MM-DD")
     parser.add_argument("--predictions", default=None, help="預測 JSON 路徑，預設使用 predictions/<date>.json")
     parser.add_argument("--settings", default=None)
-    parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-up-threshold", type=float, default=None)
-    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
-    parser.add_argument("--target-profit-pct", type=float, default=3.0)
-    parser.add_argument("--max-adverse-pct", type=float, default=2.0)
+    add_signal_arguments(parser, saved_defaults=True)
     args = parser.parse_args()
-    thresholds = build_signal_thresholds(args)
 
     prediction_date = date.fromisoformat(args.prediction_date).isoformat()
     prediction_path = PREDICTIONS_DIR / f"{prediction_date}.json"
@@ -79,13 +74,13 @@ def main() -> None:
         provided_path = Path(args.predictions)
         prediction_path = provided_path if provided_path.is_absolute() else PREDICTIONS_DIR / provided_path
 
+    payload = json.loads(prediction_path.read_text(encoding="utf-8"))
+    thresholds = build_signal_thresholds(args, payload.get("signal_thresholds"))
     settings = Settings.load(args.settings) if args.settings else Settings.load()
     run_validation(
         prediction_date,
         settings,
         thresholds,
-        args.target_profit_pct,
-        args.max_adverse_pct,
         prediction_path=prediction_path,
     )
 
@@ -148,130 +143,55 @@ _LOG_LOSS_FLOOR = 1e-9  # clamp so a near-zero predicted probability gives a lar
 
 
 def print_summary(
-    predictions: list[dict],
-    actual_states: dict[str, DailyState],
-    actual_candles: list[dict],
-    thresholds: SignalThresholds,
-    target_profit_pct: float,
-    max_adverse_pct: float,
-    naive_baseline: dict | None = None,
-) -> dict:
-    evaluated = 0
-    target_hits = 0
-    target_tp = target_fp = target_fn = 0
-    actual_target_true = 0
-    target_log_loss_sum = 0.0
-    baseline_target_log_loss_sum = 0.0
-    signal_rows: list[tuple[dict, dict, DailyState, dict]] = []
-    signal_results: list[dict] = []
-    actual_candles_by_symbol = {row["symbol"]: row for row in actual_candles}
-
+    predictions, actual_states, actual_candles, thresholds,
+    naive_baseline=None,
+):
+    matrix = [[0] * 5 for _ in range(5)]
+    distribution = {str(c): 0 for c in CLASSES}
+    tp = fp = fn = 0
+    loss = baseline_loss = 0.0
+    signals = []
     for prediction in predictions:
-        symbol = prediction["symbol"]
-        actual = actual_states.get(symbol)
+        values = probabilities(prediction)
+        actual = actual_states.get(prediction["symbol"])
         if actual is None:
             continue
-        evaluated += 1
-        actual_target = actual.intraday_up_1plus
-        actual_target_true += int(actual_target)
-        predicted_target = prediction["intraday_up_1plus"]["T"] >= prediction["intraday_up_1plus"]["F"]
-
-        target_ok = predicted_target == actual_target
-        target_hits += int(target_ok)
-
-        # Cross-entropy of the model's own predicted probabilities against what
-        # actually happened, alongside the same score for a fixed baseline
-        # distribution — unlike argmax accuracy, this rewards a model whose
-        # probabilities are well-calibrated even when the argmax is wrong, so
-        # it can tell "genuinely no signal" apart from "argmax got unlucky".
-        target_key = "true" if actual_target else "false"
-        target_log_loss_sum += -math.log(
-            max(prediction["intraday_up_1plus"]["T" if actual_target else "F"], _LOG_LOSS_FLOOR)
-        )
+        label = actual.high_price
+        guess = predicted_class(values)
+        matrix[CLASSES.index(label)][CLASSES.index(guess)] += 1
+        distribution[str(label)] += 1
+        loss -= math.log(max(values[str(label)], _LOG_LOSS_FLOOR))
         if naive_baseline:
-            baseline_target_log_loss_sum += -math.log(
-                _smoothed_probability(naive_baseline["intraday_up_1plus_counts"], target_key, 2)
-            )
-
-        target_signal = prediction["intraday_up_1plus"]["T"] >= thresholds.long_intraday_up_1plus
-        target_tp += int(target_signal and actual_target)
-        target_fp += int(target_signal and not actual_target)
-        target_fn += int(not target_signal and actual_target)
-
+            baseline_loss -= math.log(_smoothed_probability(naive_baseline["high_price_counts"], str(label), 5))
         signal = detect_signal(prediction, thresholds)
+        selected_actual = label in thresholds.classes
+        tp += int(signal is not None and selected_actual)
+        fp += int(signal is not None and not selected_actual)
+        fn += int(signal is None and selected_actual)
         if signal:
-            candle = actual_candles_by_symbol[symbol]
-            trade = evaluate_signal_trade(signal, candle, target_profit_pct, max_adverse_pct)
-            signal_rows.append((prediction, signal, actual, trade))
-            signal_results.append({
-                **signal, **trade,
-                "actual_price": actual.price,
-                "actual_intraday_up_1plus": trade["actual_intraday_up_1plus"],
-            })
-
-    target_recall, target_precision = _recall_precision(target_tp, target_fp, target_fn)
-
+            signals.append({**signal, "actual_high_price": label, "success": selected_actual})
+    evaluated = sum(distribution.values())
+    metrics = matrix_metrics(matrix)
+    selected = rates(tp, fp, fn)
     print(f"驗證筆數: {evaluated}/{len(predictions)}")
-    if evaluated:
-        print(f"intraday_up_1plus 命中率: {target_hits}/{evaluated} = {target_hits / evaluated:.2%}")
-        print(
-            f"intraday_up_1plus @ long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}: "
-            f"recall={_format_rate(target_recall)}({target_tp}/{target_tp + target_fn}) "
-            f"precision={_format_rate(target_precision)}({target_tp}/{target_tp + target_fp})"
-        )
-
-    print(
-        "漲跌訊號 "
-        f"long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}, "
-        f"target_profit >= {target_profit_pct:.2f}%, max_adverse <= {max_adverse_pct:.2f}%: "
-        f"{len(signal_rows)}"
-    )
-    for prediction, signal, actual, trade in signal_rows:
-        print(
-            f"[SIGNAL {signal['side']}] {signal['symbol']} "
-            f"{signal['target_key']}={signal['target_probability']:.4f} | "
-            f"actual_intraday_up_1plus={trade['actual_intraday_up_1plus']} actual_price={actual.price} | "
-            f"O={trade['open']} H={trade['high']} L={trade['low']} C={trade['close']} | "
-            f"best={trade['best_profit_pct']:.2f}% close={trade['close_profit_pct']:.2f}% "
-            f"adverse={trade['adverse_pct']:.2f}% success={trade['success']}"
-        )
+    print(f"high_price 五分類準確率: {_format_rate(metrics['accuracy'])}")
+    for c, metric in metrics["per_class"].items():
+        print(f"high_price={c}: precision={_format_rate(metric['precision'])} "
+              f"recall={_format_rate(metric['recall'])} support={metric['support']}")
+    print(f"所選刻度 {thresholds.classes}，合計門檻 {thresholds.threshold_pct:g}%: "
+          f"precision={_format_rate(selected['precision'])} recall={_format_rate(selected['recall'])}")
     return {
-        "prediction_date": next((item["prediction_date"] for item in predictions), None),
-        "evaluated": evaluated,
-        "total_predictions": len(predictions),
+        "output_schema": OUTPUT_SCHEMA,
+        "prediction_date": next((p["prediction_date"] for p in predictions), None),
+        "evaluated": evaluated, "total_predictions": len(predictions),
         "signal_thresholds": thresholds.signal_values(),
-        "target_profit_pct": target_profit_pct,
-        "max_adverse_pct": max_adverse_pct,
-        "accuracy": {
-            "intraday_up_1plus": target_hits / evaluated if evaluated else None,
-        },
-        # Raw counts alongside the rates above so callers pooling accuracy across
-        # many days (e.g. a walk-forward backtest) can weight by daily volume
-        # instead of averaging already-divided per-day rates.
-        "accuracy_counts": {
-            "intraday_up_1plus": target_hits, "evaluated": evaluated,
-        },
-        # Actual outcome distribution for the day, independent of what was predicted.
-        # Lets a caller score a naive constant-guess baseline (e.g. "always False")
-        # without needing every symbol's raw actual value.
-        "actual_distribution": {
-            "evaluated": evaluated,
-            "intraday_up_1plus_true": actual_target_true,
-        },
-        # Sums (not per-day averages) of cross-entropy against the true label,
-        # for the model's own predicted probabilities and, when a training-window
-        # naive_baseline was supplied, for that fixed baseline distribution too.
-        # Divide by `evaluated` for a day's mean; sum across days before dividing
-        # by total evaluated to pool correctly across many days.
-        "log_loss_sum": {
-            "intraday_up_1plus": target_log_loss_sum,
-            "baseline_intraday_up_1plus": baseline_target_log_loss_sum if naive_baseline else None,
-        },
-        "signal_recall_precision": {
-            "intraday_up_1plus": {"recall": target_recall, "precision": target_precision,
-                                  "tp": target_tp, "fp": target_fp, "fn": target_fn},
-        },
-        "signals": signal_results,
+        "accuracy": {"high_price": metrics["accuracy"]},
+        "accuracy_counts": {"high_price": sum(matrix[i][i] for i in range(5)), "evaluated": evaluated},
+        "classification": metrics,
+        "actual_distribution": {"evaluated": evaluated, "high_price_counts": distribution},
+        "log_loss_sum": {"high_price": loss, "baseline_high_price": baseline_loss if naive_baseline else None},
+        "signal_recall_precision": {"high_price": selected},
+        "signals": sorted_signals(signals),
     }
 
 
@@ -283,35 +203,6 @@ def _recall_precision(tp: int, fp: int, fn: int) -> tuple[float | None, float | 
 
 def _format_rate(value: float | None) -> str:
     return f"{value:.2%}" if value is not None else "N/A"
-
-
-def evaluate_signal_trade(
-    signal: dict,
-    candle: dict,
-    target_profit_pct: float,
-    max_adverse_pct: float,
-) -> dict:
-    if signal["side"] != "LONG":
-        raise ValueError("交易評估只接受 LONG（intraday_up_1plus 是唯一預測目標）")
-    open_price = float(candle["open"])
-    high = float(candle["high"])
-    low = float(candle["low"])
-    close = float(candle["close"])
-    best_profit_pct = (high - open_price) / open_price * 100.0
-    close_profit_pct = (close - open_price) / open_price * 100.0
-    adverse_pct = (open_price - low) / open_price * 100.0
-    actual_intraday_up_1plus = bool(candle["actual_state"]["intraday_up_1plus"])
-    return {
-        "open": open_price,
-        "high": high,
-        "low": low,
-        "close": close,
-        "best_profit_pct": best_profit_pct,
-        "close_profit_pct": close_profit_pct,
-        "adverse_pct": adverse_pct,
-        "actual_intraday_up_1plus": actual_intraday_up_1plus,
-        "success": best_profit_pct >= target_profit_pct and adverse_pct <= max_adverse_pct,
-    }
 
 
 def write_evaluation(prediction_date: str, summary: dict) -> None:

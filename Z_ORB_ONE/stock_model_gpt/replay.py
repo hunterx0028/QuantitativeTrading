@@ -10,7 +10,7 @@ from .dataset import StockSequenceDataset
 
 def _is_hit_day(dataset: StockSequenceDataset, ref) -> bool:
     row = dataset.rows_by_path[ref.feature_path][ref.end]
-    return bool(row.get("intraday_up_1plus"))
+    return row["high_price"] in (1, 2)
 
 
 def _weighted_sample(rng: random.Random, refs: list, weights: list[float], k: int) -> list:
@@ -61,7 +61,7 @@ def select_daily_sequences(dataset: StockSequenceDataset, previous_as_of: str,
     else:
         budget = min(math.ceil(len(new_refs) * settings.daily_replay_ratio),
                      settings.daily_replay_max_sequences)
-                # Weighted samples per stock (intraday_up_1plus days oversampled), then
+                # Weighted samples per stock (high_price 1/2 days oversampled), then
         # round-robin to avoid large histories dominating.
         pools = {
             symbol: _weighted_sample(

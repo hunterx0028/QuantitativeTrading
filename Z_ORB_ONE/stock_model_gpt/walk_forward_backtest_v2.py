@@ -18,9 +18,8 @@ Design, in contrast to `walk_forward_backtest.py` / `walk_forward_backtest_resum
   replay-sampled recent history) instead of standing still.
 - Evaluation ignores the target-profit/max-adverse trade simulation entirely.
   It only pools `validate_predictions.py`'s `accuracy` and
-  `signal_recall_precision` for intraday_up_1plus across days, rather than one
-  blended "signal success rate". The model predicts whether the next day's high
-  reaches price bucket 1 or 2; price/hit_up/hit_down remain historical inputs.
+  `signal_recall_precision` for high_price across days, rather than one
+  blended "signal success rate". The model predicts the next day's high-price bucket across all five classes.
 
 All predict/validate/train steps run in-process (direct function calls, not
 `python -m module` subprocesses) because the day-by-day design multiplies the
@@ -40,6 +39,9 @@ carry a look-ahead/survivorship bias relative to what a live deployment
 starting at that historical date would actually have seen.
 """
 from __future__ import annotations
+
+from .signals import OUTPUT_SCHEMA, add_signal_arguments
+from .classification_metrics import matrix_metrics, pool_matrices
 
 import argparse
 import json
@@ -80,9 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-as-of", default=None, help="限制回測不使用晚於此日期的資料 YYYY-MM-DD")
     parser.add_argument("--settings", default=None, help="傳給 train/predict/validate 的 settings 路徑")
     parser.add_argument("--restart", action="store_true", help="忽略既有進度，從第一天重跑；會覆寫 prediction/evaluation")
-    parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-up-threshold", type=float, default=None)
-    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
+    add_signal_arguments(parser)
     return parser.parse_args()
 
 
@@ -152,6 +152,9 @@ def main() -> None:
     )
 
     progress = None if args.restart else _read_json(progress_path)
+    if progress and (progress.get("output_schema") != OUTPUT_SCHEMA
+                     or progress.get("signal_thresholds") != thresholds.signal_values()):
+        raise ValueError("回測進度的輸出版本或篩選條件不同，請使用新的 output-dir")
     days_done: list[dict[str, Any]] = list((progress or {}).get("days", []))
     resume_index = len(days_done)
     current_checkpoint = CHECKPOINT_DIR / days_done[-1]["checkpoint"] if days_done else None
@@ -159,6 +162,8 @@ def main() -> None:
     def write_progress(status: str) -> None:
         _atomic_write_json(progress_path, {
             "status": status,
+            "output_schema": OUTPUT_SCHEMA,
+            "signal_thresholds": thresholds.signal_values(),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             "output_dir": str(output_dir),
             "training_window_days": args.training_window_days,
@@ -204,11 +209,9 @@ def main() -> None:
         # Score a same-day, no-lookahead "always guess the majority class from
         # the model's own training window" baseline, so accuracy above can be
         # read against "better than guessing nothing" instead of in isolation.
-        baseline_target = naive_baseline.get("majority_intraday_up_1plus") if naive_baseline else None
-        baseline_target_hits = (
-            actual_dist["intraday_up_1plus_true"] if baseline_target == "true"
-            else actual_dist["evaluated"] - actual_dist["intraday_up_1plus_true"]
-        )
+        baseline_target = naive_baseline.get("majority_high_price") if naive_baseline else None
+        baseline_target_hits = actual_dist["high_price_counts"].get(str(baseline_target), 0)
+
 
         days_done.append({
             "index": index,
@@ -217,18 +220,19 @@ def main() -> None:
             "reseeded": reseed,
             "checkpoint": checkpoint_path.name,
             "evaluated": counts["evaluated"],
-            "intraday_up_1plus_hits": counts["intraday_up_1plus"],
-            "intraday_up_1plus": summary["signal_recall_precision"]["intraday_up_1plus"],
-            "naive_baseline_intraday_up_1plus": baseline_target,
-            "baseline_intraday_up_1plus_hits": baseline_target_hits,
+            "classification": summary["classification"],
+            "high_price_hits": counts["high_price"],
+            "high_price": summary["signal_recall_precision"]["high_price"],
+            "naive_baseline_high_price": baseline_target,
+            "baseline_high_price_hits": baseline_target_hits,
             "log_loss_sum": summary["log_loss_sum"],
             "in_sample_loss": in_sample_loss,
         })
         write_progress("running")
 
     total_evaluated = sum(day["evaluated"] for day in days_done)
-    total_target_hits = sum(day["intraday_up_1plus_hits"] for day in days_done)
-    total_baseline_target_hits = sum(day["baseline_intraday_up_1plus_hits"] for day in days_done)
+    total_target_hits = sum(day["high_price_hits"] for day in days_done)
+    total_baseline_target_hits = sum(day["baseline_high_price_hits"] for day in days_done)
 
     def _mean_log_loss(field: str) -> float | None:
         total = sum(
@@ -248,8 +252,8 @@ def main() -> None:
                         "log-loss 不會像 accuracy 那樣直接算全錯。baseline 用的是同一次訓練視窗的固定"
                         "類別機率分佈（不看當天輸入），兩者可以直接比大小：模型如果比 baseline 低，"
                         "代表機率分佈上真的學到條件訊號；就算 accuracy 追不上 baseline，這裡贏了也算數。",
-        "intraday_up_1plus": _mean_log_loss("intraday_up_1plus"),
-        "baseline_intraday_up_1plus": _mean_log_loss("baseline_intraday_up_1plus"),
+        "high_price": _mean_log_loss("high_price"),
+        "baseline_high_price": _mean_log_loss("baseline_high_price"),
     }
 
     def _mean_in_sample_loss(field: str) -> float | None:
@@ -270,9 +274,11 @@ def main() -> None:
                         "跟上面 log_loss 的 model 數字（隔天、out-of-sample）對照："
                         "如果 in-sample 壓得很低、out-of-sample 卻沒有跟著低，就是過擬合的訊號"
                         "——模型把訓練視窗裡的雜訊背起來，但沒有學到能類推到隔天的東西。",
-        "intraday_up_1plus": _mean_in_sample_loss("intraday_up_1plus"),
+        "high_price": _mean_in_sample_loss("high_price"),
     }
     report = {
+        "output_schema": OUTPUT_SCHEMA,
+        "signal_thresholds": thresholds.signal_values(),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "trading_calendar_days": len(calendar),
         "backtest_days": len(steps),
@@ -284,15 +290,16 @@ def main() -> None:
         "days": days_done,
         "overall": {
             "evaluated": total_evaluated,
-            "intraday_up_1plus_accuracy": total_target_hits / total_evaluated if total_evaluated else None,
-            "intraday_up_1plus": _pool(days_done, "intraday_up_1plus"),
+            "high_price_accuracy": total_target_hits / total_evaluated if total_evaluated else None,
+            "high_price": _pool(days_done, "high_price"),
+            "classification": matrix_metrics(pool_matrices([day["classification"]["confusion_matrix"] for day in days_done])),
             "log_loss": log_loss,
             "in_sample_loss": in_sample_loss,
             "naive_baseline": {
-                "description": "每日用該次訓練視窗的多數類別（intraday_up_1plus 多數類別）"
+                "description": "每日用該次訓練視窗的多數類別（high_price 多數類別）"
                                 "當作固定猜測，跟真正模型的準確率做對照，藉此判斷模型是否"
                                 "真的學到東西、還是連瞎猜多數類別都比不上。",
-                "intraday_up_1plus_accuracy": total_baseline_target_hits / total_evaluated if total_evaluated else None,
+                "high_price_accuracy": total_baseline_target_hits / total_evaluated if total_evaluated else None,
             },
         },
         "caveat": (
@@ -301,7 +308,7 @@ def main() -> None:
             "會偏樂觀（look-ahead / survivorship bias）。滾動訓練視窗已避免「訓練資料無限往回累積」"
             "這個問題，但不會消除這條 universe 偏誤。"
             "此報告不含停損/停利交易模擬（target_profit/max_adverse），"
-            "只比較 intraday_up_1plus 這項預測本身跟實際值（price、hit_up、hit_down 留作歷史輸入特徵）。"
+            "只比較 high_price 這項預測本身跟實際值（開高低收、hit_up、hit_down 留作歷史輸入特徵）。"
         ),
     }
     report_path = output_dir / REPORT_FILENAME
@@ -309,17 +316,17 @@ def main() -> None:
     write_progress("completed")
     print(f"=== 完成，共 {len(steps)} 個交易日，{report['reseed_count']} 次重新訓練 ===")
     print(
-        f"intraday_up_1plus 準確率: {total_target_hits}/{total_evaluated} = "
-        f"{report['overall']['intraday_up_1plus_accuracy']} "
-        f"(naive baseline={report['overall']['naive_baseline']['intraday_up_1plus_accuracy']})"
+        f"high_price 準確率: {total_target_hits}/{total_evaluated} = "
+        f"{report['overall']['high_price_accuracy']} "
+        f"(naive baseline={report['overall']['naive_baseline']['high_price_accuracy']})"
     )
     print(
-        "intraday_up_1plus log-loss: "
-        f"model={log_loss['intraday_up_1plus']} baseline={log_loss['baseline_intraday_up_1plus']}"
+        "high_price log-loss: "
+        f"model={log_loss['high_price']} baseline={log_loss['baseline_high_price']}"
     )
     print(
-        f"intraday_up_1plus in-sample loss={in_sample_loss['intraday_up_1plus']} "
-        f"(跟上面 out-of-sample log-loss={log_loss['intraday_up_1plus']} 對照)"
+        f"high_price in-sample loss={in_sample_loss['high_price']} "
+        f"(跟上面 out-of-sample log-loss={log_loss['high_price']} 對照)"
     )
     print(f"報告已儲存: {report_path}")
     print(f"進度已儲存: {progress_path}")

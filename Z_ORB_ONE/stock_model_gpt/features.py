@@ -16,8 +16,10 @@ ATR_PERIOD = 14
 @dataclass(frozen=True)
 class DailyState:
     date: str
-    price: int
-    intraday_up_1plus: bool
+    open_price: int
+    high_price: int
+    low_price: int
+    close_price: int
     hit_up: bool
     hit_down: bool
     close_limit: str
@@ -25,6 +27,7 @@ class DailyState:
     atr: float
     atr_ratio: float
     night_futures: int
+    previous_date: str
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -141,7 +144,7 @@ def encode_candles(
     for index in range(max(warmup_days, ATR_PERIOD), len(rows)):
         row = rows[index]
         # TX night session only exists from 2017-05-15 onward; a date without
-        # coverage here simply can't produce a state for this 7-input model,
+        # coverage here simply can't produce a state for this 10-input model,
         # same as a date without enough ATR/volume warmup can't either — skip
         # rather than guessing a "flat" bucket for missing data.
         night_futures = night_futures_by_date.get(row["date"])
@@ -166,8 +169,10 @@ def encode_candles(
         states.append(
             DailyState(
                 date=row["date"],
-                price=price_bucket(reference_price, close),
-                intraday_up_1plus=high_bucket in (1, 2),
+                open_price=price_bucket(reference_price, float(row["open"])),
+                high_price=high_bucket,
+                low_price=price_bucket(reference_price, float(row["low"])),
+                close_price=price_bucket(reference_price, close),
                 hit_up=float(row["high"]) >= limit_up,
                 hit_down=float(row["low"]) <= limit_down,
                 close_limit=close_limit,
@@ -175,6 +180,7 @@ def encode_candles(
                 atr=atr,
                 atr_ratio=atr / close,
                 night_futures=night_futures,
+                previous_date=previous["date"],
             )
         )
     return states

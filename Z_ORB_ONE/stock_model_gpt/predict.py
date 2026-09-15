@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +11,7 @@ import torch
 
 from .checkpoint_gate import load_gate_status
 from .config import Settings
-from .dataset import NIGHT_FUTURES_TO_ID, encode_state
+from .dataset import INPUT_ALIGNMENT, encode_sequence
 from .device import describe_device, select_device
 from .night_futures import load_night_futures
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, PREDICTIONS_DIR, SIGNAL_REPORTS_DIR, ensure_runtime_dirs
@@ -22,12 +21,9 @@ from .universe import load_universe_snapshot
 from .paths import UNIVERSE_DIR
 
 
-@dataclass(frozen=True)
-class SignalThresholds:
-    long_intraday_up_1plus: float = 0.6
-
-    def signal_values(self) -> dict[str, float]:
-        return {"long_intraday_up_1plus": self.long_intraday_up_1plus}
+from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds, add_signal_arguments,
+                      build_signal_thresholds, detect_signal, build_signal_report_lines,
+                      predicted_class, sorted_signals)
 
 
 def latest_checkpoint() -> Path:
@@ -37,11 +33,12 @@ def latest_checkpoint() -> Path:
     return paths[-1]
 
 
-def select_checkpoint_for_prediction() -> Path:
+def select_checkpoint_for_prediction(thresholds: SignalThresholds = SignalThresholds()) -> Path:
     """Auto-select path only; an explicit --checkpoint always bypasses this gate."""
     candidate = latest_checkpoint()
     status = load_gate_status()
-    if status is not None and status["verdict"] == "DEGRADED":
+    if (status is not None and status.get("signal_thresholds") == thresholds.signal_values()
+            and status["verdict"] == "DEGRADED"):
         raise RuntimeError(
             f"checkpoint gate 判定近期訊號表現明顯退化（{status['reason']}），"
             f"拒絕自動使用最新 checkpoint {candidate.name}；"
@@ -105,22 +102,16 @@ def run_prediction(
     model = build_model(settings).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    # The night session immediately before `prediction_date`'s own open — known
-    # before that day's market opens (not leakage), but not part of any day in
-    # the context sequence since it belongs to the day being predicted, not a
-    # past day. Required, same as every other night-futures lookup: fail loud
-    # rather than silently predicting without it.
+    # Latest night data fills column ten of the final stock row.
     prediction_date_str = prediction_date.isoformat()
-    target_night_futures_bucket = load_night_futures().get(prediction_date_str)
-    if target_night_futures_bucket is None:
+    night_by_date = load_night_futures()
+    prediction_night_bucket = night_by_date.get(prediction_date_str)
+    if prediction_night_bucket is None:
         raise RuntimeError(
             f"找不到 {prediction_date_str} 開盤前的夜盤資料；"
             f"請先用 set_night_futures.py（或 import_night_futures.py）匯入 {prediction_date_str} 這筆，"
             "再重新預測——這是被預測日當天的必要輸入，不能省略"
         )
-    target_night_futures = torch.tensor(
-        [NIGHT_FUTURES_TO_ID[target_night_futures_bucket]], dtype=torch.long, device=device,
-    )
     universe_path = UNIVERSE_DIR / f"{universe_date.isoformat()}.json"
     if not universe_path.exists():
         raise RuntimeError(f"找不到當日股票清單快照: {universe_path}")
@@ -142,23 +133,25 @@ def run_prediction(
     with torch.no_grad():
         for symbol, rows in eligible.items():
             states = torch.tensor(
-                [[encode_state(row, settings.atr_boundaries_pct) for row in rows[-settings.context_days:]]],
+                [encode_sequence(rows, prediction_date_str, night_by_date, settings.atr_boundaries_pct)],
                 dtype=torch.long,
                 device=device,
             )
-            outputs = model(states, target_night_futures)
+            outputs = model(states)
             probabilities = {key: torch.softmax(value, dim=-1)[0].cpu().tolist() for key, value in outputs.items()}
             prediction = {
                 "symbol": symbol,
                 "prediction_date": prediction_date.isoformat(),
                 "input_last_date": rows[-1]["date"],
                 "checkpoint": checkpoint_path.name,
-                "intraday_up_1plus": _probabilities(probabilities["intraday_up_1plus"]),
+                "high_price": _probabilities(probabilities["high_price"]),
+                "predicted_class": CLASSES[max(range(5), key=lambda i: probabilities["high_price"][i])],
             }
             predictions.append(prediction)
             signal = detect_signal(prediction, thresholds)
             if signal:
                 signals.append(signal)
+    signals = sorted_signals(signals)
     naive_baseline = checkpoint.get("naive_baseline")
     # The checkpoint's own last-epoch, in-sample (training-window) unweighted
     # loss per target — surfaced alongside the prediction so a caller such as a
@@ -172,7 +165,10 @@ def run_prediction(
                "predicted_count": len(predictions), "skipped": skipped,
                "signal_thresholds": thresholds.signal_values(),
                "atr_boundaries_pct": settings.atr_boundaries_pct,
-               "target_night_futures_bucket": target_night_futures_bucket,
+               "night_futures_date": prediction_date_str,
+               "night_futures_bucket": prediction_night_bucket,
+               "input_alignment": INPUT_ALIGNMENT,
+               "output_schema": OUTPUT_SCHEMA,
                "naive_baseline": naive_baseline,
                "in_sample_loss": in_sample_loss,
                "signals": signals}
@@ -193,68 +189,14 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--prediction-date", default=date.today().isoformat())
     parser.add_argument("--universe-date", default=date.today().isoformat())
-    parser.add_argument("--signal-threshold", type=float, default=0.6)
-    parser.add_argument("--long-up-threshold", type=float, default=None)
-    parser.add_argument("--long-hit-threshold", type=float, default=None, help="舊參數名，等同 --long-up-threshold")
+    add_signal_arguments(parser)
     args = parser.parse_args()
     thresholds = build_signal_thresholds(args)
     universe_date = date.fromisoformat(args.universe_date)
     prediction_date = date.fromisoformat(args.prediction_date)
     ensure_runtime_dirs()
-    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction()
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction(thresholds)
     run_prediction(checkpoint_path, universe_date, prediction_date, thresholds)
-
-
-def build_signal_report_lines(
-    prediction_date: date,
-    thresholds: SignalThresholds,
-    signals: list[dict],
-) -> list[str]:
-    lines = [
-        f"prediction_date={prediction_date.isoformat()}",
-    ]
-    if signals:
-        lines.append(f"符合訊號門檻: long_intraday_up_1plus>={thresholds.long_intraday_up_1plus:.2f}")
-        for signal in signals:
-            lines.append(
-                f"[{signal['side']}] {signal['symbol']} "
-                f"prediction_date={signal['prediction_date']} "
-                f"{signal['target_key']}={signal['target_probability']:.4f}"
-            )
-    else:
-        lines.append("沒有符合訊號門檻的標的")
-    return lines
-
-
-def build_signal_thresholds(args) -> SignalThresholds:
-    threshold = args.signal_threshold
-    explicit_threshold = (
-        args.long_up_threshold
-        if getattr(args, "long_up_threshold", None) is not None
-        else getattr(args, "long_hit_threshold", None)
-    )
-    values = SignalThresholds(
-        long_intraday_up_1plus=explicit_threshold if explicit_threshold is not None else threshold,
-    )
-    for name, value in values.__dict__.items():
-        if not 0.0 <= value <= 1.0:
-            raise ValueError(f"{name} threshold 必須介於 0 到 1")
-    return values
-
-
-def detect_signal(prediction: dict, thresholds: SignalThresholds | float = SignalThresholds()) -> dict | None:
-    if isinstance(thresholds, float):
-        thresholds = SignalThresholds(thresholds)
-    long_target = prediction["intraday_up_1plus"]["T"]
-    if long_target < thresholds.long_intraday_up_1plus:
-        return None
-    return {
-        "side": "LONG",
-        "symbol": prediction["symbol"],
-        "prediction_date": prediction["prediction_date"],
-        "target_key": "intraday_up_1plus.T",
-        "target_probability": long_target,
-    }
 
 
 def dumps_json_no_scientific(value, indent: int = 2) -> str:
@@ -286,7 +228,7 @@ def _format_json_value(value, indent: int, level: int) -> str:
 
 
 def _probabilities(values: list[float]) -> dict[str, float]:
-    return {"F": values[0], "T": values[1]}
+    return {str(c): values[i] for i, c in enumerate(CLASSES)}
 
 
 if __name__ == "__main__":

@@ -5,15 +5,13 @@ from torch import nn
 
 
 class StockAutoregressiveModel(nn.Module):
-    """每個 timestep 是一天；輸出為隔日 intraday_up_1plus 一項交易核心狀態。
-    intraday_up_1plus 代表目標日盤中 high 曾達 price bucket 1 或 2。
-    price、hit_up、hit_down 仍是輸入之一，只是不再是預測目標。
-    第 7 項輸入是台指期近月夜盤（相對於前一日盤收盤的漲跌幅五級刻度）。
+    """每個 timestep 是一天；輸出為隔日 high_price 一項交易核心狀態。
+    high_price 為目標日最高價相對交易參考價的五級分類。
+    歷史開高低收等為輸入；唯一目標為下一交易日 high_price。
+    第 10 項輸入是台指期近月夜盤（相對於前一日盤收盤的漲跌幅五級刻度）。
 
-    `target_night_futures` 是另一個獨立輸入，代表「被預測那一天」開盤前的夜盤
-    （不是 context 裡任何一天自己的夜盤）——這個資訊在被預測的那天開盤前就已經
-    知道，不算資訊外洩，但因為它不屬於過去 N 天的歷史序列，不能塞進 causal
-    transformer 的序列輸入，而是在算完 context 的 hidden state 之後直接疊加上去。"""
+    每列為股票日的九項資料，加上下一交易日開盤前的夜盤刻度。
+    最新夜盤直接放在序列最後一列的第十欄，沒有獨立夜盤輸入。"""
 
     def __init__(
         self,
@@ -25,14 +23,16 @@ class StockAutoregressiveModel(nn.Module):
     ):
         super().__init__()
         self.context_days = context_days
-        self.price_embedding = nn.Embedding(5, d_model)
+        self.open_price_embedding = nn.Embedding(5, d_model)
+        self.high_price_embedding = nn.Embedding(5, d_model)
+        self.low_price_embedding = nn.Embedding(5, d_model)
+        self.close_price_embedding = nn.Embedding(5, d_model)
         self.hit_up_embedding = nn.Embedding(2, d_model)
         self.hit_down_embedding = nn.Embedding(2, d_model)
         self.close_embedding = nn.Embedding(3, d_model)
         self.volume_embedding = nn.Embedding(6, d_model)
         self.atr_embedding = nn.Embedding(5, d_model)
         self.night_futures_embedding = nn.Embedding(5, d_model)
-        self.target_night_futures_embedding = nn.Embedding(5, d_model)
         self.position_embedding = nn.Embedding(context_days, d_model)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -49,37 +49,34 @@ class StockAutoregressiveModel(nn.Module):
             enable_nested_tensor=False,
         )
         self.norm = nn.LayerNorm(d_model)
-        self.intraday_up_1plus_head = nn.Linear(d_model, 2)
+        self.high_price_head = nn.Linear(d_model, 5)
 
-    def forward(self, states: torch.Tensor, target_night_futures: torch.Tensor) -> dict[str, torch.Tensor]:
-        if states.ndim != 3 or states.shape[-1] != 7:
-            raise ValueError("states shape 必須是 [batch, days, 7]，含 ATR(14) 與夜盤期指")
+    def forward(self, states: torch.Tensor) -> dict[str, torch.Tensor]:
+        if states.ndim != 3 or states.shape[-1] != 10:
+            raise ValueError("states shape 必須是 [batch, days, 10]，含開高低收、ATR(14) 與夜盤期指")
         if states.dtype != torch.long:
-            raise ValueError("七項輸入必須為 torch.long 離散刻度，ATR 不接受連續值")
-        if target_night_futures.ndim != 1 or target_night_futures.shape[0] != states.shape[0]:
-            raise ValueError("target_night_futures shape 必須是 [batch]")
-        if target_night_futures.dtype != torch.long:
-            raise ValueError("target_night_futures 必須為 torch.long 離散刻度")
+            raise ValueError("十項輸入必須為 torch.long 離散刻度，ATR 不接受連續值")
         days = states.shape[1]
         if days > self.context_days:
             raise ValueError(f"輸入 {days} 日超過模型上限 {self.context_days}")
         positions = torch.arange(days, device=states.device)
-        categorical = states[..., :5].long()
         hidden = (
-            self.price_embedding(categorical[..., 0])
-            + self.hit_up_embedding(categorical[..., 1])
-            + self.hit_down_embedding(categorical[..., 2])
-            + self.close_embedding(categorical[..., 3])
-            + self.volume_embedding(categorical[..., 4])
-            + self.atr_embedding(states[..., 5])
-            + self.night_futures_embedding(states[..., 6])
+            self.open_price_embedding(states[..., 0])
+            + self.high_price_embedding(states[..., 1])
+            + self.low_price_embedding(states[..., 2])
+            + self.close_price_embedding(states[..., 3])
+            + self.hit_up_embedding(states[..., 4])
+            + self.hit_down_embedding(states[..., 5])
+            + self.close_embedding(states[..., 6])
+            + self.volume_embedding(states[..., 7])
+            + self.atr_embedding(states[..., 8])
+            + self.night_futures_embedding(states[..., 9])
             + self.position_embedding(positions)[None, :, :]
         )
         causal_mask = torch.triu(
             torch.ones(days, days, device=states.device, dtype=torch.bool), diagonal=1
         )
         hidden = self.norm(self.transformer(hidden, mask=causal_mask)[:, -1, :])
-        hidden = hidden + self.target_night_futures_embedding(target_night_futures)
         return {
-            "intraday_up_1plus": self.intraday_up_1plus_head(hidden),
+            "high_price": self.high_price_head(hidden),
         }

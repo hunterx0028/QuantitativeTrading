@@ -13,16 +13,17 @@ from torch.utils.data import DataLoader
 
 from .config import Settings
 from .atr_calibration import ATR_ENCODING, prepare_atr_levels, validate_five_levels
-from .dataset import StockSequenceDataset, subset
+from .dataset import INPUT_ALIGNMENT, StockSequenceDataset, subset
 from .device import describe_device, move_targets_to_device, select_device
 from .model import StockAutoregressiveModel
+from .signals import CLASSES, OUTPUT_SCHEMA
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, ensure_runtime_dirs
 from .universe import recent_symbols
 from .storage import read_jsonl
 from .replay import select_daily_sequences
 
 
-TARGET_NAMES = ("intraday_up_1plus",)
+TARGET_NAMES = ("high_price",)
 
 
 def seed_everything(seed: int) -> None:
@@ -43,35 +44,21 @@ def build_model(settings: Settings) -> StockAutoregressiveModel:
 
 
 def label_distribution(dataset: StockSequenceDataset) -> dict:
-    """Actual intraday_up_1plus distribution among the dataset's own target rows (the
-    same population it trains on), so a caller can score a trivial "always
-    guess the majority class" baseline against real evaluation days and see
-    whether the model beats doing nothing."""
-    target_counts = {"true": 0, "false": 0}
+    counts = {str(c): 0 for c in CLASSES}
     for ref in dataset.refs:
-        row = dataset.rows_by_path[ref.feature_path][ref.end]
-        target_counts["true" if row["intraday_up_1plus"] else "false"] += 1
-    total = len(dataset.refs)
-    majority_target = "true" if target_counts["true"] > target_counts["false"] else "false"
-    return {
-        "count": total,
-        "intraday_up_1plus_counts": target_counts,
-        "majority_intraday_up_1plus": majority_target,
-    }
+        counts[str(dataset.rows_by_path[ref.feature_path][ref.end]["high_price"])] += 1
+    return {"count": len(dataset), "high_price_counts": counts,
+            "majority_high_price": max(CLASSES, key=lambda c: counts[str(c)])}
 
 
-def binary_class_weight(dataset: StockSequenceDataset, field: str) -> torch.Tensor | None:
-    """Inverse-frequency weight for a binary target."""
-    positives = sum(
-        bool(dataset.rows_by_path[ref.feature_path][ref.end][field]) for ref in dataset.refs
-    )
-    total = len(dataset.refs)
-    negatives = total - positives
-    if positives == 0 or negatives == 0:
+def multiclass_class_weight(dataset: StockSequenceDataset, field: str) -> torch.Tensor | None:
+    counts = label_distribution(dataset)["high_price_counts"]
+    present = sum(count > 0 for count in counts.values())
+    if present <= 1:
         return None
-    return torch.tensor(
-        [total / (2.0 * negatives), total / (2.0 * positives)], dtype=torch.float32,
-    )
+    # Missing classes receive zero weight; they have no training samples.
+    return torch.tensor([len(dataset) / (present * counts[str(c)]) if counts[str(c)] else 0.0
+                         for c in CLASSES], dtype=torch.float32)
 
 
 class FocalLoss(nn.Module):
@@ -99,14 +86,14 @@ def build_criteria(
 ) -> dict[str, nn.Module]:
     criteria: dict[str, nn.Module] = {}
     for field in TARGET_NAMES:
-        weight = binary_class_weight(dataset, field)
+        weight = multiclass_class_weight(dataset, field)
         criteria[field] = FocalLoss(
             gamma=settings.focal_gamma,
             weight=weight.to(device) if weight is not None else None,
         )
         if weight is not None:
             print(
-                f"class_weight {field}: negative={weight[0]:.4f} positive={weight[1]:.4f} "
+                f"class_weight {field}: {dict(zip(CLASSES, weight.tolist()))} "
                 f"focal_gamma={settings.focal_gamma}"
             )
         else:
@@ -120,15 +107,18 @@ def weighted_loss(
     """Returns the (weighted) loss used for backward(), plus the target's raw
     unweighted loss for logging/measurement."""
     components = {
-        "intraday_up_1plus": criteria["intraday_up_1plus"](
-            outputs["intraday_up_1plus"], targets["intraday_up_1plus"]
+        "high_price": criteria["high_price"](
+            outputs["high_price"], targets["high_price"]
         ),
     }
-    combined = settings.loss_intraday_up_1plus * components["intraday_up_1plus"]
+    combined = settings.loss_high_price * components["high_price"]
     return combined, components
 
 
 def ensure_checkpoint_compatible(checkpoint: dict) -> None:
+    head = checkpoint.get("model", {}).get("high_price_head.weight")
+    if (checkpoint.get("output_schema") != OUTPUT_SCHEMA or head is None or head.shape[0] != 5):
+        raise RuntimeError("checkpoint 不是 high_price 五分類模型；請重新執行 train_initial")
     if ("atr_embedding.weight" not in checkpoint.get("model", {})
             or checkpoint.get("atr_encoding") != ATR_ENCODING):
         raise RuntimeError(
@@ -157,16 +147,17 @@ def ensure_checkpoint_compatible(checkpoint: dict) -> None:
             "checkpoint 是舊版含 hit_down 輸出 head 的模型；"
             "請先重新執行 train_initial"
         )
-    if "intraday_up_1plus_head.weight" not in checkpoint.get("model", {}):
+    if "high_price_head.weight" not in checkpoint.get("model", {}):
         raise RuntimeError(
-            "checkpoint 不是 intraday_up_1plus 輸出模型；"
+            "checkpoint 不是 high_price 輸出模型；"
             "請先重新執行 prepare_features 與 train_initial"
         )
-    if "target_night_futures_embedding.weight" not in checkpoint.get("model", {}):
-        raise RuntimeError(
-            "checkpoint 缺少「被預測日當天盤前夜盤」這個獨立輸入"
-            "（target_night_futures_embedding）；請先重新執行 train_initial"
-        )
+    if (checkpoint.get("input_alignment") != INPUT_ALIGNMENT
+            or any(f"{field}_embedding.weight" not in checkpoint.get("model", {})
+                   for field in ("open_price", "high_price", "low_price", "close_price"))
+            or "target_night_futures_embedding.weight" in checkpoint.get("model", {})):
+        raise RuntimeError("checkpoint 不是含開高低收的十項序列模型；請重新執行 prepare_features 與 train_initial")
+
 
 
 def _training_window_floor(
@@ -345,7 +336,7 @@ def train(
     epochs = settings.daily_epochs if daily else settings.epochs
     model.train()
     final_loss = float("nan")
-    final_component_loss = {"intraday_up_1plus": float("nan")}
+    final_component_loss = {"high_price": float("nan")}
     monitored_targets = TARGET_NAMES
     best_val_loss = float("inf")
     best_epoch: int | None = None
@@ -357,10 +348,9 @@ def train(
     component_patience = {name: 0 for name in monitored_targets}
     for epoch in range(epochs):
         total_loss = 0.0
-        total_component_loss = {"intraday_up_1plus": 0.0}
-        for states, target_night_futures, targets in loader:
+        total_component_loss = {"high_price": 0.0}
+        for states, targets in loader:
             states = states.to(device, non_blocking=use_cuda)
-            target_night_futures = target_night_futures.to(device, non_blocking=use_cuda)
             targets = move_targets_to_device(targets, device, non_blocking=use_cuda)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(
@@ -368,7 +358,7 @@ def train(
                 dtype=torch.float16,
                 enabled=use_cuda,
             ):
-                outputs = model(states, target_night_futures)
+                outputs = model(states)
                 loss, _ = weighted_loss(outputs, targets, settings, criteria)
                 # Logged/saved per-target loss uses plain CE (see plain_criteria
                 # above), not the FocalLoss components `loss` was built from.
@@ -388,7 +378,7 @@ def train(
         final_component_loss = {name: value / len(train_dataset) for name, value in total_component_loss.items()}
         log_line = (
             f"epoch={epoch + 1}/{epochs} loss={final_loss:.6f} (加權合計) | 未加權: "
-            f"intraday_up_1plus={final_component_loss['intraday_up_1plus']:.6f}"
+            f"high_price={final_component_loss['high_price']:.6f}"
         )
 
         if not use_validation:
@@ -396,18 +386,17 @@ def train(
             continue
 
         model.eval()
-        val_total_component_loss = {"intraday_up_1plus": 0.0}
+        val_total_component_loss = {"high_price": 0.0}
         with torch.no_grad():
-            for states, target_night_futures, targets in val_loader:
+            for states, targets in val_loader:
                 states = states.to(device, non_blocking=use_cuda)
-                target_night_futures = target_night_futures.to(device, non_blocking=use_cuda)
                 targets = move_targets_to_device(targets, device, non_blocking=use_cuda)
                 with torch.amp.autocast(
                     device_type="cuda",
                     dtype=torch.float16,
                     enabled=use_cuda,
                 ):
-                    outputs = model(states, target_night_futures)
+                    outputs = model(states)
                     # Plain CE here too — see plain_criteria above.
                     plain_components = {
                         name: plain_criteria[name](outputs[name], targets[name]) for name in monitored_targets
@@ -420,7 +409,7 @@ def train(
         # Informational only (not used for any decision below): the same
         # weighted combination training optimizes, but built from the plain
         # per-target loss above rather than a second FocalLoss pass.
-        val_loss = settings.loss_intraday_up_1plus * val_component_loss["intraday_up_1plus"]
+        val_loss = settings.loss_high_price * val_component_loss["high_price"]
         validation_history.append({
             "epoch": epoch + 1, "val_loss": val_loss, "val_components": val_component_loss,
             "train_loss": final_loss, "train_components": final_component_loss,
@@ -428,10 +417,10 @@ def train(
         print(
             log_line
             + f" | validation: loss={val_loss:.6f} "
-            + f"intraday_up_1plus={val_component_loss['intraday_up_1plus']:.6f}"
+            + f"high_price={val_component_loss['high_price']:.6f}"
         )
         # Which epoch's weights to keep is judged by the target's own validation loss.
-        selection_loss = val_component_loss["intraday_up_1plus"]
+        selection_loss = val_component_loss["high_price"]
         if selection_loss < best_val_loss - 1e-6:
             best_val_loss = selection_loss
             best_epoch = epoch + 1
@@ -450,7 +439,7 @@ def train(
             print(
                 f"[EARLY STOP] {'/'.join(stalled_targets)} 連續 {settings.early_stopping_patience} 個 epoch "
                 f"驗證 loss 沒有改善，停在 epoch {epoch + 1}；"
-                f"採用 intraday_up_1plus 驗證 loss 最佳的 epoch {best_epoch}（selection_loss={best_val_loss:.6f}）"
+                f"採用 high_price 驗證 loss 最佳的 epoch {best_epoch}（selection_loss={best_val_loss:.6f}）"
             )
             break
 
@@ -461,7 +450,7 @@ def train(
             for item in validation_history if item["epoch"] == best_epoch
         )
         print(
-            f"採用驗證集最佳權重（依 intraday_up_1plus 挑選）："
+            f"採用驗證集最佳權重（依 high_price 挑選）："
             f"epoch={best_epoch}, selection_loss={best_val_loss:.6f}（訓練總 epoch 上限={epochs}）"
         )
 
@@ -474,6 +463,8 @@ def train(
             "scaler": scaler.state_dict() if use_cuda else None,
             "settings": asdict(settings),
             "target_names": TARGET_NAMES,
+            "output_schema": OUTPUT_SCHEMA,
+            "input_alignment": INPUT_ALIGNMENT,
             "atr_encoding": ATR_ENCODING,
             "atr_calibration": atr_calibration,
             "naive_baseline": naive_baseline,
@@ -483,7 +474,7 @@ def train(
                 "used": use_validation,
                 "validation_days": settings.validation_days if use_validation else None,
                 "epochs_run": len(validation_history) if use_validation else None,
-                "selection_metric": "intraday_up_1plus_val_loss",
+                "selection_metric": "high_price_val_loss",
                 "best_epoch": best_epoch,
                 "best_selection_loss": best_val_loss if best_epoch is not None else None,
                 "early_stopped": early_stopped,

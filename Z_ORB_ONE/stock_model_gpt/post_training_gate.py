@@ -1,8 +1,8 @@
 import argparse
-import argparse
 import json
 
 from .paths import EVALUATIONS_DIR
+from .signals import OUTPUT_SCHEMA
 
 
 def main() -> None:
@@ -28,18 +28,23 @@ def load_evaluations() -> list[dict]:
     rows: list[dict] = []
     for path in paths:
         rows.append(json.loads(path.read_text(encoding="utf-8")))
-    return rows
+    rows = [row for row in rows if row.get("output_schema") == OUTPUT_SCHEMA]
+    if not rows:
+        return []
+    selected = rows[-1].get("signal_thresholds")
+    return [row for row in rows if row.get("signal_thresholds") == selected]
 
 
 def print_window(label: str, evaluations: list[dict], args) -> None:
     signals = [signal for item in evaluations for signal in item.get("signals", [])]
     print(f"{label}: {len(evaluations)} 個交易日")
+    print(f"篩選設定: {evaluations[-1].get('signal_thresholds')}")
     print_directional_signals(signals, args)
 
 
 def print_directional_signals(signals: list[dict], args) -> None:
-    print(f"漲跌訊號: {len(signals)} 筆")
-    print_trade_recommendation("漲跌訊號 LONG", signals, args)
+    print(f"篩選訊號: {len(signals)} 筆")
+    print_trade_recommendation("所選刻度訊號", signals, args)
 
 
 
@@ -50,9 +55,6 @@ def print_trade_recommendation(label: str, signals: list[dict], args) -> None:
         return
     success_count = sum(1 for signal in signals if signal["success"])
     success_rate = success_count / count
-    avg_best = sum(signal["best_profit_pct"] for signal in signals) / count
-    avg_close = sum(signal["close_profit_pct"] for signal in signals) / count
-    avg_adverse = sum(signal["adverse_pct"] for signal in signals) / count
 
     if count < args.min_signals:
         recommendation = "KEEP: 樣本不足，先累積資料"
@@ -65,8 +67,7 @@ def print_trade_recommendation(label: str, signals: list[dict], args) -> None:
 
     print(
         f"{label}: success={success_count}/{count}={success_rate:.2%}, "
-        f"avg_best={avg_best:.2f}%, avg_close={avg_close:.2f}%, "
-        f"avg_adverse={avg_adverse:.2f}% -> {recommendation}"
+        f"（實際 high_price 落在所選刻度的比例） -> {recommendation}"
     )
 
 

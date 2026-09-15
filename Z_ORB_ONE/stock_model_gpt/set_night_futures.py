@@ -18,20 +18,35 @@ entered overwrites that date only (safe to correct a typo)."""
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 
-from .night_futures import merge_night_futures, night_futures_bucket
+from .night_futures import load_night_futures, merge_night_futures, night_futures_bucket
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="手動輸入單日 TX 近月夜盤漲跌幅，寫入 night_futures.jsonl")
-    parser.add_argument("--date", required=True, help="夜盤資料標示的交易日期 YYYY-MM-DD（頁面上顯示的那個日期）")
+    parser.add_argument("--date", required=True, help="夜盤所屬日盤交易日期 YYYY-MM-DD；例如週六05:00收盤填下一交易日週一，連假同理")
     parser.add_argument("--change", required=True, type=float, help="漲跌%%，純數字，例如 0.87 或 -0.6（下跌才加負號）")
     parser.add_argument("--contract-month", default="manual", help="到期月份，選填，純紀錄用，例如 202609")
     args = parser.parse_args()
 
     day = date.fromisoformat(args.date).isoformat()
     bucket = night_futures_bucket(args.change)
+
+    existing_dates = load_night_futures()
+    if existing_dates:
+        latest = max(date.fromisoformat(value) for value in existing_dates)
+        target = date.fromisoformat(day)
+        missing = [
+            (latest + timedelta(days=offset)).isoformat()
+            for offset in range(1, (target - latest).days)
+        ]
+        if missing:
+            print(
+                f"[提示] 夜盤歷史資料最新日期為 {latest.isoformat()}，"
+                f"本次設定 {day}；中間尚缺：{'，'.join(missing)}"
+                "（按日曆日列出，未排除非營業日；不影響寫入）"
+            )
 
     merge_night_futures([{
         "date": day,
