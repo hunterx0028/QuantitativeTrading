@@ -8,6 +8,7 @@ Fixed here at the values a training-quantile fit produced on a 2025-08~2025-12
 window (see checkpoint `stock_model_gpt_20260912_221215_399564.pt`'s
 `atr_calibration`/`atr_report` for that original fit's distribution)."""
 from dataclasses import replace
+import math
 
 from .config import Settings
 
@@ -19,7 +20,7 @@ ATR_BOUNDARIES_PCT = (2.8694729537058703, 3.5912423282596873, 4.20375143031919, 
 def validate_five_levels(boundaries) -> None:
     if not isinstance(boundaries, (list, tuple)) or len(boundaries) != 4:
         raise ValueError("模型 ATR 五級需要四個百分比界線")
-    if any(not isinstance(value, (int, float)) or value <= 0 for value in boundaries):
+    if any(not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in boundaries):
         raise ValueError("界線必須是有限正數（百分比單位）")
     if any(a >= b for a, b in zip(boundaries, boundaries[1:])):
         raise ValueError("界線必須嚴格遞增")

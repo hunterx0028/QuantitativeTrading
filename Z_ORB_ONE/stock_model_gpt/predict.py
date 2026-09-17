@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import torch
 
@@ -19,28 +20,84 @@ from .storage import read_jsonl
 from .training import build_model, ensure_checkpoint_compatible
 from .universe import load_universe_snapshot
 from .paths import UNIVERSE_DIR
+from .provenance import fingerprint, file_fingerprint, atomic_text
+from .checkpoints import current_checkpoint
+from .trading_calendar import assert_sequence_dates
 
 
-from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds, add_signal_arguments,
+def save_prediction_version(payload, inputs, report_text, replace_official=False):
+    observation = payload.get("mode") == "observation"
+    if observation and replace_official:
+        raise ValueError("觀察模式不可替換正式預測")
+    day = payload["prediction_date"]
+    run_id = payload["prediction_id"]
+    directory = PREDICTIONS_DIR / "versions" / day
+    version = directory / f"{run_id}.json"
+    if version.exists():
+        raise FileExistsError(f"預測版本已存在，不可覆寫: {version}")
+    text = dumps_json_no_scientific(payload) + "\n"
+    atomic_text(directory / f"{run_id}.inputs.json", dumps_json_no_scientific(inputs) + "\n")
+    atomic_text(directory / f"{run_id}.txt", report_text)
+    atomic_text(version, text)
+    official = (PREDICTIONS_DIR / "observations" if observation else PREDICTIONS_DIR) / f"{day}.json"
+    if not official.exists() or replace_official:
+        if official.exists():
+            old_text = official.read_text(encoding="utf-8")
+            # Also archive legacy daily files which predate versioned predictions.
+            old_id = file_fingerprint(official)
+            atomic_text(directory / f"previous_{old_id}.json", old_text)
+        atomic_text(official, text)
+        if not observation:
+            atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", report_text)
+        print(f"{'觀察' if observation else '正式'}預測: {official}，prediction_id={run_id}")
+    else:
+        print(f"已保留既有{'觀察' if observation else '正式'}預測；本次僅另存版本 {run_id}")
+        if not observation:
+            official_id = json.loads(official.read_text(encoding="utf-8")).get("prediction_id")
+            saved_report = directory / f"{official_id}.txt"
+            if saved_report.exists():
+                atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", saved_report.read_text(encoding="utf-8"))
+    return version
+
+
+from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds,
                       build_signal_thresholds, detect_signal, build_signal_report_lines,
                       predicted_class, sorted_signals)
 
 
+def add_prediction_signal_arguments(parser):
+    for target, classes in (("high", "1,2"), ("low", "-2,-1")):
+        parser.add_argument(f"--{target}-signal-classes", default=classes,
+                            help=f"{target} 篩選刻度；負數用 --{target}-signal-classes=-2,-1")
+        parser.add_argument(f"--{target}-signal-threshold-pct", type=float, default=60.0,
+                            help=f"{target} 所選刻度的合計機率門檻（百分比）")
+
+
+def prediction_signal_thresholds(args, target):
+    return build_signal_thresholds(argparse.Namespace(
+        signal_classes=getattr(args, f"{target}_signal_classes"),
+        signal_threshold_pct=getattr(args, f"{target}_signal_threshold_pct"),
+    ))
+
+
 def latest_checkpoint() -> Path:
-    paths = sorted(list(CHECKPOINT_DIR.glob("stock_model_gpt_*.pt")))
-    if not paths:
-        raise RuntimeError("找不到 checkpoint")
-    return paths[-1]
+    return current_checkpoint(CHECKPOINT_DIR)
 
 
-def select_checkpoint_for_prediction(thresholds: SignalThresholds = SignalThresholds()) -> Path:
+def select_checkpoint_for_prediction(thresholds: SignalThresholds = SignalThresholds(),
+                                     low_thresholds: SignalThresholds = SignalThresholds((-2, -1), 60)) -> Path:
     """Auto-select path only; an explicit --checkpoint always bypasses this gate."""
     candidate = latest_checkpoint()
     status = load_gate_status()
-    if (status is not None and status.get("signal_thresholds") == thresholds.signal_values()
-            and status["verdict"] == "DEGRADED"):
+    if status and status.get("verdict") == "STALE":
+        raise RuntimeError(f"gate 驗證未更新或不完整：{status['reason']}")
+    targets = (status or {}).get("targets", {"high_price": status} if status else {})
+    degraded = [target for target, options in (("high_price", thresholds), ("low_price", low_thresholds))
+                if targets.get(target) and targets[target].get("signal_thresholds") == options.signal_values()
+                and targets[target]["verdict"] == "DEGRADED"]
+    if degraded:
         raise RuntimeError(
-            f"checkpoint gate 判定近期訊號表現明顯退化（{status['reason']}），"
+            f"checkpoint gate 判定 {'/'.join(degraded)} 近期訊號表現明顯退化（{status['reason']}），"
             f"拒絕自動使用最新 checkpoint {candidate.name}；"
             "請先確認訓練或資料是否異常，或明確指定 --checkpoint 選用你確認過的模型"
         )
@@ -72,6 +129,12 @@ def select_prediction_inputs(
                             "expected_date": cutoff, "input_last_date": last_date,
                             "history_days": len(rows)})
         else:
+            try:
+                assert_sequence_dates([row["date"] for row in rows[-context_days:]])
+            except ValueError:
+                skipped.append({"symbol": symbol, "reason": "calendar_gap", "expected_date": cutoff,
+                                "input_last_date": last_date, "history_days": len(rows)})
+                continue
             eligible[symbol] = rows[-context_days:]
     return eligible, skipped
 
@@ -81,12 +144,19 @@ def run_prediction(
     universe_date: date,
     prediction_date: date,
     thresholds: SignalThresholds,
-) -> Path:
+    low_thresholds: SignalThresholds = SignalThresholds((-2, -1), 60),
+    replace_official: bool = False,
+    observe: bool = False,
+) -> tuple[Path, dict | None, dict | None]:
     """Core prediction step, reusable both by the CLI (`main`) and by in-process
     callers such as a walk-forward backtest that would otherwise pay a fresh
     Python/torch interpreter startup cost for every simulated trading day."""
     if prediction_date <= universe_date:
         raise ValueError("prediction-date 必須晚於 universe-date")
+    if observe and datetime.now(timezone.utc) >= datetime.combine(
+            prediction_date, time(9), timezone(timedelta(hours=8))):
+        raise ValueError("觀察預測必須在被預測日台北時間 09:00 開盤前產生，不能事後補做恢復證據")
+    assert_sequence_dates([universe_date.isoformat(), prediction_date.isoformat()])
     ensure_runtime_dirs()
     device = select_device()
     print(f"device={describe_device(device)}")
@@ -130,6 +200,8 @@ def run_prediction(
 
     predictions: list[dict] = []
     signals: list[dict] = []
+    low_signals: list[dict] = []
+    input_snapshot = {}
     with torch.no_grad():
         for symbol, rows in eligible.items():
             states = torch.tensor(
@@ -137,6 +209,7 @@ def run_prediction(
                 dtype=torch.long,
                 device=device,
             )
+            input_snapshot[symbol] = {"feature_rows": rows, "encoded_states": states[0].cpu().tolist()}
             outputs = model(states)
             probabilities = {key: torch.softmax(value, dim=-1)[0].cpu().tolist() for key, value in outputs.items()}
             prediction = {
@@ -145,13 +218,19 @@ def run_prediction(
                 "input_last_date": rows[-1]["date"],
                 "checkpoint": checkpoint_path.name,
                 "high_price": _probabilities(probabilities["high_price"]),
+                "low_price": _probabilities(probabilities["low_price"]),
                 "predicted_class": CLASSES[max(range(5), key=lambda i: probabilities["high_price"][i])],
             }
             predictions.append(prediction)
             signal = detect_signal(prediction, thresholds)
+            low_signal = detect_signal(prediction, low_thresholds, "low_price")
+            prediction["signal_matches"] = {"high_price": signal is not None, "low_price": low_signal is not None}
             if signal:
                 signals.append(signal)
+            if low_signal:
+                low_signals.append(low_signal)
     signals = sorted_signals(signals)
+    low_signals = sorted_signals(low_signals)
     naive_baseline = checkpoint.get("naive_baseline")
     # The checkpoint's own last-epoch, in-sample (training-window) unweighted
     # loss per target — surfaced alongside the prediction so a caller such as a
@@ -159,11 +238,17 @@ def run_prediction(
     # out-of-sample loss to check for overfitting (low in-sample, high
     # out-of-sample is the classic symptom).
     in_sample_loss = checkpoint.get("loss_components")
-    output = PREDICTIONS_DIR / f"{prediction_date.isoformat()}.json"
-    payload = {"created_at": datetime.now().isoformat(timespec="seconds"), "predictions": predictions,
+    run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f") + "_" + uuid4().hex[:12]
+    payload = {"created_at": datetime.now().astimezone().isoformat(), "predictions": predictions,
+               "prediction_id": run_id, "prediction_date": prediction_date.isoformat(),
+               "mode": "observation" if observe else "official",
+               "checkpoint_sha256": file_fingerprint(checkpoint_path),
+               "input_data_version": fingerprint(input_snapshot),
                "universe_date": universe_date.isoformat(), "active_count": len(active_symbols),
                "predicted_count": len(predictions), "skipped": skipped,
                "signal_thresholds": thresholds.signal_values(),
+               "high_signal_thresholds": thresholds.signal_values(),
+               "low_signal_thresholds": low_thresholds.signal_values(),
                "atr_boundaries_pct": settings.atr_boundaries_pct,
                "night_futures_date": prediction_date_str,
                "night_futures_bucket": prediction_night_bucket,
@@ -171,32 +256,55 @@ def run_prediction(
                "output_schema": OUTPUT_SCHEMA,
                "naive_baseline": naive_baseline,
                "in_sample_loss": in_sample_loss,
-               "signals": signals}
-    output.write_text(dumps_json_no_scientific(payload) + "\n", encoding="utf-8")
-    print(f"預測已儲存: {output} ({len(predictions)}支)")
+               "signals": signals,
+               "high_signals": signals,
+               "low_signals": low_signals}
     report_lines = build_signal_report_lines(prediction_date, thresholds, signals)
     report_lines[1:1] = coverage_lines
-    for line in report_lines:
-        print(line)
-    report_path = SIGNAL_REPORTS_DIR / f"{prediction_date.isoformat()}.txt"
-    report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
-    print(f"訊號報告已儲存: {report_path}")
+    report_lines.insert(1 + len(coverage_lines), "[high 符合清單]")
+    report_lines.extend(["", "[low 符合清單]",
+                         *build_signal_report_lines(prediction_date, low_thresholds, low_signals, "low_price")[1:]])
+    if observe:
+        report_lines.insert(0, "[觀察模式] 僅供後續驗證，不發布正式訊號")
+        print(report_lines[0])
+    else:
+        for line in report_lines:
+            print(line)
+    report_text = "\n".join(report_lines) + "\n"
+    output = save_prediction_version(payload, input_snapshot, report_text, replace_official)
+    print(f"預測版本已儲存: {output} ({len(predictions)}支)")
     return output, naive_baseline, in_sample_loss
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="預測下一交易日狀態機率")
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--settings", default=None, help="gate 設定；模型設定仍取自 checkpoint")
     parser.add_argument("--prediction-date", default=date.today().isoformat())
     parser.add_argument("--universe-date", default=date.today().isoformat())
-    add_signal_arguments(parser)
+    parser.add_argument("--replace-official", action="store_true", help="明確將本次新版本指定為當日正式預測；舊版本仍保留")
+    parser.add_argument("--observe", action="store_true", help="繞過 gate 產生觀察預測，供恢復驗證，不發布正式訊號")
+    add_prediction_signal_arguments(parser)
     args = parser.parse_args()
-    thresholds = build_signal_thresholds(args)
+    if args.observe and args.replace_official:
+        parser.error("observe 不可搭配 replace-official")
+    thresholds = prediction_signal_thresholds(args, "high")
+    low_thresholds = prediction_signal_thresholds(args, "low")
     universe_date = date.fromisoformat(args.universe_date)
     prediction_date = date.fromisoformat(args.prediction_date)
+    assert_sequence_dates([universe_date.isoformat(), prediction_date.isoformat()])
     ensure_runtime_dirs()
-    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction(thresholds)
-    run_prediction(checkpoint_path, universe_date, prediction_date, thresholds)
+    if not args.observe and not args.checkpoint:
+        from .checkpoint_gate import refresh_gate_for_prediction
+        refresh_gate_for_prediction(Settings.load(args.settings) if args.settings else Settings.load(), universe_date)
+    checkpoint_path = (Path(args.checkpoint) if args.checkpoint else latest_checkpoint() if args.observe
+                       else select_checkpoint_for_prediction(thresholds, low_thresholds))
+    run_prediction(checkpoint_path, universe_date, prediction_date, thresholds, low_thresholds,
+                   replace_official=args.replace_official, observe=args.observe)
 
 
 def dumps_json_no_scientific(value, indent: int = 2) -> str:

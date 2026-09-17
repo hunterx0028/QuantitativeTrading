@@ -3,11 +3,15 @@ from dataclasses import replace
 from datetime import date
 
 from .config import Settings
-from .finmind import update_corporate_actions
+from .finmind import update_corporate_actions, clear_query_cache
 from .paths import ensure_runtime_dirs
 from .universe import load_selected_stocks
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="重新同步 FinMind 公司行動資料")
     parser.add_argument("--as-of", required=True, help="公司行動同步截止日 YYYY-MM-DD")
@@ -24,6 +28,7 @@ def main() -> None:
         help="只重同步指定股票代號；預設使用 stock_data.py 的 selected_stocks",
     )
     args = parser.parse_args()
+    clear_query_cache()
 
     as_of = date.fromisoformat(args.as_of)
     settings = Settings.load(args.settings) if args.settings else Settings.load()

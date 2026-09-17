@@ -29,6 +29,10 @@ def default_csv_paths() -> list[Path]:
     return sorted(HISTORY_NIGHT_DIR.glob("*.csv"))
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="匯入 TAIFEX 夜盤期指 CSV")
     parser.add_argument(

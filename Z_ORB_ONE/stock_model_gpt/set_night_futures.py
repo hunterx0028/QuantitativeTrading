@@ -23,6 +23,10 @@ from datetime import date, timedelta
 from .night_futures import load_night_futures, merge_night_futures, night_futures_bucket
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="手動輸入單日 TX 近月夜盤漲跌幅，寫入 night_futures.jsonl")
     parser.add_argument("--date", required=True, help="夜盤所屬日盤交易日期 YYYY-MM-DD；例如週六05:00收盤填下一交易日週一，連假同理")

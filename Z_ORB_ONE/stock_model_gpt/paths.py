@@ -32,6 +32,7 @@ _WRITE_ROOT = Path(_write_root_override).resolve() if _write_root_override else 
 ACTUAL_CANDLES_DIR = _WRITE_ROOT / "data" / "actual_candles"
 UNIVERSE_DIR = _WRITE_ROOT / "data" / "universe"
 EVALUATIONS_DIR = _WRITE_ROOT / "data" / "evaluations"
+DATA_CHECKS_DIR = _WRITE_ROOT / "data" / "data_checks"
 ATR_ANALYSIS_DIR = _WRITE_ROOT / "data" / "atr_analysis"
 CHECKPOINT_DIR = _WRITE_ROOT / "checkpoints"
 PREDICTIONS_DIR = _WRITE_ROOT / "predictions"

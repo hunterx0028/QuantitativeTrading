@@ -13,8 +13,8 @@ from .config import Settings
 from .storage import (
     corporate_action_path,
     corporate_action_sync_path,
-    merge_corporate_actions,
     write_jsonl,
+    read_jsonl,
 )
 
 
@@ -35,6 +35,11 @@ DATASET_ACCEPTS_DATA_ID = {
     "TaiwanStockParValueChange": False,
 }
 _GLOBAL_DATASET_CACHE: dict[tuple[str, date, date, bool], list[dict]] = {}
+
+
+def clear_query_cache():
+    """Only share market-wide responses within one CLI update batch."""
+    _GLOBAL_DATASET_CACHE.clear()
 
 
 def _number(row: dict[str, Any], *names: str) -> float | None:
@@ -140,13 +145,19 @@ def update_corporate_actions(
     token: str | None = None,
     force_from_start: bool = False,
     replace_existing: bool = False,
+    refresh_days: int = 7,
 ) -> list[dict]:
     """增量取得影響歷史參考價的公司行動；Token 可省略。"""
     sync_path = corporate_action_sync_path(symbol)
+    if refresh_days <= 0:
+        raise ValueError("refresh_days 必須大於 0")
     start_date = date.fromisoformat(settings.earliest_date)
+    previous_through = None
     if sync_path.exists() and not force_from_start:
         payload = json.loads(sync_path.read_text(encoding="utf-8"))
-        start_date = date.fromisoformat(payload["checked_through"]) + timedelta(days=1)
+        previous_through = date.fromisoformat(payload["checked_through"])
+        start_date = max(start_date, min(previous_through + timedelta(days=1),
+                                         as_of - timedelta(days=refresh_days - 1)))
     if start_date > as_of:
         return []
 
@@ -163,14 +174,19 @@ def update_corporate_actions(
         merged = sorted(incoming, key=lambda row: (row["date"], row["source"]))
         write_jsonl(corporate_action_path(symbol), merged)
     else:
-        merged = merge_corporate_actions(symbol, incoming)
-    sync_path.write_text(
+        # A successful query is authoritative within its interval, including removals.
+        retained = [row for row in read_jsonl(corporate_action_path(symbol))
+                    if row["source"] not in datasets or not start_date.isoformat() <= row["date"] <= as_of.isoformat()]
+        by_key = {(row["date"], row["source"]): row for row in retained + incoming}
+        merged = [by_key[key] for key in sorted(by_key)]
+        write_jsonl(corporate_action_path(symbol), merged)
+    from .provenance import atomic_text
+    atomic_text(sync_path,
         json.dumps(
-            {"symbol": symbol, "checked_through": as_of.isoformat()},
+            {"symbol": symbol, "checked_through": max(as_of, previous_through or as_of).isoformat()},
             ensure_ascii=False,
             indent=2,
         ) + "\n",
-        encoding="utf-8",
     )
     return merged
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 import hashlib
 import json
+import copy
+import math
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
@@ -16,14 +18,18 @@ from .atr_calibration import ATR_ENCODING, prepare_atr_levels, validate_five_lev
 from .dataset import INPUT_ALIGNMENT, StockSequenceDataset, subset
 from .device import describe_device, move_targets_to_device, select_device
 from .model import StockAutoregressiveModel
-from .signals import CLASSES, OUTPUT_SCHEMA
+from .signals import CLASSES
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, ensure_runtime_dirs
 from .universe import recent_symbols
 from .storage import read_jsonl
 from .replay import select_daily_sequences
+from .provenance import fingerprint, file_fingerprint, sample_key, sample_versions
+from .checkpoints import publish_checkpoint, require_finite, verify_checkpoint
+from .trading_calendar import TradingCalendar
 
 
-TARGET_NAMES = ("high_price",)
+TARGET_NAMES = ("high_price", "low_price")
+MODEL_OUTPUT_SCHEMA = "high_low_price_five_classes_v1"
 
 
 def seed_everything(seed: int) -> None:
@@ -44,15 +50,18 @@ def build_model(settings: Settings) -> StockAutoregressiveModel:
 
 
 def label_distribution(dataset: StockSequenceDataset) -> dict:
-    counts = {str(c): 0 for c in CLASSES}
-    for ref in dataset.refs:
-        counts[str(dataset.rows_by_path[ref.feature_path][ref.end]["high_price"])] += 1
-    return {"count": len(dataset), "high_price_counts": counts,
-            "majority_high_price": max(CLASSES, key=lambda c: counts[str(c)])}
+    result = {"count": len(dataset)}
+    for field in TARGET_NAMES:
+        counts = {str(c): 0 for c in CLASSES}
+        for ref in dataset.refs:
+            counts[str(dataset.rows_by_path[ref.feature_path][ref.end][field])] += 1
+        result[f"{field}_counts"] = counts
+        result[f"majority_{field}"] = max(CLASSES, key=lambda c: counts[str(c)])
+    return result
 
 
 def multiclass_class_weight(dataset: StockSequenceDataset, field: str) -> torch.Tensor | None:
-    counts = label_distribution(dataset)["high_price_counts"]
+    counts = label_distribution(dataset)[f"{field}_counts"]
     present = sum(count > 0 for count in counts.values())
     if present <= 1:
         return None
@@ -106,19 +115,17 @@ def weighted_loss(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Returns the (weighted) loss used for backward(), plus the target's raw
     unweighted loss for logging/measurement."""
-    components = {
-        "high_price": criteria["high_price"](
-            outputs["high_price"], targets["high_price"]
-        ),
-    }
-    combined = settings.loss_high_price * components["high_price"]
+    components = {name: criteria[name](outputs[name], targets[name]) for name in TARGET_NAMES}
+    combined = sum(getattr(settings, f"loss_{name}") * components[name] for name in TARGET_NAMES)
     return combined, components
 
 
 def ensure_checkpoint_compatible(checkpoint: dict) -> None:
-    head = checkpoint.get("model", {}).get("high_price_head.weight")
-    if (checkpoint.get("output_schema") != OUTPUT_SCHEMA or head is None or head.shape[0] != 5):
-        raise RuntimeError("checkpoint 不是 high_price 五分類模型；請重新執行 train_initial")
+    heads = [checkpoint.get("model", {}).get(f"{name}_head.weight") for name in TARGET_NAMES]
+    if (checkpoint.get("output_schema") != MODEL_OUTPUT_SCHEMA
+            or tuple(checkpoint.get("target_names", ())) != TARGET_NAMES
+            or any(head is None or head.ndim != 2 or head.shape[0] != 5 for head in heads)):
+        raise RuntimeError("checkpoint 不是 high_price / low_price 雙目標五分類模型；請重新執行 train_initial")
     if ("atr_embedding.weight" not in checkpoint.get("model", {})
             or checkpoint.get("atr_encoding") != ATR_ENCODING):
         raise RuntimeError(
@@ -199,6 +206,19 @@ def _validation_split(
     return train_refs, val_refs
 
 
+def validate_training_settings(settings):
+    for name in ("epochs", "daily_epochs", "batch_size"):
+        value = getattr(settings, name)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{name} 必須是正整數")
+    for name in ("learning_rate", "daily_learning_rate", "loss_high_price", "loss_low_price"):
+        value = getattr(settings, name)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} 必須是有限正數")
+    if type(settings.focal_gamma) not in (int, float) or not math.isfinite(settings.focal_gamma) or settings.focal_gamma < 0:
+        raise ValueError("focal_gamma 必須是有限非負數")
+
+
 def train(
     settings: Settings,
     resume_path: Path | None = None,
@@ -207,9 +227,11 @@ def train(
     force_retrain: bool = False,
     training_window_days: int | None = None,
 ) -> Path:
+    validate_training_settings(settings)
     ensure_runtime_dirs()
     seed_everything(settings.seed)
     as_of = as_of or date.today()
+    TradingCalendar().require_session(as_of)
     if daily and resume_path is None:
         raise ValueError("每日續訓必須指定既有 checkpoint，不能重新擬合 ATR 刻度")
     checkpoint = None
@@ -217,23 +239,16 @@ def train(
     if resume_path:
         checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
         ensure_checkpoint_compatible(checkpoint)
+        from .checkpoints import verify_training_result
+        verify_training_result(checkpoint)
         previous_as_of = checkpoint.get("training_as_of")
         if previous_as_of and previous_as_of > as_of.isoformat():
             raise RuntimeError("checkpoint 訓練截止日晚於本次日期，不可用未來模型回訓歷史日期")
         if daily:
             if not previous_as_of:
                 raise RuntimeError("checkpoint 缺少 training_as_of，無法區分新增與歷史序列")
-            if previous_as_of == as_of.isoformat() and not force_retrain:
-                print("[SKIP] 此 checkpoint 已完成該日期續訓")
-                return resume_path
-            key = hashlib.sha256(f"{resume_path.resolve()}|{as_of.isoformat()}".encode()).hexdigest()
-            receipt_path = CHECKPOINT_DIR / "daily_runs" / f"{key}.json"
-            if receipt_path.exists() and not force_retrain:
-                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-                completed = Path(receipt["checkpoint"])
-                if completed.exists():
-                    print(f"[SKIP] 相同來源模型與截止日已完成: {completed}")
-                    return completed
+            if "trained_sample_versions" not in checkpoint:
+                raise RuntimeError("checkpoint 缺少樣本版本紀錄，請重新執行 train_initial 後再續訓")
     eligible_symbols = recent_symbols(as_of, settings.recent_universe_days)
     if not eligible_symbols:
         raise RuntimeError(
@@ -261,15 +276,33 @@ def train(
     )
     if not dataset:
         raise RuntimeError("沒有足夠的特徵序列可供訓練")
+    versions = sample_versions(dataset)
+    trained_versions = dict(checkpoint.get("trained_sample_versions", {})) if checkpoint else {}
+    if daily:
+        key = fingerprint({"source": file_fingerprint(resume_path), "as_of": as_of.isoformat(),
+                           "samples": versions, "settings": asdict(settings),
+                           "training_window_days": training_window_days})
+        receipt_path = CHECKPOINT_DIR / "daily_runs" / f"{key}.json"
+        if receipt_path.exists() and not force_retrain:
+            completed = Path(json.loads(receipt_path.read_text(encoding="utf-8"))["checkpoint"])
+            if completed.exists():
+                verify_checkpoint(completed)
+                print(f"[SKIP] 相同來源、樣本版本與設定已完成: {completed}")
+                return completed
     # Captured before `select_daily_sequences` below narrows dataset.refs to a
     # sampled training subset; the baseline should reflect the full window.
     naive_baseline = label_distribution(dataset)
     sampling = None
     seen_symbols = set(checkpoint.get("seen_symbols", checkpoint.get("symbols", []))) if checkpoint else set()
     if daily:
-        sampling = select_daily_sequences(dataset, previous_as_of, as_of, settings, seen_symbols)
+        all_refs = list(dataset.refs)
+        sampling = select_daily_sequences(dataset, previous_as_of, as_of, settings, seen_symbols,
+                                          trained_versions, versions)
+        if force_retrain and not dataset.refs:
+            dataset.refs = all_refs
+            sampling["forced_full_window"] = True
         if not sampling["new_count"] and not force_retrain:
-            print("[SKIP] 沒有新增目標序列，不重複訓練歷史資料")
+            print("[SKIP] 視窗內沒有未學習或已修正的樣本，不重複續訓")
             return resume_path
         if not dataset:
             print("[SKIP] 沒有選取的訓練序列")
@@ -334,13 +367,22 @@ def train(
             scaler.load_state_dict(checkpoint["scaler"])
 
     epochs = settings.daily_epochs if daily else settings.epochs
+    optimizer_steps = 0
+    best_optimizer_steps = 0
+    epochs_run = 0
+    def record_step(optimizer, args, kwargs):
+        nonlocal optimizer_steps
+        optimizer_steps += 1
+    optimizer.register_step_post_hook(record_step)
     model.train()
     final_loss = float("nan")
-    final_component_loss = {"high_price": float("nan")}
+    final_component_loss = {name: float("nan") for name in TARGET_NAMES}
     monitored_targets = TARGET_NAMES
     best_val_loss = float("inf")
     best_epoch: int | None = None
     best_state: dict[str, torch.Tensor] | None = None
+    best_optimizer_state = None
+    best_scaler_state = None
     early_stopped = False
     stalled_targets: list[str] = []
     validation_history: list[dict] = []
@@ -348,7 +390,7 @@ def train(
     component_patience = {name: 0 for name in monitored_targets}
     for epoch in range(epochs):
         total_loss = 0.0
-        total_component_loss = {"high_price": 0.0}
+        total_component_loss = {name: 0.0 for name in TARGET_NAMES}
         for states, targets in loader:
             states = states.to(device, non_blocking=use_cuda)
             targets = move_targets_to_device(targets, device, non_blocking=use_cuda)
@@ -365,20 +407,29 @@ def train(
                 plain_components = {
                     name: plain_criteria[name](outputs[name], targets[name]) for name in monitored_targets
                 }
+            require_finite(loss, "training loss")
+            require_finite(plain_components, "training high/low loss")
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+            before_step = optimizer_steps
             scaler.step(optimizer)
             scaler.update()
+            if optimizer_steps != before_step + 1:
+                raise RuntimeError("optimizer 未完成權重更新，停止訓練，不發布模型或標記樣本已學習")
             batch_size = states.shape[0]
             total_loss += float(loss.detach()) * batch_size
             for name, value in plain_components.items():
                 total_component_loss[name] += float(value.detach()) * batch_size
         final_loss = total_loss / len(train_dataset)
         final_component_loss = {name: value / len(train_dataset) for name, value in total_component_loss.items()}
+        epochs_run = epoch + 1
+        require_finite(final_loss, "epoch loss")
+        require_finite(final_component_loss, "epoch high/low loss")
         log_line = (
             f"epoch={epoch + 1}/{epochs} loss={final_loss:.6f} (加權合計) | 未加權: "
             f"high_price={final_component_loss['high_price']:.6f}"
+            f" low_price={final_component_loss['low_price']:.6f}"
         )
 
         if not use_validation:
@@ -386,7 +437,7 @@ def train(
             continue
 
         model.eval()
-        val_total_component_loss = {"high_price": 0.0}
+        val_total_component_loss = {name: 0.0 for name in TARGET_NAMES}
         with torch.no_grad():
             for states, targets in val_loader:
                 states = states.to(device, non_blocking=use_cuda)
@@ -401,6 +452,7 @@ def train(
                     plain_components = {
                         name: plain_criteria[name](outputs[name], targets[name]) for name in monitored_targets
                     }
+                require_finite(plain_components, "validation high/low loss")
                 batch_size = states.shape[0]
                 for name, value in plain_components.items():
                     val_total_component_loss[name] += float(value.detach()) * batch_size
@@ -409,7 +461,8 @@ def train(
         # Informational only (not used for any decision below): the same
         # weighted combination training optimizes, but built from the plain
         # per-target loss above rather than a second FocalLoss pass.
-        val_loss = settings.loss_high_price * val_component_loss["high_price"]
+        val_loss = sum(getattr(settings, f"loss_{name}") * val_component_loss[name] for name in TARGET_NAMES)
+        require_finite(val_loss, "validation loss")
         validation_history.append({
             "epoch": epoch + 1, "val_loss": val_loss, "val_components": val_component_loss,
             "train_loss": final_loss, "train_components": final_component_loss,
@@ -418,13 +471,17 @@ def train(
             log_line
             + f" | validation: loss={val_loss:.6f} "
             + f"high_price={val_component_loss['high_price']:.6f}"
+            + f" low_price={val_component_loss['low_price']:.6f}"
         )
-        # Which epoch's weights to keep is judged by the target's own validation loss.
-        selection_loss = val_component_loss["high_price"]
+        # Both heads contribute equally to checkpoint selection, in plain CE units.
+        selection_loss = sum(val_component_loss.values()) / len(TARGET_NAMES)
         if selection_loss < best_val_loss - 1e-6:
             best_val_loss = selection_loss
             best_epoch = epoch + 1
             best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            best_optimizer_state = copy.deepcopy(optimizer.state_dict())
+            best_scaler_state = copy.deepcopy(scaler.state_dict())
+            best_optimizer_steps = optimizer_steps
 
         for name in monitored_targets:
             if val_component_loss[name] < best_component_val[name] - 1e-6:
@@ -434,47 +491,60 @@ def train(
                 component_patience[name] += 1
 
         stalled_targets = [name for name in monitored_targets if component_patience[name] >= settings.early_stopping_patience]
-        if stalled_targets:
+        if len(stalled_targets) == len(monitored_targets):
             early_stopped = True
             print(
                 f"[EARLY STOP] {'/'.join(stalled_targets)} 連續 {settings.early_stopping_patience} 個 epoch "
                 f"驗證 loss 沒有改善，停在 epoch {epoch + 1}；"
-                f"採用 high_price 驗證 loss 最佳的 epoch {best_epoch}（selection_loss={best_val_loss:.6f}）"
+                f"採用 high/low 平均驗證 loss 最佳的 epoch {best_epoch}（selection_loss={best_val_loss:.6f}）"
             )
             break
 
     if use_validation and best_state is not None:
         model.load_state_dict(best_state)
+        optimizer.load_state_dict(best_optimizer_state)
+        if use_cuda:
+            scaler.load_state_dict(best_scaler_state)
         final_loss, final_component_loss = next(
             (item["train_loss"], item["train_components"])
             for item in validation_history if item["epoch"] == best_epoch
         )
         print(
-            f"採用驗證集最佳權重（依 high_price 挑選）："
+            f"採用驗證集最佳權重（依 high/low 平均 loss 挑選）："
             f"epoch={best_epoch}, selection_loss={best_val_loss:.6f}（訓練總 epoch 上限={epochs}）"
         )
 
+    if optimizer_steps <= 0 or (use_validation and best_state is None):
+        raise RuntimeError("沒有完成有效訓練，拒絕發布 checkpoint")
+    require_finite(model.state_dict(), "model")
+    require_finite(optimizer.state_dict(), "optimizer")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    trained_versions.update({sample_key(train_dataset, ref): versions[sample_key(train_dataset, ref)]
+                             for ref in train_dataset.refs})
     output = CHECKPOINT_DIR / f"stock_model_gpt_{stamp}.pt"
-    torch.save(
+    publish_checkpoint(
+        output,
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict() if use_cuda else None,
             "settings": asdict(settings),
             "target_names": TARGET_NAMES,
-            "output_schema": OUTPUT_SCHEMA,
+            "output_schema": MODEL_OUTPUT_SCHEMA,
             "input_alignment": INPUT_ALIGNMENT,
             "atr_encoding": ATR_ENCODING,
             "atr_calibration": atr_calibration,
             "naive_baseline": naive_baseline,
             "loss": final_loss,
             "loss_components": final_component_loss,
+            "training_progress": {"epochs_run": epochs_run,
+                                  "optimizer_steps": best_optimizer_steps if use_validation else optimizer_steps,
+                                  "executed_optimizer_steps": optimizer_steps},
             "validation": {
                 "used": use_validation,
                 "validation_days": settings.validation_days if use_validation else None,
                 "epochs_run": len(validation_history) if use_validation else None,
-                "selection_metric": "high_price_val_loss",
+                "selection_metric": "mean_high_low_price_val_loss",
                 "best_epoch": best_epoch,
                 "best_selection_loss": best_val_loss if best_epoch is not None else None,
                 "early_stopped": early_stopped,
@@ -484,17 +554,17 @@ def train(
             },
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "training_as_of": as_of.isoformat(),
+            "trained_sample_versions": trained_versions,
+            "training_data_version": fingerprint(versions),
+            "training_window_days": training_window_days,
             "symbols": [path.stem for path in feature_paths],
             "seen_symbols": sorted(seen_symbols | {ref.feature_path.stem for ref in dataset.refs}),
             "parent_checkpoint": str(resume_path.resolve()) if resume_path else None,
             "sampling": sampling,
         },
-        output,
     )
     if receipt_path is not None:
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = receipt_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"checkpoint": str(output.resolve()),
-                                         "as_of": as_of.isoformat()}, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(receipt_path)
+        from .provenance import atomic_text
+        atomic_text(receipt_path, json.dumps({"checkpoint": str(output.resolve()),
+                                              "as_of": as_of.isoformat()}, indent=2) + "\n")
     return output

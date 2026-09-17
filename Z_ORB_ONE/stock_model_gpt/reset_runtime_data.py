@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+from pathlib import Path
 
 from .paths import (
     ACTUAL_CANDLES_DIR,
@@ -26,6 +27,7 @@ from .paths import (
     CHECKPOINT_DIR,
     CORPORATE_ACTIONS_DIR,
     EVALUATIONS_DIR,
+    DATA_CHECKS_DIR,
     FEATURES_DIR,
     PREDICTIONS_DIR,
     SIGNAL_REPORTS_DIR,
@@ -35,6 +37,7 @@ from .paths import (
 
 
 TARGET_DIRS = (
+    DATA_CHECKS_DIR,
     CANDLES_DIR,
     CORPORATE_ACTIONS_DIR,
     FEATURES_DIR,
@@ -46,6 +49,21 @@ TARGET_DIRS = (
     PREDICTIONS_DIR,
     SIGNAL_REPORTS_DIR,
 )
+
+
+def reset_targets(write_root_override: str | None) -> tuple:
+    if not write_root_override:
+        return TARGET_DIRS
+    root = Path(write_root_override).resolve()
+    # Shared candles/features/corporate actions always belong to production.
+    # An isolated reset must never include those shared read-only inputs.
+    targets = tuple(root / relative for relative in (
+        "data/actual_candles", "data/universe", "data/evaluations", "data/atr_analysis", "data/data_checks",
+        "checkpoints", "predictions", "signal_reports",
+    ))
+    if any(not path.resolve().is_relative_to(root) for path in targets):
+        raise ValueError("重置目標超出指定的隔離目錄")
+    return targets
 
 
 def _dir_stats(path) -> tuple[int, int]:
@@ -64,6 +82,10 @@ def _human_size(num_bytes: int) -> str:
     return f"{size:.1f}TB"
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="清空所有可重建的執行期資料，重新開始；不會動到 config.ini、stock_data.py、settings.json 或原始碼"
@@ -72,6 +94,7 @@ def main() -> None:
     args = parser.parse_args()
 
     write_root_override = os.environ.get("STOCK_MODEL_GPT_WRITE_ROOT")
+    targets = reset_targets(write_root_override)
     if write_root_override:
         print(
             f"[WARN] STOCK_MODEL_GPT_WRITE_ROOT 已設定為 {write_root_override}，"
@@ -82,7 +105,7 @@ def main() -> None:
     print("目標資料夾：")
     total_files = 0
     total_bytes = 0
-    for path in TARGET_DIRS:
+    for path in targets:
         count, size = _dir_stats(path)
         total_files += count
         total_bytes += size
@@ -98,10 +121,11 @@ def main() -> None:
         print("確認要清空後，加上 --yes 重新執行一次。")
         return
 
-    for path in TARGET_DIRS:
+    for path in targets:
         if path.exists():
             shutil.rmtree(path)
-    ensure_runtime_dirs()
+    for path in targets:
+        path.mkdir(parents=True, exist_ok=True)
     print(f"已清空並重建空資料夾結構，共刪除 {total_files} 個檔案，{_human_size(total_bytes)}。")
     print("config.ini、stock_data.py、settings.json 未受影響。")
 

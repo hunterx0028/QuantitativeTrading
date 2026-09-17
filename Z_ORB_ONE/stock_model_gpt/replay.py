@@ -6,11 +6,12 @@ from datetime import date
 
 from .config import Settings
 from .dataset import StockSequenceDataset
+from .provenance import sample_key
 
 
 def _is_hit_day(dataset: StockSequenceDataset, ref) -> bool:
     row = dataset.rows_by_path[ref.feature_path][ref.end]
-    return row["high_price"] in (1, 2)
+    return row["high_price"] in (1, 2) or row["low_price"] in (-2, -1)
 
 
 def _weighted_sample(rng: random.Random, refs: list, weights: list[float], k: int) -> list:
@@ -33,7 +34,8 @@ def _weighted_sample(rng: random.Random, refs: list, weights: list[float], k: in
 
 
 def select_daily_sequences(dataset: StockSequenceDataset, previous_as_of: str,
-                           as_of: date, settings: Settings, seen_symbols: set[str]) -> dict:
+                           as_of: date, settings: Settings, seen_symbols: set[str],
+                           trained_versions=None, current_versions=None) -> dict:
     mode = settings.daily_training_mode
     if mode not in ("incremental_replay", "full_history"):
         raise ValueError("daily_training_mode 必須為 incremental_replay 或 full_history")
@@ -47,13 +49,18 @@ def select_daily_sequences(dataset: StockSequenceDataset, previous_as_of: str,
     seed = settings.seed + as_of.toordinal()
     rng = random.Random(seed)
     new_refs = []
+    new_kinds = {}
     history = defaultdict(list)
     for ref in dataset.refs:
         target_date = dataset.rows_by_path[ref.feature_path][ref.end]["date"]
         if target_date > as_of.isoformat():
             raise ValueError("訓練序列包含截止日之後的目標")
-        if target_date > previous_as_of:
+        key = sample_key(dataset, ref)
+        changed = (trained_versions is not None and
+                   trained_versions.get(key) != current_versions[key])
+        if changed or (trained_versions is None and target_date > previous_as_of):
             new_refs.append(ref)
+            new_kinds[key] = "corrected" if trained_versions is not None and key in trained_versions else "new"
         else:
             history[ref.feature_path.stem].append(ref)
     if mode == "full_history":
@@ -61,7 +68,7 @@ def select_daily_sequences(dataset: StockSequenceDataset, previous_as_of: str,
     else:
         budget = min(math.ceil(len(new_refs) * settings.daily_replay_ratio),
                      settings.daily_replay_max_sequences)
-                # Weighted samples per stock (high_price 1/2 days oversampled), then
+        # Oversample high 1/2 OR low -2/-1 days once, then
         # round-robin to avoid large histories dominating.
         pools = {
             symbol: _weighted_sample(
@@ -86,10 +93,11 @@ def select_daily_sequences(dataset: StockSequenceDataset, previous_as_of: str,
     manifest = [{"symbol": ref.feature_path.stem,
                  "target_date": dataset.rows_by_path[ref.feature_path][ref.end]["date"],
                  "input_start_date": dataset.rows_by_path[ref.feature_path][ref.end - dataset.context_days]["date"],
-                 "kind": kind}
+                 "kind": new_kinds.get(sample_key(dataset, ref), kind)}
                 for kind, refs in (("new", new_refs), ("replay", replay_refs)) for ref in refs]
     return {"mode": mode, "previous_as_of": previous_as_of, "as_of": as_of.isoformat(),
             "seed": seed, "new_count": len(new_refs), "replay_count": len(replay_refs),
+            "corrected_count": sum(kind == "corrected" for kind in new_kinds.values()),
             "replay_hit_days": sum(1 for ref in replay_refs if _is_hit_day(dataset, ref)),
             "available_history_count": sum(map(len, history.values())),
             "replay_by_symbol": dict(Counter(ref.feature_path.stem for ref in replay_refs)),

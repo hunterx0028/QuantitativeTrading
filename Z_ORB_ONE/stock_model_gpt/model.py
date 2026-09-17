@@ -5,9 +5,9 @@ from torch import nn
 
 
 class StockAutoregressiveModel(nn.Module):
-    """每個 timestep 是一天；輸出為隔日 high_price 一項交易核心狀態。
-    high_price 為目標日最高價相對交易參考價的五級分類。
-    歷史開高低收等為輸入；唯一目標為下一交易日 high_price。
+    """每個 timestep 是一天；輸出為隔日 high_price 與 low_price。
+    兩項輸出分別為目標日最高價、最低價相對交易參考價的五級分類。
+    歷史開高低收等為輸入；兩個 head 共用歷史序列表示。
     第 10 項輸入是台指期近月夜盤（相對於前一日盤收盤的漲跌幅五級刻度）。
 
     每列為股票日的九項資料，加上下一交易日開盤前的夜盤刻度。
@@ -50,6 +50,7 @@ class StockAutoregressiveModel(nn.Module):
         )
         self.norm = nn.LayerNorm(d_model)
         self.high_price_head = nn.Linear(d_model, 5)
+        self.low_price_head = nn.Linear(d_model, 5)
 
     def forward(self, states: torch.Tensor) -> dict[str, torch.Tensor]:
         if states.ndim != 3 or states.shape[-1] != 10:
@@ -79,4 +80,5 @@ class StockAutoregressiveModel(nn.Module):
         hidden = self.norm(self.transformer(hidden, mask=causal_mask)[:, -1, :])
         return {
             "high_price": self.high_price_head(hidden),
+            "low_price": self.low_price_head(hidden),
         }

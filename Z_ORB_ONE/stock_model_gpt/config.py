@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from .provenance import atomic_text
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -38,6 +39,7 @@ class Settings:
     dropout: float = 0.1
     seed: int = 42
     loss_high_price: float = 4.0
+    loss_low_price: float = 4.0
     focal_gamma: float = 2.0
     gate_window_days: int = 20
     gate_short_window_days: int = 5
@@ -50,13 +52,12 @@ class Settings:
     def load(cls, path: Path | str = DEFAULT_SETTINGS_PATH) -> "Settings":
         values = json.loads(Path(path).read_text(encoding="utf-8"))
         if "atr_boundaries_pct" in values:
-            raise ValueError("ATR 界線由初始訓練自動產生，請移除設定檔的 atr_boundaries_pct")
+            raise ValueError("ATR 使用程式內固定界線，請移除設定檔的 atr_boundaries_pct")
         return cls(**values)
 
     def save(self, path: Path | str = DEFAULT_SETTINGS_PATH) -> None:
         values = asdict(self)
         values.pop("atr_boundaries_pct")
-        Path(path).write_text(
+        atomic_text(Path(path),
             json.dumps(values, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )

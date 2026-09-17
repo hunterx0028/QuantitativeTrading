@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .paths import STOCK_DATA_PATH, UNIVERSE_DIR, ensure_runtime_dirs
+from .provenance import atomic_text
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def write_universe_snapshot(
         "effective_date": effective_date.isoformat(),
         "stocks": [asdict(stock) for stock in stocks],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     return path
 
 

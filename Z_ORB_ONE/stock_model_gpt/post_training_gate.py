@@ -1,8 +1,7 @@
 import argparse
-import json
 
 from .paths import EVALUATIONS_DIR
-from .signals import OUTPUT_SCHEMA
+from .checkpoint_gate import target_evaluations, evaluation_records
 
 
 def main() -> None:
@@ -13,42 +12,44 @@ def main() -> None:
     parser.add_argument("--min-success-rate", type=float, default=0.5)
     parser.add_argument("--strong-success-rate", type=float, default=0.7)
     args = parser.parse_args()
+    if min(args.days, args.short_window, args.min_signals) <= 0:
+        parser.error("days、short-window、min-signals 必須大於 0")
+    if not 0 <= args.min_success_rate <= args.strong_success_rate <= 1:
+        parser.error("成功率門檻必須符合 0 <= min <= strong <= 1")
 
-    evaluations = load_evaluations()[-args.days :]
+    evaluations = load_evaluations()
     if not evaluations:
         raise RuntimeError(f"找不到 evaluation 檔案: {EVALUATIONS_DIR}")
 
-    print_window("最近區間", evaluations, args)
-    if args.short_window < len(evaluations):
-        print_window(f"最近 {args.short_window} 日", evaluations[-args.short_window :], args)
+    for target in ("high_price", "low_price"):
+        rows = target_evaluations(evaluations, target)[-args.days:]
+        print(f"[{target}]")
+        if not rows:
+            print("無驗證資料，先累積資料")
+            continue
+        print_window("最近區間", rows, args, target)
+        if args.short_window < len(rows):
+            print_window(f"最近 {args.short_window} 日", rows[-args.short_window:], args, target)
 
 
 def load_evaluations() -> list[dict]:
-    paths = sorted(EVALUATIONS_DIR.glob("*.json"))
-    rows: list[dict] = []
-    for path in paths:
-        rows.append(json.loads(path.read_text(encoding="utf-8")))
-    rows = [row for row in rows if row.get("output_schema") == OUTPUT_SCHEMA]
-    if not rows:
-        return []
-    selected = rows[-1].get("signal_thresholds")
-    return [row for row in rows if row.get("signal_thresholds") == selected]
+    return evaluation_records(evaluations_dir=EVALUATIONS_DIR)
 
 
-def print_window(label: str, evaluations: list[dict], args) -> None:
+def print_window(label: str, evaluations: list[dict], args, target="high_price") -> None:
     signals = [signal for item in evaluations for signal in item.get("signals", [])]
     print(f"{label}: {len(evaluations)} 個交易日")
     print(f"篩選設定: {evaluations[-1].get('signal_thresholds')}")
-    print_directional_signals(signals, args)
+    print_directional_signals(signals, args, target)
 
 
-def print_directional_signals(signals: list[dict], args) -> None:
+def print_directional_signals(signals: list[dict], args, target="high_price") -> None:
     print(f"篩選訊號: {len(signals)} 筆")
-    print_trade_recommendation("所選刻度訊號", signals, args)
+    print_trade_recommendation("所選刻度訊號", signals, args, target)
 
 
 
-def print_trade_recommendation(label: str, signals: list[dict], args) -> None:
+def print_trade_recommendation(label: str, signals: list[dict], args, target="high_price") -> None:
     count = len(signals)
     if count == 0:
         print(f"{label}: 無訊號，暫不調整")
@@ -67,7 +68,7 @@ def print_trade_recommendation(label: str, signals: list[dict], args) -> None:
 
     print(
         f"{label}: success={success_count}/{count}={success_rate:.2%}, "
-        f"（實際 high_price 落在所選刻度的比例） -> {recommendation}"
+        f"（實際 {target} 落在所選刻度的比例） -> {recommendation}"
     )
 
 

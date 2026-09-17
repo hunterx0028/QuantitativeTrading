@@ -1,4 +1,4 @@
-"""Five-class high-price probabilities and report-only filtering."""
+"""Five-class price probabilities and independent target filtering."""
 import math
 from dataclasses import dataclass
 
@@ -40,14 +40,14 @@ def build_signal_thresholds(args, saved=None):
     return SignalThresholds(classes, saved["threshold_pct"] if pct is None else pct)
 
 
-def probabilities(prediction):
-    values = prediction.get("high_price")
+def probabilities(prediction, target="high_price"):
+    values = prediction.get(target)
     if not isinstance(values, dict) or set(values) != {str(c) for c in CLASSES}:
-        raise ValueError("預測檔不是 high_price 五分類格式，請使用新模型重新預測")
+        raise ValueError(f"預測檔不是 {target} 五分類格式，請使用新模型重新預測")
     if any(not isinstance(p, (int, float)) or not math.isfinite(p) or not 0 <= p <= 1 for p in values.values()):
-        raise ValueError("high_price 機率必須是 0 到 1 的有限數值")
+        raise ValueError(f"{target} 機率必須是 0 到 1 的有限數值")
     if not math.isclose(sum(values.values()), 1.0, abs_tol=1e-6):
-        raise ValueError("high_price 五種機率總和必須為 1")
+        raise ValueError(f"{target} 五種機率總和必須為 1")
     return values
 
 
@@ -56,29 +56,29 @@ def predicted_class(values):
     return max(CLASSES, key=lambda c: values[str(c)])
 
 
-def detect_signal(prediction, thresholds=SignalThresholds()):
-    values = probabilities(prediction)
+def detect_signal(prediction, thresholds=SignalThresholds(), target="high_price"):
+    values = probabilities(prediction, target)
     score = math.fsum(values[str(c)] for c in thresholds.classes)
     cutoff = thresholds.threshold_pct / 100
     if score < cutoff and not math.isclose(score, cutoff, rel_tol=0, abs_tol=1e-12):
         return None
     return {"symbol": prediction["symbol"], "prediction_date": prediction["prediction_date"],
-            "high_price": values, "predicted_class": predicted_class(values),
+            target: values, "predicted_class": predicted_class(values),
             "selected_classes": list(thresholds.classes), "target_probability": score,
-            "target_key": "high_price[" + ",".join(map(str, thresholds.classes)) + "]"}
+            "target_key": target + "[" + ",".join(map(str, thresholds.classes)) + "]"}
 
 
 def sorted_signals(signals):
     return sorted(signals, key=lambda s: (-s["target_probability"], s["symbol"]))
 
 
-def build_signal_report_lines(prediction_date, thresholds, signals):
+def build_signal_report_lines(prediction_date, thresholds, signals, target="high_price"):
     selected = ",".join(map(str, thresholds.classes))
     lines = [f"prediction_date={prediction_date.isoformat()}",
-             f"條件：P(high_price ∈ {{{selected}}}) ≥ {thresholds.threshold_pct:g}%",
+             f"條件：P({target} ∈ {{{selected}}}) ≥ {thresholds.threshold_pct:g}%",
              "股票  P(-2)  P(-1)  P(0)  P(1)  P(2)  所選合計  最高機率類別"]
     for signal in sorted_signals(signals):
-        values = "  ".join(f"{signal['high_price'][str(c)]:.2%}" for c in CLASSES)
+        values = "  ".join(f"{signal[target][str(c)]:.2%}" for c in CLASSES)
         lines.append(f"{signal['symbol']}  {values}  {signal['target_probability']:.2%}  {signal['predicted_class']}")
     if not signals:
         lines.append("沒有符合訊號門檻的標的")

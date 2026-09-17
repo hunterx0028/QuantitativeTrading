@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .paths import CANDLES_DIR, CORPORATE_ACTIONS_DIR, FEATURES_DIR, ensure_runtime_dirs
+from .provenance import atomic_text
 
 
 def parse_api_date(value: str) -> date:
@@ -41,9 +42,8 @@ def read_jsonl(path: Path) -> list[dict]:
 
 def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     ensure_runtime_dirs()
-    with path.open("w", encoding="utf-8", newline="\n") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    text = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n" for row in rows)
+    atomic_text(path, text)
 
 
 def merge_candles(symbol: str, incoming: Iterable[dict]) -> list[dict]:

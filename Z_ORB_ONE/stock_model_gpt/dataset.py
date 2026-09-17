@@ -11,6 +11,7 @@ from torch.utils.data import Dataset
 
 from .storage import read_jsonl
 from .night_futures import load_night_futures
+from .trading_calendar import assert_sequence_dates
 
 
 PRICE_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
@@ -31,6 +32,7 @@ def encode_sequence(rows: list[dict], prediction_date: str, night_by_date: dict[
     dates = [row["date"] for row in rows] + [prediction_date]
     if any(left >= right for left, right in zip(dates, dates[1:])):
         raise ValueError("股票序列與預測日期必須嚴格遞增")
+    assert_sequence_dates(dates)
     encoded = []
     for index, row in enumerate(rows):
         night_date = dates[index + 1]
@@ -103,6 +105,10 @@ class StockSequenceDataset(Dataset):
                     continue
                 if any(row["date"] not in self.night_by_date for row in window[1:]):
                     continue
+                try:
+                    assert_sequence_dates([row["date"] for row in window])
+                except ValueError:
+                    continue
                 self.refs.append(SequenceRef(path, end))
 
     def __len__(self) -> int:
@@ -118,6 +124,7 @@ class StockSequenceDataset(Dataset):
         )
         return inputs, {
             "high_price": torch.tensor(PRICE_TO_ID[rows[ref.end]["high_price"]], dtype=torch.long),
+            "low_price": torch.tensor(PRICE_TO_ID[rows[ref.end]["low_price"]], dtype=torch.long),
         }
 
 

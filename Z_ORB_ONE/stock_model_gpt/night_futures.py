@@ -35,6 +35,8 @@ def night_futures_bucket(change_pct: float) -> int:
     preceding day-session close, matching `features.py:price_bucket`'s
     boundary-snapping convention (a value that lands exactly on a boundary
     goes to the less extreme bucket, guarding against float noise)."""
+    if not math.isfinite(change_pct):
+        raise ValueError("夜盤漲跌幅必須是有限數值")
     if change_pct < -1.0 and not math.isclose(change_pct, -1.0, abs_tol=1e-9):
         return -2
     if change_pct < -0.5 and not math.isclose(change_pct, -0.5, abs_tol=1e-9):

@@ -8,15 +8,17 @@ from pathlib import Path
 from .config import Settings
 from .paths import CHECKPOINT_DIR
 from .training import train
+from .checkpoints import current_checkpoint
 
 
 def latest_checkpoint() -> Path:
-    paths = sorted(CHECKPOINT_DIR.glob("stock_model_gpt_*.pt"))
-    if not paths:
-        raise RuntimeError("找不到既有 checkpoint，請先執行 train_initial")
-    return paths[-1]
+    return current_checkpoint(CHECKPOINT_DIR)
 
 
+from .runtime_lock import locked
+
+
+@locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="從前一版本繼續每日訓練")
     parser.add_argument("--checkpoint", default=None)
