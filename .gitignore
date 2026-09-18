@@ -29,3 +29,4 @@ execute_strategy_broken_high_falling_docker_v17.py
 /Z_ORB_ONE/stock_model_gpt/predictions/
 /Z_ORB_ONE/stock_model_gpt/tests/
 /Z_ORB_ONE/stock_model_gpt/signal_reports/
+/Z_ORB_ONE/stock_model_gpt/

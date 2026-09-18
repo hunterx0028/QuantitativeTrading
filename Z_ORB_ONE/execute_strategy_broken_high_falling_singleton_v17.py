@@ -51,7 +51,7 @@ BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 # 部署前提：本程式不允許盤中補啟動；每日只會在 MAIN_START_TIME 前啟動一次。
 # 若該次啟動失敗，當日不會再由排程重新啟動，因此不處理盤中恢復或補單情境。
-MAIN_START_TIME = (8, 45)  # 主程序開始執行時間
+MAIN_START_TIME = (8, 50)  # 主程序開始執行時間
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 # 單日策略前提：同一股票只會屬於 LOWER、LIMIT_DOWN、LIMIT_UP 其中一種模式，
