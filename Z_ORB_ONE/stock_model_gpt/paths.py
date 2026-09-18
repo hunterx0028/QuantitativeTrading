@@ -21,6 +21,9 @@ NIGHT_FUTURES_PATH = DATA_DIR / "night_futures.jsonl"
 HISTORY_NIGHT_DIR = DATA_DIR / "history_night"
 CONFIG_PATH = Z_ORB_ONE_DIR / "config.ini"
 STOCK_DATA_PATH = Z_ORB_ONE_DIR / "stock_data.py"
+# Separate from the shared Esun config.ini above: this package's own FinMind
+# token, kept inside stock_model_gpt since nothing outside this package uses it.
+FINMIND_CONFIG_PATH = PACKAGE_DIR / "finmind_config.ini"
 
 # Write targets: redirected under STOCK_MODEL_GPT_WRITE_ROOT when that env var
 # is set (e.g. by a walk-forward backtest simulating historical dates), so a

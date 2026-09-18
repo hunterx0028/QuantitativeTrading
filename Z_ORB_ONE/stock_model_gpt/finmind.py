@@ -6,10 +6,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from configparser import ConfigParser
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .paths import FINMIND_CONFIG_PATH
 from .storage import (
     corporate_action_path,
     corporate_action_sync_path,
@@ -35,6 +38,21 @@ DATASET_ACCEPTS_DATA_ID = {
     "TaiwanStockParValueChange": False,
 }
 _GLOBAL_DATASET_CACHE: dict[tuple[str, date, date, bool], list[dict]] = {}
+
+
+def config_token(config_path: Path = FINMIND_CONFIG_PATH) -> str | None:
+    """Read the FinMind API token from this package's own finmind_config.ini.
+
+    Kept separate from the shared Z_ORB_ONE/config.ini (Esun API credentials)
+    and gitignored, so a personal token can be pasted here without risking
+    a commit. Returns None if the file, section or value is missing.
+    """
+    if not Path(config_path).exists():
+        return None
+    parser = ConfigParser()
+    parser.read(config_path, encoding="utf-8")
+    token = parser.get("FinMind", "Token", fallback="").strip()
+    return token or None
 
 
 def clear_query_cache():
@@ -161,7 +179,7 @@ def update_corporate_actions(
     if start_date > as_of:
         return []
 
-    token = token or os.environ.get("FINMIND_TOKEN") or None
+    token = token or os.environ.get("FINMIND_TOKEN") or config_token() or None
     incoming: list[dict] = []
     datasets = FREE_DATASETS + (
         EXTENDED_DATASETS if settings.finmind_extended_corporate_actions else ()
