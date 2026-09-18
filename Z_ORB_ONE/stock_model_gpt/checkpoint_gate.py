@@ -3,11 +3,20 @@
 There is no offline backtest in this pipeline, so a freshly trained checkpoint
 cannot be evaluated before it is used. Instead this acts as a circuit breaker:
 after each day's `validate_predictions` run, compare the recent short-window
-signal success rate against the longer baseline window (same two windows
-`post_training_gate.py` already reports). If it has dropped sharply, flag the
-gate as DEGRADED so `predict.py` refuses to silently keep auto-selecting the
-current checkpoint for live signals. Forward observation forecasts allow
-continued evaluation and recovery without publishing formal signals.
+signal success rate against an older baseline window immediately before it
+(the two windows are adjacent, not overlapping — see `_compute_gate_status`).
+The comparison is a one-tailed Fisher's exact test (exact hypergeometric
+tail probability, computed from scratch below with no scipy dependency) for
+"the recent window's success rate is lower than the baseline's", rather than
+a fixed success-rate-drop threshold: with only a handful of signals a
+percentage-point drop is mostly noise, and a fixed threshold either fires on
+that noise or has to be set so loose it misses real degradation. The
+significance test naturally demands a starker, more consistent drop before
+flagging DEGRADED when sample sizes are small, and is more sensitive once
+enough signals have accumulated. If the drop is significant, flag the gate as
+DEGRADED so `predict.py` refuses to silently keep auto-selecting the current
+checkpoint for live signals. Forward observation forecasts allow continued
+evaluation and recovery without publishing formal signals.
 """
 from __future__ import annotations
 
@@ -73,16 +82,45 @@ def evaluation_records(evaluations_dir=None, predictions_dir=None, as_of=None):
 
 
 def _load_recent_evaluations(days: int, target: str = "high_price", as_of=None) -> list[dict]:
+    """Single-target convenience wrapper. `compute_gate_status` needs both
+    targets and calls `evaluation_records`/`target_evaluations` directly
+    instead, so one gate refresh doesn't re-scan the whole evaluations
+    directory once per target."""
     records = evaluation_records(as_of=as_of)
     return target_evaluations(records, target)[-days:]
 
 
-def signal_success_rate(evaluations: list[dict]) -> tuple[int, float | None]:
+def signal_success_rate(evaluations: list[dict]) -> tuple[int, int | None, float | None]:
     signals = [signal for item in evaluations for signal in item.get("signals", [])]
     if not signals:
-        return 0, None
+        return 0, None, None
     success = sum(1 for signal in signals if signal["success"])
-    return len(signals), success / len(signals)
+    return len(signals), success, success / len(signals)
+
+
+def _hypergeometric_pmf(k: int, population: int, population_successes: int, draws: int) -> float:
+    if k < 0 or k > draws or k > population_successes or (draws - k) > (population - population_successes):
+        return 0.0
+    return (math.comb(population_successes, k) * math.comb(population - population_successes, draws - k)
+            / math.comb(population, draws))
+
+
+def fisher_one_sided_p_value(baseline_success: int, baseline_total: int,
+                             recent_success: int, recent_total: int) -> float:
+    """One-tailed Fisher's exact test p-value for "the recent group's success
+    rate is lower than the baseline group's", from the 2x2 contingency table
+    (baseline_success, baseline_total-baseline_success; recent_success,
+    recent_total-recent_success). Computed directly from the exact
+    hypergeometric distribution — P(recent successes <= observed), given the
+    fixed row/column totals — so no scipy dependency is needed for what
+    scipy.stats.fisher_exact(alternative='less') would otherwise give."""
+    population = baseline_total + recent_total
+    population_successes = baseline_success + recent_success
+    lower = max(0, recent_total - (population - population_successes))
+    return math.fsum(
+        _hypergeometric_pmf(k, population, population_successes, recent_total)
+        for k in range(lower, recent_success + 1)
+    )
 
 
 def pooled_recall_precision(evaluations: list[dict], field: str) -> dict:
@@ -99,61 +137,70 @@ def pooled_recall_precision(evaluations: list[dict], field: str) -> dict:
     }
 
 
-def _compute_gate_status(settings: Settings, target: str = "high_price", as_of=None) -> dict:
-    long_window = _load_recent_evaluations(settings.gate_window_days, target, as_of)
+def _compute_gate_status(settings: Settings, long_window: list[dict]) -> dict:
+    long_window = long_window[-settings.gate_window_days:]
     short_window = long_window[-settings.gate_short_window_days:]
-    long_count, long_rate = signal_success_rate(long_window)
-    short_count, short_rate = signal_success_rate(short_window)
+    # Baseline and recent windows are adjacent and non-overlapping (unlike the
+    # old "recent vs. everything including recent" comparison), so the
+    # significance test below compares two independent samples.
+    baseline_window = long_window[:-settings.gate_short_window_days]
+    baseline_count, baseline_success, baseline_rate = signal_success_rate(baseline_window)
+    short_count, short_success, short_rate = signal_success_rate(short_window)
     checked_at = datetime.now().isoformat(timespec="seconds")
 
-    if long_count < settings.gate_min_signals or short_count < settings.gate_min_signals:
+    if baseline_count < settings.gate_min_signals or short_count < settings.gate_min_signals:
         return {
             "verdict": "INSUFFICIENT_DATA",
             "checked_at": checked_at,
-            "long_window": {"days": len(long_window), "signals": long_count, "success_rate": long_rate},
+            "baseline_window": {"days": len(baseline_window), "signals": baseline_count, "success_rate": baseline_rate},
             "short_window": {"days": len(short_window), "signals": short_count, "success_rate": short_rate},
             "reason": "訊號樣本數不足，暫不判定此目標是否退化",
         }
 
-    drop = long_rate - short_rate
-    if drop >= settings.gate_max_success_rate_drop or math.isclose(
-            drop, settings.gate_max_success_rate_drop, rel_tol=0, abs_tol=1e-12):
+    p_value = fisher_one_sided_p_value(baseline_success, baseline_count, short_success, short_count)
+    if short_rate < baseline_rate and (p_value <= settings.gate_significance_level or math.isclose(
+            p_value, settings.gate_significance_level, rel_tol=0, abs_tol=1e-12)):
         verdict = "DEGRADED"
         reason = (
-            f"最近 {len(short_window)} 個交易日訊號成功率 {short_rate:.2%}，"
-            f"較前 {len(long_window)} 日的 {long_rate:.2%} 下降 {drop:.2%}，"
-            f"超過容許值 {settings.gate_max_success_rate_drop:.2%}"
+            f"最近 {len(short_window)} 個交易日訊號成功率 {short_rate:.2%}（{short_success}/{short_count}），"
+            f"較前 {len(baseline_window)} 日的 {baseline_rate:.2%}（{baseline_success}/{baseline_count}）"
+            f"顯著偏低（Fisher's exact test 單尾 p={p_value:.4f} ≤ 顯著水準 {settings.gate_significance_level:g}）"
         )
     else:
         verdict = "OK"
-        reason = "近期訊號成功率在容許範圍內"
+        reason = f"近期訊號成功率與基準期無顯著差異（p={p_value:.4f}）"
 
     return {
         "verdict": verdict,
         "checked_at": checked_at,
-        "long_window": {"days": len(long_window), "signals": long_count, "success_rate": long_rate},
+        "baseline_window": {"days": len(baseline_window), "signals": baseline_count, "success_rate": baseline_rate},
         "short_window": {"days": len(short_window), "signals": short_count, "success_rate": short_rate},
+        "p_value": p_value,
         "reason": reason,
     }
 
 
 def compute_gate_status(settings: Settings, as_of=None) -> dict:
-    if not (0 < settings.gate_short_window_days <= settings.gate_window_days
-            and settings.gate_min_signals > 0 and 0 < settings.gate_max_success_rate_drop <= 1):
-        raise ValueError("gate 視窗須為正數且短期不大於長期，min_signals > 0，退化門檻須在 (0, 1]")
+    if not (0 < settings.gate_short_window_days < settings.gate_window_days
+            and settings.gate_min_signals > 0 and 0 < settings.gate_significance_level < 1):
+        raise ValueError("gate 視窗須為正數且短期嚴格小於長期（需留出基準期），"
+                        "min_signals > 0，顯著水準須在 (0, 1) 之間")
     targets = {}
     prediction_versions = {}
     previous = json.loads(GATE_STATUS_PATH.read_text(encoding="utf-8")) if GATE_STATUS_PATH.exists() else {}
     if (previous.get("output_schema") != OUTPUT_SCHEMA
             or (as_of is not None and previous.get("as_of", "") > str(as_of))):
         previous = {}
+    # Loaded once and reused for both targets below — evaluation_records() re-parses
+    # every matching evaluation file on disk, and that cost only grows with history.
+    records = evaluation_records(as_of=as_of)
     for target in ("high_price", "low_price"):
-        recent = _load_recent_evaluations(settings.gate_window_days, target, as_of)
+        recent = target_evaluations(records, target)[-settings.gate_window_days:]
         prediction_versions.update({row["prediction_date"]: {
                                         "sha256": row["prediction_content_sha256"],
                                         "mode": row.get("mode", "official")}
                                     for row in recent if row.get("prediction_content_sha256")})
-        targets[target] = {**_compute_gate_status(settings, target, as_of),
+        targets[target] = {**_compute_gate_status(settings, recent),
                            "signal_thresholds": recent[-1]["signal_thresholds"] if recent else None}
         old = previous.get("targets", {}).get(target, {})
         if (old.get("verdict") == "DEGRADED" and targets[target]["verdict"] == "INSUFFICIENT_DATA"

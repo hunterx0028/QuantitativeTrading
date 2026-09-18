@@ -29,5 +29,6 @@
   "gate_window_days": 20,
   "gate_short_window_days": 5,
   "gate_min_signals": 3,
-  "gate_max_success_rate_drop": 0.25
+  "gate_significance_level": 0.05,
+  "atr_recalibration_interval_days": 90
 }

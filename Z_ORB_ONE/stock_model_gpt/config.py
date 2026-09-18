@@ -44,7 +44,8 @@ class Settings:
     gate_window_days: int = 20
     gate_short_window_days: int = 5
     gate_min_signals: int = 3
-    gate_max_success_rate_drop: float = 0.25
+    gate_significance_level: float = 0.05
+    atr_recalibration_interval_days: int = 90
     # Internal checkpoint metadata only; never a user configuration override.
     atr_boundaries_pct: list[float] | None = None
 

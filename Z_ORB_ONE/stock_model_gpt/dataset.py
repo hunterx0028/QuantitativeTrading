@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 from .storage import read_jsonl
 from .night_futures import load_night_futures
-from .trading_calendar import assert_sequence_dates
+from .trading_calendar import assert_sequence_dates, shared_calendar
 
 
 PRICE_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
@@ -72,6 +72,20 @@ class SequenceRef:
     end: int
 
 
+def _calendar_session_ok(calendar, day: str) -> bool:
+    try:
+        return calendar.is_session(day)
+    except ValueError:
+        return False
+
+
+def _calendar_link_ok(calendar, previous_day: str, day: str) -> bool:
+    try:
+        return calendar.next_session(previous_day) == day
+    except ValueError:
+        return False
+
+
 class StockSequenceDataset(Dataset):
     def __init__(
         self,
@@ -93,21 +107,42 @@ class StockSequenceDataset(Dataset):
             for path in feature_paths
         }
         floor = min_target_date.isoformat() if min_target_date else None
+        calendar = shared_calendar()
         self.refs: list[SequenceRef] = []
         for path, rows in self.rows_by_path.items():
-            for end in range(context_days, len(rows)):
+            count = len(rows)
+            if count <= context_days:
+                continue
+            if any("previous_date" not in row for row in rows[1:]):
+                raise ValueError("特徵缺少 previous_date；請重新執行 prepare_features")
+            # `chain_length[i]`: length of the run of rows ending at i that are each
+            # a valid trading session and unbroken (by previous_date *and*
+            # calendar-derived next_session, so a forged previous_date can't hide
+            # a real gap) — computed once per row instead of once per (row,
+            # window) pair, which made dataset construction O(days * context_days).
+            chain_length = [0] * count
+            chain_length[0] = 1 if _calendar_session_ok(calendar, rows[0]["date"]) else 0
+            for i in range(1, count):
+                if not _calendar_session_ok(calendar, rows[i]["date"]):
+                    chain_length[i] = 0
+                    continue
+                linked = (chain_length[i - 1] > 0
+                          and rows[i]["previous_date"] == rows[i - 1]["date"]
+                          and _calendar_link_ok(calendar, rows[i - 1]["date"], rows[i]["date"]))
+                chain_length[i] = chain_length[i - 1] + 1 if linked else 1
+            # `night_gap[k]`: count of rows in rows[0:k] missing night-futures
+            # coverage, for an O(1) range check below instead of re-scanning
+            # each window.
+            night_gap = [0] * (count + 1)
+            for i in range(count):
+                night_gap[i + 1] = night_gap[i] + (0 if rows[i]["date"] in self.night_by_date else 1)
+            for end in range(context_days, count):
                 if floor is not None and rows[end]["date"] < floor:
                     continue
-                window = rows[end - context_days:end + 1]
-                if any("previous_date" not in row for row in window[1:]):
-                    raise ValueError("特徵缺少 previous_date；請重新執行 prepare_features")
-                if any(right["previous_date"] != left["date"] for left, right in zip(window, window[1:])):
+                if chain_length[end] < context_days + 1:
                     continue
-                if any(row["date"] not in self.night_by_date for row in window[1:]):
-                    continue
-                try:
-                    assert_sequence_dates([row["date"] for row in window])
-                except ValueError:
+                start = end - context_days
+                if night_gap[end + 1] - night_gap[start + 1] > 0:
                     continue
                 self.refs.append(SequenceRef(path, end))
 

@@ -56,7 +56,7 @@ python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-15 --training-
 
 資料長度以有效交易日計算：目前 `context_days=120`，每筆訓練樣本需要 120 天歷史特徵及下一天的目標。夜盤只有約 100 個交易日時，無法建立樣本；在行情完整、日期連續且暖機資料充足的情況下，至少 121 天有效特徵才能建立第一筆樣本，270 天約可提供最近 150 天的目標。`training-window-days` 不會補足資料或自動縮短輸入。
 
-ATR 五級界線目前由 `atr_calibration.py` 固定提供，不會在每次初始訓練時重新估計。選回最佳 epoch 時，模型、optimizer 與 CUDA scaler 會一起回復至該輪狀態，供每日續訓沿用。
+ATR 五級界線由 `atr_calibration.py` 每 `settings.atr_recalibration_interval_days`（預設 90）天，在**從零訓練的 reseed**（無 `--checkpoint`／`resume_path`）時自動用最近特徵資料的 20/40/60/80 百分位數重新校準一次，而不是每次都重估——避免分桶定義隨每次訓練漂移。校準結果與歷史紀錄存在 `data/atr_analysis/`（`current_calibration.json` 為目前使用值，另有依日期存檔）。任何**續訓**（`train_daily`／`daily=True`，或帶 `--checkpoint` 續跑）一律直接沿用來源 checkpoint 自己的界線，絕不重新校準——因為 `atr_embedding` 的權重是針對那組界線學出來的，換界線等於讓權重在不知情的狀況下錯位。可用歷史樣本不足 100 筆時，退回歷史固定值（`ATR_BOUNDARIES_PCT`）且不寫入校準紀錄，下次 reseed 會再嘗試重新校準。選回最佳 epoch 時，模型、optimizer 與 CUDA scaler 會一起回復至該輪狀態，供每日續訓沿用。
 
 訓練前會檢查 `epochs`、`daily_epochs`、`batch_size` 必須為正整數；學習率與 high／low loss 權重須為有限正數，`focal_gamma` 須為有限非負數。訓練或驗證 loss、梯度出現 NaN／Inf，或 optimizer 未實際完成更新（包含 AMP 跳過更新）時，會中止本次訓練，不發布新模型、不寫入新的樣本學習紀錄；目前模型保持原狀。
 
@@ -187,7 +187,7 @@ python -m Z_ORB_ONE.stock_model_gpt.post_training_gate --days 20 --short-window 
 **兩支 gate 的用途不同：**
 
 - `post_training_gate.py`：手動執行，僅輸出上述絕對成功率的建議，不修改篩選門檻、不選用模型，也不寫入自動 gate 狀態。
-- `checkpoint_gate.py`：一般由原始條件的 `validate_predictions` 自動呼叫，將狀態保存至 `checkpoints/gate_status.json`。依 `settings.json` 的 `gate_window_days=20`、`gate_short_window_days=5`、`gate_min_signals=3`、`gate_max_success_rate_drop=0.25`，分別比較 high、low 的長短區間成功率；短期比長期下降至少 25 個百分點即判定退化（長期區間包含短期）。
+- `checkpoint_gate.py`：一般由原始條件的 `validate_predictions` 自動呼叫，將狀態保存至 `checkpoints/gate_status.json`。依 `settings.json` 的 `gate_window_days=20`、`gate_short_window_days=5`、`gate_min_signals=3`、`gate_significance_level=0.05`，分別對 high、low 比較「最近 `gate_short_window_days` 天（短期）」與「其之前、不重疊的 `gate_window_days - gate_short_window_days` 天（基準期）」的成功率，用單尾 Fisher's exact test（精確超幾何分布，無需 scipy）檢定短期是否顯著低於基準期，顯著（p 值 ≤ `gate_significance_level`）才判定退化。相較於固定百分點門檻，樣本數少時需要更明顯、更一致的下滑才會觸發，避免單一雜訊訊號誤判；樣本數足夠多時則能偵測到更細微但穩定的退化。
 
 `predict` 自動選模型前會依 `universe-date` 重新計算 gate，不單靠上次的 `gate_status.json`。只要 high 或 low 有**與本次該目標篩選條件相同**的 `DEGRADED` 狀態，就停止正式預測；剛開始沒有足夠樣本時不阻擋，但已退化的目標不會因後續樣本不足而自動解除。
 
@@ -254,3 +254,29 @@ python -m Z_ORB_ONE.stock_model_gpt.checkpoints --checkpoint "Z_ORB_ONE/stock_mo
 
 - `reset_runtime_data` 預設只預覽，需 `--yes` 才刪除。若指定 `STOCK_MODEL_GPT_WRITE_ROOT`，只清除隔離目錄內的輸出，不刪除正式行情、公司行動或特徵資料。
 - 日曆、人工休市／停牌紀錄與夜盤資料保留；重置也受流程鎖保護。
+
+## 7. 走勢回測（backtest）
+
+`backtest.py` 對歷史區間重跑 `predict` → `validate_predictions`（可選每日續訓），直接重用正式流程的評分邏輯，不是另一套獨立的回測引擎：
+
+```bash
+python -m Z_ORB_ONE.stock_model_gpt.backtest \
+  --start-date 2026-03-01 --end-date 2026-05-31
+```
+
+- `--checkpoint` 可省略：省略時自動選用正式 `checkpoints/` 內、`training_as_of` 不晚於起始日前一交易日的最新一顆（見下方 `list_checkpoints.py`），終端機會印出實際選到哪一顆；要指定特定模型才需要 `--checkpoint 路徑`。
+- 輸出完全隔離：內部會把 `STOCK_MODEL_GPT_WRITE_ROOT` 指到 `backtests/<起訖日期>_<時間戳記>/`，不會覆寫正式的 `predictions/`、`checkpoints/`、`evaluations/`、`gate_status.json`；`candles`/`features`/`corporate_actions`/`night_futures` 全程只讀，從不寫回。
+- 需要正式環境已累積的歷史股票清單快照（`data/universe/*.json`）；啟動時會自動複製一份到隔離目錄，缺快照的日期會被跳過並列在報告的 `failures` 裡（原因通常是 `找不到當日股票清單快照`）。
+- 預設 `--daily-train` 關閉：整段區間只評估同一個起始 checkpoint（凍結模型回測，適合回答「這個模型放著不訓練，接下來表現會不會撐住」）；加上 `--daily-train` 才會在每天驗證後也模擬 `train_daily` 續訓，checkpoint 逐日往下傳遞。
+- 結束後在隔離目錄產生 `backtest_report.json`，並在終端機印出各 target 的 pooled 準確率、log loss（含 naive baseline 對照）、訊號 precision/recall，以及區間結束當下的 gate 狀態。
+- 任一天 `predict`/`validate` 拋出 `RuntimeError`（例如當天歷史特徵不足、找不到清單快照）只會記錄跳過並繼續下一天，不會中止整段回測；報告裡 `failures` 會列出每一天的原因。
+
+### 手動查詢 checkpoint 的 training_as_of
+
+`.pt` 檔名的時間戳記是訓練**執行當下**的時間，不一定等於訓練用的 `--as-of`（例如補跑、或手動指定較早的 `--as-of`）。`list_checkpoints.py` 直接讀 checkpoint 內容裡的 `training_as_of`，依日期排序列出，不必憑檔名猜：
+
+```bash
+python -m Z_ORB_ONE.stock_model_gpt.list_checkpoints --as-of 2026-02-28
+```
+
+刻意放在套件原始碼底下（跟 `predict.py`、`train_daily.py` 同一層），不是放進 `checkpoints/` 資料夾——`reset_runtime_data.py --yes` 會整個清空那個資料夾。

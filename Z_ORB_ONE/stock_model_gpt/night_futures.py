@@ -27,7 +27,10 @@ from .paths import NIGHT_FUTURES_PATH
 from .storage import read_jsonl, write_jsonl
 
 
-NIGHT_FUTURES_BOUNDARIES_PCT = (1.0, 0.5, -0.5, -1.0)  # not a monotonic ladder; see night_futures_bucket
+NIGHT_FUTURES_CLASSES = (-2, -1, 0, 1, 2)
+# Ascending boundaries between consecutive classes above, e.g. NIGHT_FUTURES_BOUNDARIES_PCT[0]
+# is the -2/-1 cutoff. Must stay strictly increasing and one shorter than NIGHT_FUTURES_CLASSES.
+NIGHT_FUTURES_BOUNDARIES_PCT = (-1.0, -0.5, 0.5, 1.0)
 
 
 def night_futures_bucket(change_pct: float) -> int:
@@ -37,15 +40,10 @@ def night_futures_bucket(change_pct: float) -> int:
     goes to the less extreme bucket, guarding against float noise)."""
     if not math.isfinite(change_pct):
         raise ValueError("夜盤漲跌幅必須是有限數值")
-    if change_pct < -1.0 and not math.isclose(change_pct, -1.0, abs_tol=1e-9):
-        return -2
-    if change_pct < -0.5 and not math.isclose(change_pct, -0.5, abs_tol=1e-9):
-        return -1
-    if change_pct < 0.5 and not math.isclose(change_pct, 0.5, abs_tol=1e-9):
-        return 0
-    if change_pct < 1.0 and not math.isclose(change_pct, 1.0, abs_tol=1e-9):
-        return 1
-    return 2
+    for boundary, bucket in zip(NIGHT_FUTURES_BOUNDARIES_PCT, NIGHT_FUTURES_CLASSES):
+        if change_pct < boundary and not math.isclose(change_pct, boundary, abs_tol=1e-9):
+            return bucket
+    return NIGHT_FUTURES_CLASSES[-1]
 
 
 def parse_night_futures_csv(path: Path) -> list[dict]:

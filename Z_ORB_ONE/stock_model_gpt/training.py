@@ -21,7 +21,7 @@ from .model import StockAutoregressiveModel
 from .signals import CLASSES
 from .paths import CHECKPOINT_DIR, FEATURES_DIR, ensure_runtime_dirs
 from .universe import recent_symbols
-from .storage import read_jsonl
+from .storage import read_jsonl, read_jsonl_tail
 from .replay import select_daily_sequences
 from .provenance import fingerprint, file_fingerprint, sample_key, sample_versions
 from .checkpoints import publish_checkpoint, require_finite, verify_checkpoint
@@ -179,8 +179,16 @@ def _training_window_floor(
         raise ValueError("training_window_days 必須為正整數")
     cutoff = as_of.isoformat()
     dates: set[str] = set()
+    # Each symbol's file is sorted ascending, so only its trailing rows can
+    # possibly land inside the most-recent `training_window_days` distinct
+    # dates across all symbols — reading further back can't change the
+    # computed floor. The 2x margin absorbs any trailing rows past `cutoff`
+    # (e.g. a feature file already refreshed ahead of `as_of`) that get
+    # filtered out below, which would otherwise starve this file's
+    # contribution to the union.
+    tail_rows = max(training_window_days * 2, training_window_days + 30)
     for path in feature_paths:
-        dates.update(row["date"] for row in read_jsonl(path) if row["date"] <= cutoff)
+        dates.update(row["date"] for row in read_jsonl_tail(path, tail_rows) if row["date"] <= cutoff)
     if not dates:
         return None
     ordered = sorted(dates)
@@ -266,7 +274,7 @@ def train(
     if not feature_paths:
         raise RuntimeError("沒有足夠的特徵序列可供訓練")
     window_floor = _training_window_floor(feature_paths, as_of, training_window_days)
-    settings, atr_calibration = prepare_atr_levels(settings)
+    settings, atr_calibration = prepare_atr_levels(settings, as_of, feature_paths, checkpoint)
     dataset = StockSequenceDataset(
         feature_paths,
         settings.context_days,

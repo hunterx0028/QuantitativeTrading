@@ -40,6 +40,18 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def read_jsonl_tail(path: Path, count: int) -> list[dict]:
+    """Parse only the trailing `count` non-blank lines of a JSONL file (rows are
+    always appended in ascending date order — see write_jsonl/merge_* — so this
+    is the most recent `count` rows), for callers that only need a recent
+    window and would otherwise pay to parse a whole multi-year file."""
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as stream:
+        lines = [line for line in stream if line.strip()]
+    return [json.loads(line) for line in lines[-count:]]
+
+
 def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     ensure_runtime_dirs()
     text = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n" for row in rows)
