@@ -3,7 +3,7 @@ import json
 import math
 import hashlib
 from dataclasses import asdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date
 from pathlib import Path
 
 from .config import Settings
@@ -17,6 +17,7 @@ from .paths import (
     ensure_runtime_dirs,
 )
 from .checkpoint_gate import compute_gate_status, save_gate_status
+from .meta_labeling import update_from_evaluation
 from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds,
                       build_signal_thresholds, detect_signal, probabilities, predicted_class, sorted_signals)
 from .classification_metrics import rates, matrix_metrics
@@ -24,16 +25,6 @@ from .storage import write_jsonl
 from .provenance import file_fingerprint, atomic_text
 from .trading_calendar import suspension_reason
 from .evaluation_inputs import snapshot as actual_input_snapshot
-
-
-def eligible_observation(payload):
-    try:
-        created = datetime.fromisoformat(payload["created_at"])
-        opening = datetime.combine(date.fromisoformat(payload["prediction_date"]),
-                                   time(9), timezone(timedelta(hours=8)))
-        return payload.get("mode") == "observation" and created.tzinfo is not None and created < opening
-    except (KeyError, ValueError, TypeError):
-        return False
 
 
 def run_validation(
@@ -86,16 +77,14 @@ def run_validation(
     official = PREDICTIONS_DIR / f"{prediction_date}.json"
     summary["official_prediction"] = (official.exists() and
         file_fingerprint(official) == summary["prediction_content_sha256"])
-    observation_path = PREDICTIONS_DIR / "observations" / f"{prediction_date}.json"
-    summary["observation_prediction"] = (payload.get("mode") == "observation" and observation_path.exists()
-        and file_fingerprint(observation_path) == summary["prediction_content_sha256"])
     summary["mode"] = payload.get("mode", "official")
-    summary["observation_eligible"] = eligible_observation(payload)
     for target in summary["targets"].values():
         target.update({key: summary[key] for key in (
             "prediction_date", "prediction_id", "prediction_content_sha256", "official_prediction", "mode")})
     write_evaluation(prediction_date, summary)
-    if update_gate and not overridden and (summary["official_prediction"] or summary["observation_prediction"]):
+    if not overridden and summary["official_prediction"]:
+        update_from_evaluation(summary, settings)
+    if update_gate and not overridden and summary["official_prediction"]:
         gate_status = compute_gate_status(settings)
         save_gate_status(gate_status)
         print(f"checkpoint gate: {gate_status['verdict']} — {gate_status['reason']}")
@@ -326,9 +315,7 @@ def write_evaluation(prediction_date: str, summary: dict) -> None:
         digest = hashlib.sha256(json.dumps(conditions, sort_keys=True).encode()).hexdigest()[:16]
         archive = EVALUATIONS_DIR / "versions" / prediction_date / content_hash / f"{digest}.json"
         atomic_text(archive, json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-        if summary.get("observation_prediction") and not summary.get("conditions_overridden"):
-            output = EVALUATIONS_DIR / "observations" / f"{prediction_date}.json"
-        elif not summary.get("official_prediction", False):
+        if not summary.get("official_prediction", False):
             print(f"非正式預測驗證已另存，不更新每日正式結果與 gate: {archive}")
             return
     if summary.get("conditions_overridden"):

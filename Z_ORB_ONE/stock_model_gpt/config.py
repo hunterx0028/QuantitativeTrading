@@ -41,10 +41,12 @@ class Settings:
     loss_high_price: float = 4.0
     loss_low_price: float = 4.0
     focal_gamma: float = 2.0
+    use_amp: bool = False
     gate_window_days: int = 20
     gate_short_window_days: int = 5
     gate_min_signals: int = 3
     gate_significance_level: float = 0.05
+    meta_label_min_days: int = 20
     atr_recalibration_interval_days: int = 90
     # Internal checkpoint metadata only; never a user configuration override.
     atr_boundaries_pct: list[float] | None = None

@@ -26,9 +26,11 @@
   "loss_high_price": 4.0,
   "loss_low_price": 4.0,
   "focal_gamma": 2.0,
+  "use_amp": false,
   "gate_window_days": 20,
   "gate_short_window_days": 5,
   "gate_min_signals": 3,
   "gate_significance_level": 0.05,
+  "meta_label_min_days": 20,
   "atr_recalibration_interval_days": 90
 }

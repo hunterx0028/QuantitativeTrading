@@ -35,6 +35,7 @@ _WRITE_ROOT = Path(_write_root_override).resolve() if _write_root_override else 
 ACTUAL_CANDLES_DIR = _WRITE_ROOT / "data" / "actual_candles"
 UNIVERSE_DIR = _WRITE_ROOT / "data" / "universe"
 EVALUATIONS_DIR = _WRITE_ROOT / "data" / "evaluations"
+META_LABELS_DIR = _WRITE_ROOT / "data" / "meta_labels"
 DATA_CHECKS_DIR = _WRITE_ROOT / "data" / "data_checks"
 ATR_ANALYSIS_DIR = _WRITE_ROOT / "data" / "atr_analysis"
 CHECKPOINT_DIR = _WRITE_ROOT / "checkpoints"
@@ -50,6 +51,7 @@ def ensure_runtime_dirs() -> None:
         UNIVERSE_DIR,
         FEATURES_DIR,
         EVALUATIONS_DIR,
+        META_LABELS_DIR,
         ATR_ANALYSIS_DIR,
         CHECKPOINT_DIR,
         PREDICTIONS_DIR,

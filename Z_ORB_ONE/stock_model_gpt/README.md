@@ -32,7 +32,23 @@ python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --date YYYY-MM-DD --closed 
 python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --date YYYY-MM-DD --suspend-symbol 2330 --reason "公告來源與停牌原因"
 ```
 
-休市例外存於 `overrides.json`，停牌紀錄存於 `suspensions.json`；用 `--open` 可更正指定日期為交易日。年度同步不覆蓋這兩份人工紀錄。每月可重跑當年度同步，納入已結束月份的實際交易日期。
+休市例外存於 `overrides.json`，停牌紀錄存於 `suspensions.json`；用 `--open` 可更正指定日期為交易日。年度同步不覆蓋這兩份人工紀錄。
+
+日常流程不必每天重抓日曆，但需要定期維護：
+
+- **月底或月初**：重跑當年度同步，納入剛結束月份的官方實際交易日，包含臨時休市修正。
+- **跨年前／新年度第一次使用前**：先補下一年度日曆；若官方尚未公告新年度休市表，程式會提示錯誤，等公告後再重跑。
+- **程式提示缺少某年度日曆時**：補該年度或一次補齊從原始行情最早年份到預測年份。
+
+範例：
+
+```powershell
+# 每月維護當年度
+python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --start-year 2026 --end-year 2026
+
+# 跨年前先補下一年度
+python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --start-year 2026 --end-year 2027
+```
 
 程式拒絕休市日更新／訓練，並要求 `prediction-date` 正好是 `universe-date` 的下一交易日。股票資料若少了應有的交易日，特徵會重新累積暖機，訓練與預測不跨越缺洞；即使 `previous_date` 被接到較早一筆，也不能繞過檢查。停牌復牌後同樣重新累積暖機及連續輸入長度。
 
@@ -58,7 +74,7 @@ python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-15 --training-
 
 ATR 五級界線由 `atr_calibration.py` 每 `settings.atr_recalibration_interval_days`（預設 90）天，在**從零訓練的 reseed**（無 `--checkpoint`／`resume_path`）時自動用最近特徵資料的 20/40/60/80 百分位數重新校準一次，而不是每次都重估——避免分桶定義隨每次訓練漂移。校準結果與歷史紀錄存在 `data/atr_analysis/`（`current_calibration.json` 為目前使用值，另有依日期存檔）。任何**續訓**（`train_daily`／`daily=True`，或帶 `--checkpoint` 續跑）一律直接沿用來源 checkpoint 自己的界線，絕不重新校準——因為 `atr_embedding` 的權重是針對那組界線學出來的，換界線等於讓權重在不知情的狀況下錯位。可用歷史樣本不足 100 筆時，退回歷史固定值（`ATR_BOUNDARIES_PCT`）且不寫入校準紀錄，下次 reseed 會再嘗試重新校準。選回最佳 epoch 時，模型、optimizer 與 CUDA scaler 會一起回復至該輪狀態，供每日續訓沿用。
 
-訓練前會檢查 `epochs`、`daily_epochs`、`batch_size` 必須為正整數；學習率與 high／low loss 權重須為有限正數，`focal_gamma` 須為有限非負數。訓練或驗證 loss、梯度出現 NaN／Inf，或 optimizer 未實際完成更新（包含 AMP 跳過更新）時，會中止本次訓練，不發布新模型、不寫入新的樣本學習紀錄；目前模型保持原狀。
+訓練前會檢查 `epochs`、`daily_epochs`、`batch_size` 必須為正整數；學習率與 high／low loss 權重須為有限正數，`focal_gamma` 須為有限非負數。`use_amp` 預設為 `false`，即使用 CUDA 也以 full precision 訓練，避免 class weight 與 focal loss 在 mixed precision 下產生非有限梯度；若明確改成 `true` 才啟用 CUDA AMP。訓練或驗證 loss、梯度出現 NaN／Inf，或 optimizer 未實際完成更新（包含 AMP 跳過更新）時，會中止本次訓練，不發布新模型、不寫入新的樣本學習紀錄；目前模型保持原狀。
 
 新 checkpoint 的 `training_progress` 記錄實際執行輪數及 optimizer 更新次數；選回最佳 epoch 時，`optimizer_steps` 對應該模型，`executed_optimizer_steps` 則保留本次總更新次數。發布前也檢查 loss、optimizer、scaler 的數值有效性。正常的「沒有新樣本，略過續訓」仍會沿用既有模型。
 
@@ -85,6 +101,12 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-15 --predict
 - **控制台／`signal_reports/YYYY-MM-DD.txt`**：同一份摘要，分別列出 high、low 符合條件股票的五種機率、所選刻度合計機率、最高機率類別；兩份清單各自依合計機率由高到低排序，沒有符合股票時也會顯示該清單與條件。
 - **`predictions/YYYY-MM-DD.json`**：每支股票一筆，保存 high 與 low 各五種機率及 `signal_matches` 的兩個符合旗標，不符合門檻的股票也會保留。`high_signal_thresholds`、`low_signal_thresholds` 保存兩組設定；`high_signals`、`low_signals` 保存各自的符合清單。為維持現有 high 驗證相容性，`signal_thresholds`、`signals` 暫時保留為 high 的相同內容。
 
+### Meta-labeling 資料累積
+
+meta-labeling 目前先做**自動資料收集**，不影響正式預測清單。當 `predict` 產生當日正式版本時，會把 high／low 入選訊號登錄到 `data/meta_labels/YYYY-MM-DD.json`，狀態為待驗證；同日重跑但未成為正式版本的預測不會寫入。收盤後 `validate_predictions` 驗證正式預測時，會自動把這些樣本標成成功／失敗，並重建 `data/meta_labels/dataset.jsonl` 與 `data/meta_labels/status.json`。
+
+`settings.json` 的 `meta_label_min_days` 預設為 `20`。`status.json` 會顯示已完成標記的交易日數與 `ready` 狀態；未滿 20 個已驗證交易日前只累積資料，不訓練也不套用第二層篩選。未來要啟用 meta-labeling 模型時，應以這份 dataset 作為來源，再先用報表觀察，不直接取代正式訊號。
+
 ### 預測版本與正式預測
 
 每次 `predict` 都產生新的 `prediction_id`，保存至 `predictions/versions/YYYY-MM-DD/<prediction_id>.json`；同名 `.txt` 是該版本報表，`.inputs.json` 保存實際使用的特徵與編碼輸入。JSON 記錄建立時間、checkpoint 檔案 SHA-256 及輸入資料指紋。
@@ -109,9 +131,11 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-15 --predict
 python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-16 --training-window-days 150
 ```
 
+若當天是**月底、月初或跨年前後**，先依第 0 節同步交易日曆；一般日常更新只使用本機既有日曆，不需要每天重抓。
+
 啟動時會先檢查 `--as-of` 當天的夜盤資料；缺少時在控制台提示日期，並以錯誤狀態中止，不執行資料更新、特徵產生或續訓。補入該日期夜盤後，再重新執行。
 
-`run_daily` 依序執行：**行情更新與驗收 → 到期預測補驗證 → 重算 gate → 重建特徵 → 續訓**。會重新驗證截至 `--as-of` 的最近 `gate_window_days` 份每日登錄預測，並補驗證更早的漏跑、未完成或版本已變更紀錄；沒有正式版本的日期則驗證觀察版本，不掃描重跑版本庫。指定 `--settings 路徑` 時，所有步驟沿用同一設定檔。任何步驟拋出錯誤會中止後續工作；gate 為 `STALE`／`DEGRADED` 本身不阻止續訓，只限制正式預測。
+`run_daily` 依序執行：**行情更新與驗收 → 到期預測補驗證 → 重算 gate → 重建特徵 → 續訓**。會重新驗證截至 `--as-of` 的最近 `gate_window_days` 份每日登錄預測，並補驗證更早的漏跑、未完成或版本已變更紀錄；不掃描重跑版本庫。指定 `--settings 路徑` 時，所有步驟沿用同一設定檔。任何步驟拋出錯誤會中止後續工作；gate 為 `STALE`／`DEGRADED` 本身不阻止續訓，只限制正式預測。
 
 `run_daily` 自動使用 `update_data --require-complete`：
 
@@ -197,27 +221,7 @@ python -m Z_ORB_ONE.stock_model_gpt.post_training_gate --days 20 --short-window 
 
 明確指定 `--checkpoint` 仍可略過自動 gate（包含新鮮度檢查），屬於人工選模；`--settings` 可指定 gate 設定，模型本身仍沿用 checkpoint 內的設定。
 
-### gate 阻擋期間：觀察與恢復
-
-用觀察模式繼續產生開盤前預測，收盤後再驗證，才有新資料判斷是否恢復：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-16 --prediction-date 2026-09-17 --observe
-# 9/17 收盤後，run_daily 會更新行情並自動驗證這份觀察預測
-python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-17 --training-window-days 150
-```
-
-`--observe` 略過 gate，保留 high／low 機率於 `predictions/observations/YYYY-MM-DD.json` 及版本庫，不發布正式訊號報表。當日第一份觀察預測固定保留，重跑只新增版本；不能搭配 `--replace-official`。必須在被預測日台北時間 **09:00 前**產生，驗證端也會檢查保存的時間，事後補跑不能作為恢復證據。
-
-觀察驗證另存於 `data/evaluations/observations/`。同一天若有正式預測，gate 優先採正式結果，不能用另一份較好的觀察結果替換，也不重複計數。沒有正式預測時，合格觀察結果可加入相同條件的長短期統計；樣本足夠且不再退化、驗證已更新完整後即可恢復。這不保證固定觀察五天就會解除，也不表示模型已獲利。
-
-需要單獨驗證觀察版本時：
-
-```powershell
-python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-17 --predictions "observations/2026-09-17.json"
-```
-
-已移出清單、但仍有到期正式或觀察預測的股票，`update_data` 會補抓缺少的實際行情，且不把它重新加入當日股票清單。
+已移出清單、但仍有到期正式預測的股票，`update_data` 會補抓缺少的實際行情，且不把它重新加入當日股票清單。
 
 ### 步驟三：9/17 夜盤結束後補入資料
 
@@ -280,3 +284,24 @@ python -m Z_ORB_ONE.stock_model_gpt.list_checkpoints --as-of 2026-02-28
 ```
 
 刻意放在套件原始碼底下（跟 `predict.py`、`train_daily.py` 同一層），不是放進 `checkpoints/` 資料夾——`reset_runtime_data.py --yes` 會整個清空那個資料夾。
+
+
+
+
+盤前
+python -m Z_ORB_ONE.stock_model_gpt.set_night_futures --date 2026-09-21 --change -0.05
+python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-18 --prediction-date 2026-09-21
+收盤後
+python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-21
+python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-21 --training-window-days 150
+
+
+更新日歷
+python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --start-year 2026 --end-year 2026
+或是
+python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --start-year 2026 --end-year 2027
+
+
+
+人工報表，可每週五執行
+python -m Z_ORB_ONE.stock_model_gpt.post_training_gate

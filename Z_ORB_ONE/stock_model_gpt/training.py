@@ -340,7 +340,8 @@ def train(
 
     device = select_device()
     use_cuda = device.type == "cuda"
-    print(f"device={describe_device(device)}")
+    amp_enabled = use_cuda and settings.use_amp
+    print(f"device={describe_device(device)} amp={'on' if amp_enabled else 'off'}")
     criteria = build_criteria(settings, train_dataset, device)
     # Plain (unweighted, non-focal) cross-entropy — used only for measurement
     # (logged train loss, validation loss, early-stopping/epoch-selection),
@@ -364,14 +365,14 @@ def train(
     model = build_model(settings).to(device)
     learning_rate = settings.daily_learning_rate if daily else settings.learning_rate
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
         if "optimizer" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
             for group in optimizer.param_groups:
                 group["lr"] = learning_rate
-        if use_cuda and checkpoint.get("scaler"):
+        if amp_enabled and checkpoint.get("scaler"):
             scaler.load_state_dict(checkpoint["scaler"])
 
     epochs = settings.daily_epochs if daily else settings.epochs
@@ -406,7 +407,7 @@ def train(
             with torch.amp.autocast(
                 device_type="cuda",
                 dtype=torch.float16,
-                enabled=use_cuda,
+                enabled=amp_enabled,
             ):
                 outputs = model(states)
                 loss, _ = weighted_loss(outputs, targets, settings, criteria)
@@ -453,7 +454,7 @@ def train(
                 with torch.amp.autocast(
                     device_type="cuda",
                     dtype=torch.float16,
-                    enabled=use_cuda,
+                    enabled=amp_enabled,
                 ):
                     outputs = model(states)
                     # Plain CE here too — see plain_criteria above.
@@ -511,7 +512,7 @@ def train(
     if use_validation and best_state is not None:
         model.load_state_dict(best_state)
         optimizer.load_state_dict(best_optimizer_state)
-        if use_cuda:
+        if amp_enabled:
             scaler.load_state_dict(best_scaler_state)
         final_loss, final_component_loss = next(
             (item["train_loss"], item["train_components"])
@@ -535,7 +536,7 @@ def train(
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scaler": scaler.state_dict() if use_cuda else None,
+            "scaler": scaler.state_dict() if amp_enabled else None,
             "settings": asdict(settings),
             "target_names": TARGET_NAMES,
             "output_schema": MODEL_OUTPUT_SCHEMA,

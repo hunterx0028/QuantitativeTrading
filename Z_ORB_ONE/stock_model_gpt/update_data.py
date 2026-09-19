@@ -59,7 +59,7 @@ def missing_prediction_candles(as_of: date) -> dict[str, list[date]]:
     that every predicted stock has actual data. Inspect candle dates instead.
     """
     requested: dict[str, set[date]] = {}
-    paths = [*PREDICTIONS_DIR.glob("*.json"), *(PREDICTIONS_DIR / "observations").glob("*.json")]
+    paths = list(PREDICTIONS_DIR.glob("*.json"))
     for path in sorted(paths):
         payload = json.loads(path.read_text(encoding="utf-8"))
         for prediction in payload.get("predictions", []):

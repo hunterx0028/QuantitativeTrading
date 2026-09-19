@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -22,13 +22,11 @@ from .universe import load_universe_snapshot
 from .paths import UNIVERSE_DIR
 from .provenance import fingerprint, file_fingerprint, atomic_text
 from .checkpoints import current_checkpoint
+from .meta_labeling import record_prediction
 from .trading_calendar import assert_sequence_dates
 
 
 def save_prediction_version(payload, inputs, report_text, replace_official=False):
-    observation = payload.get("mode") == "observation"
-    if observation and replace_official:
-        raise ValueError("觀察模式不可替換正式預測")
     day = payload["prediction_date"]
     run_id = payload["prediction_id"]
     directory = PREDICTIONS_DIR / "versions" / day
@@ -39,7 +37,7 @@ def save_prediction_version(payload, inputs, report_text, replace_official=False
     atomic_text(directory / f"{run_id}.inputs.json", dumps_json_no_scientific(inputs) + "\n")
     atomic_text(directory / f"{run_id}.txt", report_text)
     atomic_text(version, text)
-    official = (PREDICTIONS_DIR / "observations" if observation else PREDICTIONS_DIR) / f"{day}.json"
+    official = PREDICTIONS_DIR / f"{day}.json"
     if not official.exists() or replace_official:
         if official.exists():
             old_text = official.read_text(encoding="utf-8")
@@ -47,16 +45,14 @@ def save_prediction_version(payload, inputs, report_text, replace_official=False
             old_id = file_fingerprint(official)
             atomic_text(directory / f"previous_{old_id}.json", old_text)
         atomic_text(official, text)
-        if not observation:
-            atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", report_text)
-        print(f"{'觀察' if observation else '正式'}預測: {official}，prediction_id={run_id}")
+        atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", report_text)
+        print(f"正式預測: {official}，prediction_id={run_id}")
     else:
-        print(f"已保留既有{'觀察' if observation else '正式'}預測；本次僅另存版本 {run_id}")
-        if not observation:
-            official_id = json.loads(official.read_text(encoding="utf-8")).get("prediction_id")
-            saved_report = directory / f"{official_id}.txt"
-            if saved_report.exists():
-                atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", saved_report.read_text(encoding="utf-8"))
+        print(f"已保留既有正式預測；本次僅另存版本 {run_id}")
+        official_id = json.loads(official.read_text(encoding="utf-8")).get("prediction_id")
+        saved_report = directory / f"{official_id}.txt"
+        if saved_report.exists():
+            atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", saved_report.read_text(encoding="utf-8"))
     return version
 
 
@@ -146,16 +142,12 @@ def run_prediction(
     thresholds: SignalThresholds,
     low_thresholds: SignalThresholds = SignalThresholds((-2, -1), 60),
     replace_official: bool = False,
-    observe: bool = False,
 ) -> tuple[Path, dict | None, dict | None]:
     """Core prediction step, reusable both by the CLI (`main`) and by in-process
     callers such as a walk-forward backtest that would otherwise pay a fresh
     Python/torch interpreter startup cost for every simulated trading day."""
     if prediction_date <= universe_date:
         raise ValueError("prediction-date 必須晚於 universe-date")
-    if observe and datetime.now(timezone.utc) >= datetime.combine(
-            prediction_date, time(9), timezone(timedelta(hours=8))):
-        raise ValueError("觀察預測必須在被預測日台北時間 09:00 開盤前產生，不能事後補做恢復證據")
     assert_sequence_dates([universe_date.isoformat(), prediction_date.isoformat()])
     ensure_runtime_dirs()
     device = select_device()
@@ -241,7 +233,7 @@ def run_prediction(
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f") + "_" + uuid4().hex[:12]
     payload = {"created_at": datetime.now().astimezone().isoformat(), "predictions": predictions,
                "prediction_id": run_id, "prediction_date": prediction_date.isoformat(),
-               "mode": "observation" if observe else "official",
+               "mode": "official",
                "checkpoint_sha256": file_fingerprint(checkpoint_path),
                "input_data_version": fingerprint(input_snapshot),
                "universe_date": universe_date.isoformat(), "active_count": len(active_symbols),
@@ -264,14 +256,14 @@ def run_prediction(
     report_lines.insert(1 + len(coverage_lines), "[high 符合清單]")
     report_lines.extend(["", "[low 符合清單]",
                          *build_signal_report_lines(prediction_date, low_thresholds, low_signals, "low_price")[1:]])
-    if observe:
-        report_lines.insert(0, "[觀察模式] 僅供後續驗證，不發布正式訊號")
-        print(report_lines[0])
-    else:
-        for line in report_lines:
-            print(line)
+    for line in report_lines:
+        print(line)
     report_text = "\n".join(report_lines) + "\n"
     output = save_prediction_version(payload, input_snapshot, report_text, replace_official)
+    official_path = PREDICTIONS_DIR / f"{prediction_date.isoformat()}.json"
+    official_payload = json.loads(official_path.read_text(encoding="utf-8"))
+    if official_payload.get("prediction_id") == run_id:
+        record_prediction(payload, official_path, settings)
     print(f"預測版本已儲存: {output} ({len(predictions)}支)")
     return output, naive_baseline, in_sample_loss
 
@@ -287,24 +279,20 @@ def main() -> None:
     parser.add_argument("--prediction-date", default=date.today().isoformat())
     parser.add_argument("--universe-date", default=date.today().isoformat())
     parser.add_argument("--replace-official", action="store_true", help="明確將本次新版本指定為當日正式預測；舊版本仍保留")
-    parser.add_argument("--observe", action="store_true", help="繞過 gate 產生觀察預測，供恢復驗證，不發布正式訊號")
     add_prediction_signal_arguments(parser)
     args = parser.parse_args()
-    if args.observe and args.replace_official:
-        parser.error("observe 不可搭配 replace-official")
     thresholds = prediction_signal_thresholds(args, "high")
     low_thresholds = prediction_signal_thresholds(args, "low")
     universe_date = date.fromisoformat(args.universe_date)
     prediction_date = date.fromisoformat(args.prediction_date)
     assert_sequence_dates([universe_date.isoformat(), prediction_date.isoformat()])
     ensure_runtime_dirs()
-    if not args.observe and not args.checkpoint:
+    if not args.checkpoint:
         from .checkpoint_gate import refresh_gate_for_prediction
         refresh_gate_for_prediction(Settings.load(args.settings) if args.settings else Settings.load(), universe_date)
-    checkpoint_path = (Path(args.checkpoint) if args.checkpoint else latest_checkpoint() if args.observe
-                       else select_checkpoint_for_prediction(thresholds, low_thresholds))
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else select_checkpoint_for_prediction(thresholds, low_thresholds)
     run_prediction(checkpoint_path, universe_date, prediction_date, thresholds, low_thresholds,
-                   replace_official=args.replace_official, observe=args.observe)
+                   replace_official=args.replace_official)
 
 
 def dumps_json_no_scientific(value, indent: int = 2) -> str:

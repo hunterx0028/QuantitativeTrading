@@ -1,0 +1,515 @@
+{
+  "effective_date": "2026-09-18",
+  "stocks": [
+    {
+      "label": "南亞:1303.TW",
+      "symbol": "1303",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "台化:1326.TW",
+      "symbol": "1326",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "直得:1597.TW",
+      "symbol": "1597",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "長興:1717.TW",
+      "symbol": "1717",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "中華化:1727.TW",
+      "symbol": "1727",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "富喬:1815.TWO",
+      "symbol": "1815",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "大甲:2221.TWO",
+      "symbol": "2221",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "聯電:2303.TW",
+      "symbol": "2303",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "華通:2313.TW",
+      "symbol": "2313",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "旺宏:2337.TW",
+      "symbol": "2337",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "華邦電:2344.TW",
+      "symbol": "2344",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "順德:2351.TW",
+      "symbol": "2351",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "凱美:2375.TW",
+      "symbol": "2375",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "微星:2377.TW",
+      "symbol": "2377",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "建準:2421.TW",
+      "symbol": "2421",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "鼎元:2426.TW",
+      "symbol": "2426",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "京元電子:2449.TW",
+      "symbol": "2449",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "盟立:2464.TW",
+      "symbol": "2464",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "麗臺:2465.TW",
+      "symbol": "2465",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "立隆電:2472.TW",
+      "symbol": "2472",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "大毅:2478.TW",
+      "symbol": "2478",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "強茂:2481.TW",
+      "symbol": "2481",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "希華:2484.TW",
+      "symbol": "2484",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "一詮:2486.TW",
+      "symbol": "2486",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "萬海:2615.TW",
+      "symbol": "2615",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "慧洋-KY:2637.TW",
+      "symbol": "2637",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "嘉晶:3016.TW",
+      "symbol": "3016",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "亞光:3019.TW",
+      "symbol": "3019",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "智原:3035.TW",
+      "symbol": "3035",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "晶技:3042.TW",
+      "symbol": "3042",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "蔚華科:3055.TW",
+      "symbol": "3055",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "日電貿:3090.TW",
+      "symbol": "3090",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "晶宏:3141.TWO",
+      "symbol": "3141",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "晟鈦:3229.TW",
+      "symbol": "3229",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "緯創:3231.TW",
+      "symbol": "3231",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "光環:3234.TWO",
+      "symbol": "3234",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "欣銓:3264.TWO",
+      "symbol": "3264",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "台星科:3265.TWO",
+      "symbol": "3265",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "先進光:3362.TWO",
+      "symbol": "3362",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "新日興:3376.TW",
+      "symbol": "3376",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "聯一光:3441.TWO",
+      "symbol": "3441",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "由田:3455.TWO",
+      "symbol": "3455",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "陽程:3498.TWO",
+      "symbol": "3498",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "揚明光:3504.TW",
+      "symbol": "3504",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "宏致:3605.TW",
+      "symbol": "3605",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "光頡:3624.TWO",
+      "symbol": "3624",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "定穎投控:3715.TW",
+      "symbol": "3715",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "中光電投控:3718.TWO",
+      "symbol": "3718",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "旭然:4556.TWO",
+      "symbol": "4556",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "大銀微系統:4576.TW",
+      "symbol": "4576",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "達航科技:4577.TWO",
+      "symbol": "4577",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "前鼎:4908.TWO",
+      "symbol": "4908",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "新盛力:4931.TWO",
+      "symbol": "4931",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "亞電:4939.TWO",
+      "symbol": "4939",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "眾達-KY:4977.TW",
+      "symbol": "4977",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "建榮:5340.TWO",
+      "symbol": "5340",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "鈺創:5351.TWO",
+      "symbol": "5351",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "台半:5425.TWO",
+      "symbol": "5425",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "高技:5439.TWO",
+      "symbol": "5439",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "均豪:5443.TWO",
+      "symbol": "5443",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "霖宏:5464.TWO",
+      "symbol": "5464",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "德宏:5475.TWO",
+      "symbol": "5475",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "中美晶:5483.TWO",
+      "symbol": "5483",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "頎邦:6147.TWO",
+      "symbol": "6147",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "合晶:6182.TWO",
+      "symbol": "6182",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "雷科:6207.TWO",
+      "symbol": "6207",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "今國光:6209.TW",
+      "symbol": "6209",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "中探針:6217.TWO",
+      "symbol": "6217",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "聚鼎:6224.TW",
+      "symbol": "6224",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "茂綸:6227.TWO",
+      "symbol": "6227",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "矽格:6257.TW",
+      "symbol": "6257",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "台郡:6269.TW",
+      "symbol": "6269",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "同欣電:6271.TW",
+      "symbol": "6271",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "良維:6290.TWO",
+      "symbol": "6290",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "台塑化:6505.TW",
+      "symbol": "6505",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "創威:6530.TWO",
+      "symbol": "6530",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "晶心科:6533.TW",
+      "symbol": "6533",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "東典光電:6588.TWO",
+      "symbol": "6588",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "共信-KY:6617.TWO",
+      "symbol": "6617",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "漢達:6620.TWO",
+      "symbol": "6620",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "廣閎科:6693.TWO",
+      "symbol": "6693",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "惠特:6706.TW",
+      "symbol": "6706",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "力積電:6770.TW",
+      "symbol": "6770",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "天二科技:6834.TW",
+      "symbol": "6834",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "雅特力-KY:6907.TWO",
+      "symbol": "6907",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "鴻呈:6913.TWO",
+      "symbol": "6913",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "康霈*:6919.TW",
+      "symbol": "6919",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "鈦昇:8027.TWO",
+      "symbol": "8027",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "昇陽半導體:8028.TW",
+      "symbol": "8028",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "台虹:8039.TW",
+      "symbol": "8039",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "九暘:8040.TWO",
+      "symbol": "8040",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "金山電:8042.TWO",
+      "symbol": "8042",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "蜜望實:8043.TWO",
+      "symbol": "8043",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "東捷:8064.TWO",
+      "symbol": "8064",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "宏捷科:8086.TWO",
+      "symbol": "8086",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "擎亞:8096.TWO",
+      "symbol": "8096",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "瀚荃:8103.TW",
+      "symbol": "8103",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "立碁:8111.TWO",
+      "symbol": "8111",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "南茂:8150.TW",
+      "symbol": "8150",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "巨有科技:8227.TWO",
+      "symbol": "8227",
+      "exchange": "TPEX"
+    },
+    {
+      "label": "富鼎:8261.TW",
+      "symbol": "8261",
+      "exchange": "TWSE"
+    },
+    {
+      "label": "匯鑽科:8431.TWO",
+      "symbol": "8431",
+      "exchange": "TPEX"
+    }
+  ]
+}

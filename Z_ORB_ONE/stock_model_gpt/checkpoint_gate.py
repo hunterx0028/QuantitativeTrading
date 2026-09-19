@@ -15,8 +15,7 @@ significance test naturally demands a starker, more consistent drop before
 flagging DEGRADED when sample sizes are small, and is more sensitive once
 enough signals have accumulated. If the drop is significant, flag the gate as
 DEGRADED so `predict.py` refuses to silently keep auto-selecting the current
-checkpoint for live signals. Forward observation forecasts allow continued
-evaluation and recovery without publishing formal signals.
+checkpoint for live signals.
 """
 from __future__ import annotations
 
@@ -39,8 +38,6 @@ def evaluation_matches_official(record, predictions_dir=None):
     if digest is None:
         return True  # Legacy evaluations have no prediction fingerprint.
     directory = predictions_dir if predictions_dir is not None else PREDICTIONS_DIR
-    if record.get("mode") == "observation":
-        directory = directory / "observations"
     path = directory / f"{record['prediction_date']}.json"
     return path.exists() and file_fingerprint(path) == digest
 
@@ -64,12 +61,6 @@ def evaluation_records(evaluations_dir=None, predictions_dir=None, as_of=None):
     directory = evaluations_dir if evaluations_dir is not None else EVALUATIONS_DIR
     predictions = predictions_dir if predictions_dir is not None else PREDICTIONS_DIR
     records = {}
-    # A formal forecast always takes precedence, even when its evaluation is missing.
-    for path in sorted((directory / "observations").glob("*.json")):
-        if not (predictions / path.name).exists():
-            row = json.loads(path.read_text(encoding="utf-8"))
-            if row.get("observation_eligible") is True:
-                records[path.stem] = row
     for path in sorted(directory.glob("*.json")):
         records[path.stem] = json.loads(path.read_text(encoding="utf-8"))
     cutoff = str(as_of) if as_of is not None else None
@@ -196,16 +187,14 @@ def compute_gate_status(settings: Settings, as_of=None) -> dict:
     records = evaluation_records(as_of=as_of)
     for target in ("high_price", "low_price"):
         recent = target_evaluations(records, target)[-settings.gate_window_days:]
-        prediction_versions.update({row["prediction_date"]: {
-                                        "sha256": row["prediction_content_sha256"],
-                                        "mode": row.get("mode", "official")}
+        prediction_versions.update({row["prediction_date"]: row["prediction_content_sha256"]
                                     for row in recent if row.get("prediction_content_sha256")})
         targets[target] = {**_compute_gate_status(settings, recent),
                            "signal_thresholds": recent[-1]["signal_thresholds"] if recent else None}
         old = previous.get("targets", {}).get(target, {})
         if (old.get("verdict") == "DEGRADED" and targets[target]["verdict"] == "INSUFFICIENT_DATA"
                 and old.get("signal_thresholds") == targets[target]["signal_thresholds"]):
-            targets[target].update(verdict="DEGRADED", reason="曾判定退化，恢復樣本不足，維持阻擋並繼續觀察")
+            targets[target].update(verdict="DEGRADED", reason="曾判定退化，恢復樣本不足，維持阻擋並等待新驗證")
     verdicts = [row["verdict"] for row in targets.values()]
     verdict = ("DEGRADED" if "DEGRADED" in verdicts else
                "OK" if all(value == "OK" for value in verdicts) else "INSUFFICIENT_DATA")
@@ -228,9 +217,8 @@ def load_gate_status() -> dict | None:
         return None
     status = json.loads(GATE_STATUS_PATH.read_text(encoding="utf-8"))
     for day, digest in status.get("prediction_versions", {}).items():
-        mode = digest.get("mode", "official") if isinstance(digest, dict) else "official"
         digest = digest["sha256"] if isinstance(digest, dict) else digest
-        if not evaluation_matches_official({"prediction_date": day, "prediction_content_sha256": digest, "mode": mode}):
+        if not evaluation_matches_official({"prediction_date": day, "prediction_content_sha256": digest}):
             raise RuntimeError("正式預測版本已變更，gate 仍引用舊版本；請重新執行該日 validate_predictions")
     return status if status.get("output_schema") == OUTPUT_SCHEMA else None
 
@@ -239,14 +227,13 @@ def due_predictions(as_of):
     """Registered forward forecasts only; never scan immutable rerun archives."""
     cutoff = str(as_of)
     paths = {}
-    for directory in (PREDICTIONS_DIR / "observations", PREDICTIONS_DIR):
-        for path in directory.glob("*.json"):
-            try:
-                day = date.fromisoformat(path.stem).isoformat()
-            except ValueError:
-                continue
-            if day <= cutoff:
-                paths[day] = path
+    for path in PREDICTIONS_DIR.glob("*.json"):
+        try:
+            day = date.fromisoformat(path.stem).isoformat()
+        except ValueError:
+            continue
+        if day <= cutoff:
+            paths[day] = path
     return [path for _, path in sorted(paths.items())]
 
 
@@ -255,8 +242,7 @@ def validation_queue(settings, as_of):
     recent = set(due[-settings.gate_window_days:])
     selected = []
     for prediction in due:
-        directory = EVALUATIONS_DIR / "observations" if prediction.parent.name == "observations" else EVALUATIONS_DIR
-        evaluation = directory / prediction.name
+        evaluation = EVALUATIONS_DIR / prediction.name
         if prediction in recent or not evaluation.exists():
             selected.append(prediction)
             continue
@@ -275,19 +261,16 @@ def refresh_gate_for_prediction(settings, as_of, *, require_fresh=True):
     due = due_predictions(as_of)[-settings.gate_window_days:]
     issues = []
     if due and due[-1].stem != str(as_of):
-        issues.append(f"尚無 {as_of} 的正式或觀察預測驗證，最新預測為 {due[-1].stem}")
+        issues.append(f"尚無 {as_of} 的正式預測驗證，最新預測為 {due[-1].stem}")
     for prediction in due:
-        observation = prediction.parent.name == "observations"
-        directory = EVALUATIONS_DIR / "observations" if observation else EVALUATIONS_DIR
-        path = directory / prediction.name
+        path = EVALUATIONS_DIR / prediction.name
         if not path.exists():
             issues.append(f"{prediction.stem}: 尚未驗證")
             continue
         row = json.loads(path.read_text(encoding="utf-8"))
         if (row.get("output_schema") != OUTPUT_SCHEMA or row.get("conditions_overridden")
-                or row.get("prediction_content_sha256") != file_fingerprint(prediction)
-                or (observation and row.get("observation_eligible") is not True)):
-            issues.append(f"{prediction.stem}: 驗證版本、條件或觀察時間不合格")
+                or row.get("prediction_content_sha256") != file_fingerprint(prediction)):
+            issues.append(f"{prediction.stem}: 驗證版本或條件不合格")
             continue
         if not actual_inputs_match(row, settings):
             issues.append(f"{prediction.stem}: 實際資料／驗證設定已變更或缺少版本，請重新驗證")
@@ -303,6 +286,5 @@ def refresh_gate_for_prediction(settings, as_of, *, require_fresh=True):
         status["reason"] = "; ".join(issues)
     save_gate_status(status)
     if issues and require_fresh:
-        raise RuntimeError("gate 驗證未更新或不完整，暫停正式預測；請 run_daily 補驗證，"
-                           "或使用 --observe 累積後續觀察結果：" + status["reason"])
+        raise RuntimeError("gate 驗證未更新或不完整，暫停正式預測；請 run_daily 補驗證：" + status["reason"])
     return status

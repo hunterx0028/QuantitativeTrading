@@ -1,0 +1,91 @@
+{
+  "targets": {
+    "high_price": {
+      "days": 0,
+      "evaluated": 0,
+      "classification": null,
+      "log_loss": null,
+      "baseline_log_loss": null,
+      "signal": null,
+      "signal_count": 0,
+      "signal_success_count": null,
+      "signal_success_rate": null
+    },
+    "low_price": {
+      "days": 0,
+      "evaluated": 0,
+      "classification": null,
+      "log_loss": null,
+      "baseline_log_loss": null,
+      "signal": null,
+      "signal_count": 0,
+      "signal_success_count": null,
+      "signal_success_rate": null
+    }
+  },
+  "start_date": "2026-09-01",
+  "end_date": "2026-09-18",
+  "days_run": 0,
+  "days_failed": 14,
+  "failures": [
+    {
+      "date": "2026-09-01",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-08-31，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-02",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-01，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-03",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-02，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-04",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-03，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-07",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-04，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-08",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-07，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-09",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-08，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-10",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-09，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-11",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-10，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-14",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-11，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-15",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-14，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-16",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-15，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-17",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-16，已拒絕可能洩漏未來資料的預測"
+    },
+    {
+      "date": "2026-09-18",
+      "reason": "checkpoint 訓練截止日 2026-09-18 晚於預測基準日 2026-09-17，已拒絕可能洩漏未來資料的預測"
+    }
+  ],
+  "initial_checkpoint": "Z_ORB_ONE\\stock_model_gpt\\checkpoints\\stock_model_gpt_20260918_222811_132445.pt",
+  "final_checkpoint": "Z_ORB_ONE\\stock_model_gpt\\checkpoints\\stock_model_gpt_20260918_222811_132445.pt",
+  "daily_train": false
+}
