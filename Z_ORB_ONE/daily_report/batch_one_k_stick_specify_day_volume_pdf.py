@@ -36,6 +36,7 @@ from Z_ORB_ONE.stock_data import (
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 32) # follow 個股進場開始分K棒的(時, 分)，包含此時間
@@ -518,7 +519,7 @@ def draw_intraday_ohlc(
 def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
-def main():
+def build_report_items() -> list[dict]:
     default_strategy_start_times = {
         STRATEGY_START_LOWER,
         STRATEGY_START_FOLLOW,
@@ -536,6 +537,20 @@ def main():
         }
         for code in SPECIFIED_INDEX_CODES
     ]
+    specified_stock_codes = [code.strip() for code in SPECIFIED_STOCK_CODES if code.strip()]
+    if specified_stock_codes:
+        report_items.extend(
+            {
+                "code": code,
+                "label": code,
+                "atr_value": None,
+                "is_index": False,
+                "strategy_start_times": default_strategy_start_times,
+            }
+            for code in specified_stock_codes
+        )
+        return report_items
+
     report_items.extend(
         {
             "code": extract_stock_code(item[0]),
@@ -566,6 +581,11 @@ def main():
         }
         for item in selected_limit_down_stocks
     )
+    return report_items
+
+
+def main():
+    report_items = build_report_items()
     target_date = parse_specified_date(SPECIFIED_DATE)
 
     # ========= 輸出資料夾（以指定日期 YYYYMMDD 命名） =========
