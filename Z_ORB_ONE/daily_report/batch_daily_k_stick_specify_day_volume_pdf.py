@@ -33,6 +33,7 @@ from Z_ORB_ONE.stock_data import (
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # YYYYMMDD；空字串代表台北時區今日
+SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 上市、上櫃指數固定置於個股之前
 DAILY_CANDLE_COUNT = 40
 LOOKBACK_CALENDAR_DAYS = 120
@@ -229,6 +230,14 @@ def build_report_items() -> list[dict]:
         {"code": code, "label": code, "atr_value": None, "is_index": True}
         for code in SPECIFIED_INDEX_CODES
     ]
+    specified_stock_codes = [code.strip() for code in SPECIFIED_STOCK_CODES if code.strip()]
+    if specified_stock_codes:
+        report_items.extend(
+            {"code": code, "label": code, "atr_value": None, "is_index": False}
+            for code in specified_stock_codes
+        )
+        return report_items
+
     for stock_group in (selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks):
         report_items.extend(
             {

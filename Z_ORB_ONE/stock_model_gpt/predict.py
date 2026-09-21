@@ -62,11 +62,17 @@ from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds,
 
 
 def add_prediction_signal_arguments(parser):
-    for target, classes in (("high", "1,2"), ("low", "-2,-1")):
-        parser.add_argument(f"--{target}-signal-classes", default=classes,
-                            help=f"{target} 篩選刻度；負數用 --{target}-signal-classes=-2,-1")
-        parser.add_argument(f"--{target}-signal-threshold-pct", type=float, default=60.0,
-                            help=f"{target} 所選刻度的合計機率門檻（百分比）")
+    # high：P(1) + P(2) 的預設門檻，修改下方 default 即可。
+    parser.add_argument("--high-signal-classes", default="1,2",
+                        help="high 篩選刻度；負數用 --high-signal-classes=-2,-1")
+    parser.add_argument("--high-signal-threshold-pct", type=float, default=85.0,
+                        help="high 所選刻度的合計機率門檻（百分比）")
+
+    # low：P(-2) + P(-1) 的預設門檻，可獨立於 high 調整。
+    parser.add_argument("--low-signal-classes", default="-2,-1",
+                        help="low 篩選刻度；負數用 --low-signal-classes=-2,-1")
+    parser.add_argument("--low-signal-threshold-pct", type=float, default=85.0,
+                        help="low 所選刻度的合計機率門檻（百分比）")
 
 
 def prediction_signal_thresholds(args, target):
