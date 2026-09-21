@@ -264,8 +264,7 @@ python -m Z_ORB_ONE.stock_model_gpt.checkpoints --checkpoint "Z_ORB_ONE/stock_mo
 `backtest.py` 對歷史區間重跑 `predict` → `validate_predictions`（可選每日續訓），直接重用正式流程的評分邏輯，不是另一套獨立的回測引擎：
 
 ```bash
-python -m Z_ORB_ONE.stock_model_gpt.backtest \
-  --start-date 2026-03-01 --end-date 2026-05-31
+python -m Z_ORB_ONE.stock_model_gpt.backtest --start-date 2026-03-01 --end-date 2026-05-31
 ```
 
 - `--checkpoint` 可省略：省略時自動選用正式 `checkpoints/` 內、`training_as_of` 不晚於起始日前一交易日的最新一顆（見下方 `list_checkpoints.py`），終端機會印出實際選到哪一顆；要指定特定模型才需要 `--checkpoint 路徑`。
@@ -288,11 +287,12 @@ python -m Z_ORB_ONE.stock_model_gpt.list_checkpoints --as-of 2026-02-28
 
 
 
-盤前
+## 盤前
 python -m Z_ORB_ONE.stock_model_gpt.set_night_futures --date 2026-09-21 --change -0.05
 python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-18 --prediction-date 2026-09-21
-收盤後
-python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-21
+## 收盤後
+先更新 Z_ORB_ONE/stock_data.py
+python -m Z_ORB_ONE.stock_model_gpt.validate_predictions --prediction-date 2026-09-21 
 python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-21 --training-window-days 150
 
 
