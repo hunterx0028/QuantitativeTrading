@@ -124,7 +124,7 @@ def main() -> None:
         rejected.extend({"date": row.get("date"), "reason": "OHLC 驗收失敗"}
                         for row in incoming if not valid_candle(row))
         download_rejections[symbol] = rejected
-        invalid_dates = [row["date"] for row in rejected]
+        invalid_dates = [row["date"] for row in rejected if row.get("date")]
         incoming = [row for row in incoming if valid_candle(row)]
         merged = merge_candles(symbol, incoming)
         actions = update_corporate_actions(symbol, to_date, settings, refresh_days=args.refresh_days)
@@ -152,7 +152,11 @@ def main() -> None:
         if index + 1 < len(symbols):
             time.sleep(settings.request_interval_seconds)
     # 刻意不呼叫 sdk.logout()。
-    complete = bool(active_symbols) and not any(download_rejections.values()) and all(row["status"] in ("complete", "suspended") and not row["invalid_dates"]
+    blocking_download_rejections = {
+        symbol: [row for row in rows if row.get("date")]
+        for symbol, rows in download_rejections.items()
+    }
+    complete = bool(active_symbols) and not any(blocking_download_rejections.values()) and all(row["status"] in ("complete", "suspended") and not row["invalid_dates"]
                                             and not row["missing_session_dates"]
                                             for row in audit_rows)
     report = {"as_of": as_of.isoformat(), "checked_at": datetime.now().astimezone().isoformat(),
