@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -112,6 +113,7 @@ def fetch_dataset(
     end_date: date,
     token: str | None = None,
     timeout_seconds: float = 30.0,
+    max_attempts: int = 3,
 ) -> list[dict]:
     # FinMind 各資料集對 end_date 邊界的實作可能不同；多查一天後再本地嚴格過濾。
     query_end_date = end_date + timedelta(days=1)
@@ -135,12 +137,29 @@ def fetch_dataset(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(f"{FINMIND_URL}?{parameters}", headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"FinMind {dataset} HTTP {exc.code}: {detail[:300]}") from exc
+    if max_attempts <= 0:
+        raise ValueError("max_attempts 必須大於 0")
+    payload = None
+    transient_error: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"FinMind {dataset} HTTP {exc.code}: {detail[:300]}") from exc
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+            transient_error = exc
+            if attempt == max_attempts:
+                break
+            time.sleep(min(2 ** (attempt - 1), 8))
+    if payload is None:
+        raise RuntimeError(
+            f"FinMind {dataset} 查詢逾時或連線失敗: symbol={symbol} "
+            f"start={start_date.isoformat()} end={end_date.isoformat()} "
+            f"attempts={max_attempts} error={transient_error}"
+        ) from transient_error
     if payload.get("status") != 200:
         raise RuntimeError(
             f"FinMind {dataset} 查詢失敗: status={payload.get('status')} msg={payload.get('msg')}"
