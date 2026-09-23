@@ -11,6 +11,7 @@ PROJECT_ROOT = Z_ORB_ONE_DIR.parent
 # are shared, never mutated by a walk-forward backtest.
 DATA_DIR = PACKAGE_DIR / "data"
 CANDLES_DIR = DATA_DIR / "candles"
+INDEX_CANDLES_DIR = DATA_DIR / "index_candles"
 CORPORATE_ACTIONS_DIR = DATA_DIR / "corporate_actions"
 FEATURES_DIR = DATA_DIR / "features"
 # Market-wide (not per-symbol) TAIFEX TX near-month night-session data, one
@@ -46,6 +47,7 @@ SIGNAL_REPORTS_DIR = _WRITE_ROOT / "signal_reports"
 def ensure_runtime_dirs() -> None:
     for path in (
         CANDLES_DIR,
+        INDEX_CANDLES_DIR,
         ACTUAL_CANDLES_DIR,
         CORPORATE_ACTIONS_DIR,
         UNIVERSE_DIR,

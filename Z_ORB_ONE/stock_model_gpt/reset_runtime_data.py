@@ -1,6 +1,6 @@
 """Wipe all regenerable runtime data to start completely over.
 
-Clears: data/candles, data/corporate_actions, data/features, data/actual_candles,
+Clears: data/candles, data/index_candles, data/corporate_actions, data/features, data/actual_candles,
 data/universe, data/evaluations, data/atr_analysis, checkpoints/ (including
 checkpoints/daily_runs and gate_status.json), predictions/, signal_reports/.
 
@@ -24,6 +24,7 @@ from .paths import (
     ACTUAL_CANDLES_DIR,
     ATR_ANALYSIS_DIR,
     CANDLES_DIR,
+    INDEX_CANDLES_DIR,
     CHECKPOINT_DIR,
     CORPORATE_ACTIONS_DIR,
     EVALUATIONS_DIR,
@@ -39,6 +40,7 @@ from .paths import (
 TARGET_DIRS = (
     DATA_CHECKS_DIR,
     CANDLES_DIR,
+    INDEX_CANDLES_DIR,
     CORPORATE_ACTIONS_DIR,
     FEATURES_DIR,
     ACTUAL_CANDLES_DIR,

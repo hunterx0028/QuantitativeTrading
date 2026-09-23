@@ -37,6 +37,9 @@ class Settings:
     n_heads: int = 4
     n_layers: int = 4
     dropout: float = 0.1
+    stock_price_weight: float = 1.5
+    stock_activity_weight: float = 1.0
+    market_weight: float = 0.75
     seed: int = 42
     loss_high_price: float = 4.0
     loss_low_price: float = 4.0

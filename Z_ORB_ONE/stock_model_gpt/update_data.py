@@ -10,7 +10,9 @@ from .config import Settings
 from .finmind import update_corporate_actions, clear_query_cache
 from .market_data import fetch_candles, load_sdk
 from .paths import CONFIG_PATH, PREDICTIONS_DIR, DATA_CHECKS_DIR, ensure_runtime_dirs
-from .storage import candle_path, merge_candles, read_jsonl
+from .storage import candle_path, merge_candles, read_jsonl, write_jsonl
+from .input_schema import INDEX_SYMBOLS
+from .market_indices import index_path
 from .universe import load_selected_stocks, write_universe_snapshot
 from .provenance import atomic_text, fingerprint
 from .trading_calendar import TradingCalendar, suspension_reason
@@ -78,6 +80,36 @@ def missing_prediction_candles(as_of: date) -> dict[str, list[date]]:
 from .runtime_lock import locked
 
 
+def update_indices(rest_stock, as_of, settings, refresh_days, calendar):
+    audits = []
+    for symbol in INDEX_SYMBOLS:
+        path = index_path(symbol)
+        existing = read_jsonl(path)
+        start = refresh_start(existing, as_of, settings.earliest_date, refresh_days)
+        # Even --refresh-days 1 must refresh the previous OHLC denominator.
+        start = min(start, date.fromisoformat(calendar.previous_session(as_of)))
+        incoming = fetch_candles(rest_stock, symbol, start, as_of, settings, index_ohlc=True)
+        rejected = list(getattr(incoming, "rejected", []))
+        rejected.extend({"date": row.get("date"), "reason": "指數 OHLC 驗收失敗"}
+                        for row in incoming if not valid_candle(row))
+        valid = [row for row in incoming if valid_candle(row)]
+        merged = {row["date"]: row for row in existing}
+        merged.update({row["date"]: row for row in valid})
+        rows = [merged[day] for day in sorted(merged)]
+        write_jsonl(path, rows)
+        fresh_dates = {row["date"] for row in valid}
+        required = {as_of.isoformat(), calendar.previous_session(as_of)}
+        gaps = recent_gaps(symbol, rows, as_of, refresh_days, calendar)
+        complete = required <= fresh_dates and not gaps and not any(row.get("date") for row in rejected)
+        audits.append({"symbol": symbol, "status": "complete" if complete else "incomplete",
+                       "missing_fresh_dates": sorted(required - fresh_dates),
+                       "missing_session_dates": gaps, "rejected_records": rejected,
+                       "data_version": fingerprint(rows)})
+        print(f"[指數驗收] {symbol}: {audits[-1]['status']} total_candles={len(rows)}")
+        time.sleep(settings.request_interval_seconds)
+    return audits
+
+
 @locked
 def main() -> None:
     parser = argparse.ArgumentParser(description="更新每日股票清單及日K快取")
@@ -111,6 +143,7 @@ def main() -> None:
 
     sdk = load_sdk(CONFIG_PATH if args.config == str(CONFIG_PATH) else args.config)
     rest_stock = sdk.rest_client.stock
+    index_audits = update_indices(rest_stock, as_of, settings, args.refresh_days, calendar)
     for index, symbol in enumerate(symbols):
         existing = read_jsonl(candle_path(symbol))
         from_date = refresh_start(existing, as_of, settings.earliest_date, args.refresh_days)
@@ -156,12 +189,12 @@ def main() -> None:
         symbol: [row for row in rows if row.get("date")]
         for symbol, rows in download_rejections.items()
     }
-    complete = bool(active_symbols) and not any(blocking_download_rejections.values()) and all(row["status"] in ("complete", "suspended") and not row["invalid_dates"]
+    complete = all(row["status"] == "complete" for row in index_audits) and bool(active_symbols) and not any(blocking_download_rejections.values()) and all(row["status"] in ("complete", "suspended") and not row["invalid_dates"]
                                             and not row["missing_session_dates"]
                                             for row in audit_rows)
     report = {"as_of": as_of.isoformat(), "checked_at": datetime.now().astimezone().isoformat(),
               "complete": complete, "refresh_days": args.refresh_days, "stocks": audit_rows,
-              "download_rejections": download_rejections}
+              "download_rejections": download_rejections, "indices": index_audits}
     report_path = DATA_CHECKS_DIR / f"{as_of.isoformat()}.json"
     atomic_text(report_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(f"資料驗收報告: {report_path}")

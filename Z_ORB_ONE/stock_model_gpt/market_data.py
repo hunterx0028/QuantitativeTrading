@@ -77,6 +77,7 @@ def fetch_candles(
     from_date: date,
     to_date: date,
     settings: Settings,
+    *, index_ohlc: bool = False,
 ) -> list[dict]:
     """分段讀取可取得的完整日K範圍；呼叫者負責建立並登入 SDK。"""
     if from_date > to_date:
@@ -95,7 +96,7 @@ def fetch_candles(
                 "from": cursor.isoformat(),
                 "to": chunk_to.isoformat(),
                 "timeframe": "D",
-                "fields": "open,high,low,close,volume,change",
+                "fields": "open,high,low,close" if index_ohlc else "open,high,low,close,volume,change",
             }
         )
         rows = response.get("data") if isinstance(response, dict) else None

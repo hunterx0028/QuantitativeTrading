@@ -107,6 +107,14 @@ class TradingCalendar:
                 return current.isoformat()
         raise ValueError("40 日內找不到下一交易日，請檢查日曆")
 
+    def previous_session(self, day):
+        current = date.fromisoformat(day) if isinstance(day, str) else day
+        for _ in range(40):
+            current -= timedelta(days=1)
+            if self.is_session(current):
+                return current.isoformat()
+        raise ValueError("40 日內找不到前一交易日，請檢查日曆")
+
 
 @lru_cache(maxsize=1)
 def shared_calendar():

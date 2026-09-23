@@ -25,7 +25,7 @@ from .runtime_lock import locked
 
 @locked
 def main() -> None:
-    parser = argparse.ArgumentParser(description="每日資料更新、特徵產生與增量訓練流程")
+    parser = argparse.ArgumentParser(description="每日股票及 IX0001/IX0043 更新、十八項特徵產生與增量訓練流程")
     parser.add_argument("--as-of", required=True, help="今日完整日K日期 YYYY-MM-DD")
     parser.add_argument("--settings", default=None)
     parser.add_argument("--training-mode", choices=("incremental_replay", "full_history"), default=None)
@@ -43,6 +43,7 @@ def main() -> None:
     if load_night_futures().get(args.as_of) is None:
         print(f"[錯誤] 缺少 {args.as_of} 的夜盤資料，已中止每日更新與續訓。")
         raise SystemExit(1)
+    # Strict update audits both stock candles and the two shared index OHLC series.
     run("Z_ORB_ONE.stock_model_gpt.update_data", "--as-of", args.as_of, "--require-complete", *settings_args)
     for prediction in validation_queue(settings, args.as_of):
         run("Z_ORB_ONE.stock_model_gpt.validate_predictions", "--prediction-date", prediction.stem,

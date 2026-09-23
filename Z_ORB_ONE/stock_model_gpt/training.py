@@ -5,7 +5,7 @@ import hashlib
 import json
 import copy
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from .replay import select_daily_sequences
 from .provenance import fingerprint, file_fingerprint, sample_key, sample_versions
 from .checkpoints import publish_checkpoint, require_finite, verify_checkpoint
 from .trading_calendar import TradingCalendar
+from .input_schema import INDEX_FIELDS, INPUT_FIELDS, FEATURE_WEIGHT_NAMES
 
 
 TARGET_NAMES = ("high_price", "low_price")
@@ -46,6 +47,7 @@ def build_model(settings: Settings) -> StockAutoregressiveModel:
         n_heads=settings.n_heads,
         n_layers=settings.n_layers,
         dropout=settings.dropout,
+        **{name: getattr(settings, name) for name in FEATURE_WEIGHT_NAMES},
     )
 
 
@@ -162,8 +164,12 @@ def ensure_checkpoint_compatible(checkpoint: dict) -> None:
     if (checkpoint.get("input_alignment") != INPUT_ALIGNMENT
             or any(f"{field}_embedding.weight" not in checkpoint.get("model", {})
                    for field in ("open_price", "high_price", "low_price", "close_price"))
-            or "target_night_futures_embedding.weight" in checkpoint.get("model", {})):
-        raise RuntimeError("checkpoint 不是含開高低收的十項序列模型；請重新執行 prepare_features 與 train_initial")
+            or "target_night_futures_embedding.weight" in checkpoint.get("model", {})
+            or any(f"index_embeddings.{field}.weight" not in checkpoint.get("model", {}) for field in INDEX_FIELDS)):
+        raise RuntimeError("checkpoint 不是含 IX0001/IX0043 的十八項序列模型；請重新執行 update_data、prepare_features 與 train_initial")
+    if any(name not in checkpoint.get("settings", {}) for name in FEATURE_WEIGHT_NAMES):
+        raise RuntimeError("checkpoint 缺少特徵分組權重；請重新執行 train_initial")
+    validate_training_settings(Settings(**checkpoint["settings"]))
 
 
 
@@ -219,7 +225,7 @@ def validate_training_settings(settings):
         value = getattr(settings, name)
         if type(value) is not int or value <= 0:
             raise ValueError(f"{name} 必須是正整數")
-    for name in ("learning_rate", "daily_learning_rate", "loss_high_price", "loss_low_price"):
+    for name in ("learning_rate", "daily_learning_rate", "loss_high_price", "loss_low_price", *FEATURE_WEIGHT_NAMES):
         value = getattr(settings, name)
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} 必須是有限正數")
@@ -247,6 +253,9 @@ def train(
     if resume_path:
         checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
         ensure_checkpoint_compatible(checkpoint)
+        # Input scaling is part of the learned representation, like ATR boundaries.
+        settings = replace(settings, **{name: checkpoint["settings"][name] for name in FEATURE_WEIGHT_NAMES})
+        validate_training_settings(settings)
         from .checkpoints import verify_training_result
         verify_training_result(checkpoint)
         previous_as_of = checkpoint.get("training_as_of")
@@ -541,6 +550,7 @@ def train(
             "target_names": TARGET_NAMES,
             "output_schema": MODEL_OUTPUT_SCHEMA,
             "input_alignment": INPUT_ALIGNMENT,
+            "input_fields": list(INPUT_FIELDS),
             "atr_encoding": ATR_ENCODING,
             "atr_calibration": atr_calibration,
             "naive_baseline": naive_baseline,

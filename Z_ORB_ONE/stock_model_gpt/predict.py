@@ -24,6 +24,7 @@ from .provenance import fingerprint, file_fingerprint, atomic_text
 from .checkpoints import current_checkpoint
 from .meta_labeling import record_prediction
 from .trading_calendar import assert_sequence_dates
+from .input_schema import INPUT_FIELDS, FEATURE_WEIGHT_NAMES
 
 
 def save_prediction_version(payload, inputs, report_text, replace_official=False):
@@ -170,7 +171,7 @@ def run_prediction(
     model = build_model(settings).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    # Latest night data fills column ten of the final stock row.
+    # Latest night data fills column eighteen of the final stock/index row.
     prediction_date_str = prediction_date.isoformat()
     night_by_date = load_night_futures()
     prediction_night_bucket = night_by_date.get(prediction_date_str)
@@ -251,6 +252,8 @@ def run_prediction(
                "night_futures_date": prediction_date_str,
                "night_futures_bucket": prediction_night_bucket,
                "input_alignment": INPUT_ALIGNMENT,
+               "input_fields": list(INPUT_FIELDS),
+               "feature_group_weights": {name: getattr(settings, name) for name in FEATURE_WEIGHT_NAMES},
                "output_schema": OUTPUT_SCHEMA,
                "naive_baseline": naive_baseline,
                "in_sample_loss": in_sample_loss,

@@ -8,6 +8,7 @@ from .state_pipeline import load_candle_states
 from .paths import CANDLES_DIR
 from .storage import feature_path, write_jsonl
 from .trading_calendar import TradingCalendar
+from .market_indices import load_index_features, join_index_features
 
 
 from .runtime_lock import locked
@@ -23,11 +24,16 @@ def main() -> None:
     TradingCalendar().require_session(as_of)
     cutoff = as_of.isoformat()
     settings = Settings.load(args.settings) if args.settings else Settings.load()
+    indices = load_index_features(cutoff)
+    if cutoff not in indices:
+        raise ValueError(f"{cutoff} 缺少兩組指數當日／前一交易日 OHLC，請先執行 update_data")
     for path in sorted(list(CANDLES_DIR.glob("*.jsonl"))):
         candles, states = load_candle_states(path, cutoff, settings.warmup_days)
-        write_jsonl(feature_path(path.stem), (state.to_dict() for state in states))
+        rows = join_index_features(states, indices)
+        write_jsonl(feature_path(path.stem), rows)
         print(
-            f"{path.stem}: as_of={cutoff} candles={len(candles)} states={len(states)}"
+            f"{path.stem}: as_of={cutoff} candles={len(candles)} states={len(rows)} "
+            f"missing_index_days={len(states) - len(rows)}"
         )
 
 

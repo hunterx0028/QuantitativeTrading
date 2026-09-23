@@ -12,13 +12,13 @@ from torch.utils.data import Dataset
 from .storage import read_jsonl
 from .night_futures import load_night_futures
 from .trading_calendar import assert_sequence_dates, shared_calendar
+from .input_schema import INPUT_ALIGNMENT, INDEX_FIELDS
 
 
 PRICE_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
 VOLUME_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4, "X": 5}
 CLOSE_TO_ID = {"D": 0, "N": 1, "U": 2}
 NIGHT_FUTURES_TO_ID = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
-INPUT_ALIGNMENT = "stock_nine_ohlc_next_trading_day_night_v2"
 PRICE_FIELDS = ("open_price", "high_price", "low_price", "close_price")
 
 
@@ -52,6 +52,11 @@ def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int
         raise ValueError("特徵缺少 ATR(14)，請先重新執行 prepare_features")
     if "night_futures" not in row:
         raise ValueError("特徵缺少夜盤期指，請先重新執行 prepare_features 並確認該日期已匯入 night_futures")
+    missing = [field for field in INDEX_FIELDS if field not in row]
+    if missing:
+        raise ValueError(f"特徵缺少指數欄位 {', '.join(missing)}；請執行 update_data 與 prepare_features")
+    if any(type(row[field]) is not int or row[field] not in PRICE_TO_ID for field in INDEX_FIELDS):
+        raise ValueError("指數 OHLC 必須是 -2、-1、0、1、2 整數刻度；請重新執行 prepare_features")
     atr_ratio = float(row["atr_ratio"])
     if not math.isfinite(atr_ratio) or atr_ratio < 0:
         raise ValueError("atr_ratio 必須是有限且非負的數值")
@@ -62,6 +67,7 @@ def encode_state(row: dict, atr_boundaries_pct=(1.0, 2.0, 3.0, 5.0)) -> list[int
         CLOSE_TO_ID[row["close_limit"]],
         VOLUME_TO_ID[row["volume"]],
         bisect_right(atr_boundaries_pct, atr_ratio * 100),
+        *(PRICE_TO_ID[row[field]] for field in INDEX_FIELDS),
         NIGHT_FUTURES_TO_ID[row["night_futures"]],
     ]
 
@@ -110,6 +116,8 @@ class StockSequenceDataset(Dataset):
         calendar = shared_calendar()
         self.refs: list[SequenceRef] = []
         for path, rows in self.rows_by_path.items():
+            if any(any(field not in row for field in INDEX_FIELDS) for row in rows):
+                raise ValueError(f"{path}: 舊特徵缺少指數 OHLC；請執行 update_data 與 prepare_features")
             count = len(rows)
             if count <= context_days:
                 continue

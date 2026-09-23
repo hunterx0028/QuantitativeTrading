@@ -144,7 +144,7 @@ def encode_candles(
     for index in range(max(warmup_days, ATR_PERIOD), len(rows)):
         row = rows[index]
         # TX night session only exists from 2017-05-15 onward; a date without
-        # coverage here simply can't produce a state for this 10-input model,
+        # coverage here simply can't produce a stock state for this model,
         # same as a date without enough ATR/volume warmup can't either — skip
         # rather than guessing a "flat" bucket for missing data.
         night_futures = night_futures_by_date.get(row["date"])

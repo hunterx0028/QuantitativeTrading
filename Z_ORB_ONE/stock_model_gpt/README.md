@@ -2,18 +2,48 @@
 
 所有指令從專案根目錄執行，範例日期請換成實際交易日。
 
-- **輸入**：股票當日的開、高、低、收、觸漲停、觸跌停、收盤漲跌停狀態、成交量、ATR，共九項，加上**下一交易日的夜盤**，合計十項。
+- **輸入**：股票當日的開、高、低、收、觸漲停、觸跌停、收盤漲跌停狀態、成交量、ATR，共九項，加上 **IX0001 與 IX0043 各自的開、高、低、收**八項，合計 **17 項收盤特徵**；再加上**下一交易日開盤前的夜盤**，共 **18 項**。
 - **輸出**：下一交易日 `high_price` 與 `low_price` 各自的五種機率：`P(-2)`、`P(-1)`、`P(0)`、`P(1)`、`P(2)`；每項機率各自加總為 1。
 - **篩選預設**：high 的 `P(1) + P(2) ≥ 60%`；low 的 `P(-2) + P(-1) ≥ 60%`，各自獨立判斷。
 
 ### high / low 雙目標第一階段
 
-- low 使用既有特徵中的最低價五級刻度，與 high 使用相同交易參考價及分類界線。十項輸入不變，兩個五分類 head 共用 Transformer。
+- low 使用既有特徵中的最低價五級刻度，與 high 使用相同交易參考價及分類界線。十八項輸入由兩個五分類 head 共用 Transformer。
 - 訓練同時學習 high、low；`loss_high_price`、`loss_low_price` 預設皆為 4.0，各自計算類別權重。訓練與驗證會分別列出兩項 loss，以兩項未加權驗證交叉熵的平均選最佳 epoch，兩項都達 patience 才提早停止。
-- **舊 high-only checkpoint 不相容，須重新執行 `train_initial`**，完成後才能每日續訓或預測；升級交易日檢查後，請先重新執行 `prepare_features`，重建遇到缺洞時的暖機與連續序列。
+- **舊十項輸入 checkpoint（包含雙目標）與 high-only checkpoint 均不相容**。升級後須依序執行 `update_data`、`prepare_features`、`train_initial`，補齊指數歷史、重建特徵並從頭訓練，完成後才能每日續訓或預測；不必先清除舊資料。
 - `predict` 同時篩選 high、low，控制台與訊號報表分成兩份清單。`validate_predictions`、checkpoint gate 與 post-training gate 各自評估 high、low；舊 `predicted_class` 欄位仍指 high。
 - 預測檔保留既有 high 格式識別並增加 low 欄位，舊 high 預測檔仍可驗證；模型 checkpoint 使用獨立的雙目標格式識別。
 - 這是兩組各自的機率分布，並非 high/low 的 25 種聯合機率，也未強制兩項預測的高低順序。
+
+### 指數 OHLC 與時間對齊
+
+IX0001（上市）及 IX0043（上櫃）沿用 `daily_report` 的玉山 `rest_stock.historical.candles` 來源取得日 K，集中存於 `data/index_candles/IX0001.jsonl` 與 `IX0043.jsonl`，所有股票共用，不加入股票清單或套用個股公司行動。
+
+每一欄分別與**前一交易日同欄位**比較：`(當日值 / 前一交易日值 - 1) × 100`。例如今日開盤比昨日開盤、今日最高比昨日最高；不是四欄全部比昨收。順序固定為 OHLC（開、高、低、收）。共用夜盤的 `night_futures_bucket`，包括既有的浮點邊界容差：
+
+| 漲跌幅 | 刻度 |
+|---|---|
+| 小於 −1% | −2 |
+| −1%（含）至 −0.5%（不含） | −1 |
+| −0.5%（含）至 0.5%（不含） | 0 |
+| 0.5%（含）至 1%（不含） | 1 |
+| 1%（含）以上 | 2 |
+
+輸入順序是個股九項 → IX0001 OHLC → IX0043 OHLC → 夜盤。每列的指數屬於該列股票收盤日，夜盤屬於下一交易日；預測 T+1 時最後一列使用 T 日個股／指數與 T+1 開盤前夜盤，不使用 T+1 指數收盤資料。`predict` 的版本輸入快照保存全部 18 欄，預測與 checkpoint 記錄欄位順序與新版 `input_alignment`。
+
+任一指數缺當日或前一交易日，該日不能產生完整特徵；不補 0、不跨缺洞比較。`prepare_features` 顯示 `missing_index_days`，若截止日缺資料則直接報錯。歷史中斷會切斷訓練／預測序列。驗證 high／low 實際結果仍使用個股資料，不因缺指數而無法驗證舊預測。
+
+### 個股優先的特徵分組權重
+
+`settings.json` 可設定以下三組 embedding 權重，預設為：
+
+| 組別 | 設定 | 權重 |
+|---|---|---|
+| 個股開高低收、觸漲停、觸跌停、收盤漲跌停狀態（7 項） | `stock_price_weight` | 1.5 |
+| 成交量、ATR（2 項） | `stock_activity_weight` | 1.0 |
+| 兩組指數 OHLC、夜盤（9 項） | `market_weight` | 0.75 |
+
+各組 embedding 加總後先除以組內項數平方根，再乘上述權重，最後與位置 embedding 相加交給 Transformer，避免新增市場欄位只因數量多就占優勢。這是初始訓練的表示偏好，不是預測貢獻百分比，也不是 high／low loss 權重；實際影響仍由資料及訓練決定。三個值必須是有限正數。初始訓練保存設定，續訓（包含 `--checkpoint`）與預測固定沿用來源 checkpoint 的值；改設定後須重新初始訓練才會生效。
 
 ## 0. 先準備交易日曆
 
@@ -54,7 +84,7 @@ python -m Z_ORB_ONE.stock_model_gpt.trading_calendar --start-year 2026 --end-yea
 
 ## 1. 初始訓練
 
-先確認歷史夜盤資料已匯入 `data/night_futures.jsonl`，且涵蓋所需日期。股票資料更新不會自動抓夜盤；缺夜盤會造成特徵或訓練序列被略過。
+先確認歷史夜盤資料已匯入 `data/night_futures.jsonl`，且涵蓋所需日期。`update_data` 自動更新股票與兩組指數，首次會從 `earliest_date` 補抓指數歷史；不會自動抓夜盤。缺夜盤或指數 OHLC 會造成特徵或訓練序列被略過；指數還須有首個特徵日前一交易日 OHLC。
 
 以完整股票資料截止 **2026-09-15** 為例：
 
@@ -68,7 +98,7 @@ python -m Z_ORB_ONE.stock_model_gpt.train_initial --as-of 2026-09-15 --training-
 - `--training-window-days 150`：訓練目標取最近 150 個可用交易日；每筆目標仍需要此前的歷史輸入序列，不代表只需準備 150 天原始資料。
 - `train_initial` 從頭訓練；用於新版五分類預測。
 
-新版 checkpoint 保存實際學習過的「股票＋目標日期＋樣本版本」。舊 checkpoint 若沒有 `trained_sample_versions`，仍可用於相容的雙目標預測，但不能直接續訓，需重新執行一次 `train_initial`。
+新版 checkpoint 保存實際學習過的「股票＋目標日期＋樣本版本」。樣本版本包含八項指數特徵；修正指數資料後重建特徵，受影響的序列可被每日續訓識別。缺少 `trained_sample_versions` 的 checkpoint 不能直接續訓；任何十項輸入模型都不能用於新版預測。
 
 資料長度以有效交易日計算：目前 `context_days=120`，每筆訓練樣本需要 120 天歷史特徵及下一天的目標。夜盤只有約 100 個交易日時，無法建立樣本；在行情完整、日期連續且暖機資料充足的情況下，至少 121 天有效特徵才能建立第一筆樣本，270 天約可提供最近 150 天的目標。`training-window-days` 不會補足資料或自動縮短輸入。
 
@@ -138,6 +168,8 @@ python -m Z_ORB_ONE.stock_model_gpt.run_daily --as-of 2026-09-16 --training-wind
 `run_daily` 依序執行：**行情更新與驗收 → 到期預測補驗證 → 重算 gate → 重建特徵 → 續訓**。會重新驗證截至 `--as-of` 的最近 `gate_window_days` 份每日登錄預測，並補驗證更早的漏跑、未完成或版本已變更紀錄；不掃描重跑版本庫。指定 `--settings 路徑` 時，所有步驟沿用同一設定檔。任何步驟拋出錯誤會中止後續工作；gate 為 `STALE`／`DEGRADED` 本身不阻止續訓，只限制正式預測。
 
 `run_daily` 自動使用 `update_data --require-complete`：
+
+- 同一流程自動更新 IX0001、IX0043，沿用歷史分段下載及最近日期重抓；即使 `--refresh-days 1` 也至少重抓前一交易日。兩組指數當日及前一交易日 OHLC 必須在本次回應中有效，不能用舊快取通過驗收；結果保存於驗收報告的 `indices`，任一失敗即阻止後續特徵重建與續訓。
 
 - 更新行情時重抓最近 7 個**日曆日**（長期未更新則從更早的快取日期補起），重新合併已存在日期，讓同日重跑可取得修正後的日 K。單獨執行 `update_data` 可用 `--refresh-days N` 調整範圍。
 - 公司行動也回補最近 7 個日曆日，與 `update_data --refresh-days N` 共用範圍；同日重跑會重新查詢，以納入晚公布或修正的除權息、減資等資料。成功查詢後，該區間、已查詢資料集的舊紀錄會依最新回應替換（包括撤回紀錄），區間外資料保留；API 失敗不推進同步日期。更早的修正可擴大重抓範圍，或使用 `resync_corporate_actions` 完整重同步。
@@ -246,7 +278,7 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-16 --predict
 - checkpoint 先暫存，實際載入並檢查架構、權重與有限數值成功後，才發布新模型並更新 `checkpoints/current_model.json`。該指標保存模型檔名、SHA-256 與訓練截止日；`predict`／`train_daily` 不再依檔名排序猜測最新模型。
 - 發布指標前中斷，上一個目前模型不變；多出來的未登錄模型不會自動被選用。模型缺失、內容損壞或不相容時明確報錯，不靜默改挑另一支。
 
-**升級後第一次使用**：先同步日曆並重建特徵。新訓練會自動建立目前模型指標；若已有可用的雙目標 checkpoint，可先確認檔案，再明確登錄（路徑須位於目前的 checkpoints 目錄）：
+**升級後第一次使用**：先同步日曆，再更新含兩組指數的行情、重建特徵並執行 `train_initial`。新訓練會自動建立目前模型指標；只有新版十八項輸入 checkpoint 才能明確登錄（路徑須位於目前的 checkpoints 目錄）：
 
 ```powershell
 python -m Z_ORB_ONE.stock_model_gpt.checkpoints --checkpoint "Z_ORB_ONE/stock_model_gpt/checkpoints/stock_model_gpt_實際檔名.pt"
@@ -256,8 +288,20 @@ python -m Z_ORB_ONE.stock_model_gpt.checkpoints --checkpoint "Z_ORB_ONE/stock_mo
 
 ## 6. 重置注意事項
 
-- `reset_runtime_data` 預設只預覽，需 `--yes` 才刪除。若指定 `STOCK_MODEL_GPT_WRITE_ROOT`，只清除隔離目錄內的輸出，不刪除正式行情、公司行動或特徵資料。
+- `reset_runtime_data` 預設只預覽，需 `--yes` 才刪除。正式重置包含可重抓的 `data/index_candles/`。若指定 `STOCK_MODEL_GPT_WRITE_ROOT`，只清除隔離目錄內的輸出，不刪除正式股票／指數行情、公司行動或特徵資料。
 - 日曆、人工休市／停牌紀錄與夜盤資料保留；重置也受流程鎖保護。
+
+從專案根目錄執行，先預覽將清除的資料夾與檔案數量：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.reset_runtime_data
+```
+
+確認預覽內容後，加上 `--yes` 實際清除並重建空資料夾：
+
+```powershell
+python -m Z_ORB_ONE.stock_model_gpt.reset_runtime_data --yes
+```
 
 ## 7. 走勢回測（backtest）
 
