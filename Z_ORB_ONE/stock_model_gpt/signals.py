@@ -75,7 +75,7 @@ def sorted_signals(signals):
 def build_signal_report_lines(prediction_date, thresholds, signals, target="high_price"):
     selected = ",".join(map(str, thresholds.classes))
     lines = [f"prediction_date={prediction_date.isoformat()}",
-             f"條件：P({target} ∈ {{{selected}}}) ≥ {thresholds.threshold_pct:g}%",
+             f"條件：P({target} in {{{selected}}}) >= {thresholds.threshold_pct:g}%",
              "股票  P(-2)  P(-1)  P(0)  P(1)  P(2)  所選合計  最高機率類別"]
     for signal in sorted_signals(signals):
         values = "  ".join(f"{signal[target][str(c)]:.2%}" for c in CLASSES)
