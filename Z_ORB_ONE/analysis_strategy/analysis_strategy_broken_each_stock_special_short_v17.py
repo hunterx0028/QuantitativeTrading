@@ -1,7 +1,7 @@
 """
 已知對齊原則與刻意差異
 1. 回測版以分 K 模擬策略，實機版以即時 quote/websocket 執行；逐項比對時不把資料粒度差異視為策略不一致。
-2. LIMIT_UP / LIMIT_DOWN 回測自行用日 K 驗證連續漲跌停天數；實機只交易當日名單，信任 selected_limit_up_stocks / selected_limit_down_stocks 已由前置流程產生。
+2. LIMIT_UP 使用 selected_limit_up_stocks 名單與盤中高點突破；LIMIT_DOWN 保留日 K 連跌停驗證。
 3. 實機 LOWER 多了 best bid/ask 可成交性保護，回測分 K 無足夠委買委賣資料，因此不納入回測。
 4. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
 
@@ -11,7 +11,7 @@ LOWER 模式成立條件
 3. IX0001、IX0043 均曾在 09:43 前跌破各自的 LOWER 啟動門檻且在判別模式時仍維持住。
 
 LIMIT_UP 策略成立條件
-1. 該股票連漲停符合指定次數
+1. 股票位於 selected_limit_up_stocks，入場時間前當日最高價 N >= 昨高。
 
 LIMIT_DOWN 策略成立條件
 1. 該股票連跌停符合指定次數
@@ -30,10 +30,10 @@ LOWER 模式個股入場條件
 1. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
-1. 該股票截至前一交易日的連續收漲停天數，必須恰好存在 LONG_LIMIT_UP_DAYS 中。
-2. 於 LIMIT_UP_ENTRY_TIME～LIMIT_UP_LEAVE_TIME（含）先找到第一根 low 低於「昨收到跌停價」指定百分比門檻的分 K。
-3. 從上述分 K 的下一根起，找到第一根 high 高於「昨收到漲停價」指定百分比門檻的分 K。
-4. 以上述站回分 K 的 high 做多進場。
+1. N 為當日嚴格早於 LIMIT_UP_ENTRY_TIME 的最高 high，且 N >= 前一交易日最高 high。
+2. LIMIT_UP_ENTRY_TIME～LIMIT_UP_LEAVE_TIME（含）第一根同時符合前一根 high <= N、當根 high >= N 時，以 N+1 tick 做多。
+3. 入場價 >= 漲停價則不交易；不使用產業指數過濾。
+4. 入場分 K 之前不得觸及漲停或跌停，不包含入場分 K 本身。
 
 LIMIT_DOWN 策略個股入場條件
 1. 該股票截至前一交易日的連續收跌停天數，必須恰好存在 SHORT_LIMIT_DOWN_DAYS 中。
@@ -89,16 +89,17 @@ STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-INCLUDE_LOWER_IN_PRINT_STATS = True
-INCLUDE_LIMIT_UP_IN_PRINT_STATS = False
+INCLUDE_LOWER_IN_PRINT_STATS = False
+INCLUDE_LIMIT_UP_IN_PRINT_STATS = True
 INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
 
-# 本日於 09:30 前至少須有此數量的分鐘 K 棒；
-# 少於此數量視為延遲撮合股票，不納入當日策略。
+BACKTEST_DATE = "20260921" # YYYYMMDD；空字串回測全部可用歷史日期，非空時優先於 --to
+
+# 本日 09:30 前至少 20 根分 K；不足者視為延遲撮合股票。
 MIN_MINUTE_BARS_BEFORE_0930 = 20
 
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -115,11 +116,8 @@ LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結�
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
 
-LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
-LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
-LIMIT_UP_REBOUND_PERCENT = 2.0 # 反向突破門檻：昨收到漲停價距離的百分比
-LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
-LIMIT_UP_LEAVE_TIME = (9, 25) # limit up 最晚嘗試進場時間，包含此時間點
+LIMIT_UP_ENTRY_TIME = (9, 20) # limit up 開始嘗試進場時間，包含此時間點
+LIMIT_UP_LEAVE_TIME = (10, 50) # limit up 最晚嘗試進場時間，包含此時間點
 
 SHORT_LIMIT_DOWN_DAYS = [1] # limit down 策略允許的「實際」連續收跌停天數
 LIMIT_DOWN_BREAK_UP_PERCENT = 3.0 # 上破門檻：昨收到漲停價距離的百分比
@@ -142,9 +140,8 @@ IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 啟動門檻：LOWER_STRATEGY_DECISION 前最後 low 需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：跌破後 high 不可回到前日最後 close 下方此百分比內
 
-# 產業盤勢過濾：作空須嚴格低於昨收下跌門檻，作多須嚴格高於昨收上漲門檻。
+# LOWER / LIMIT_DOWN 產業過濾：須嚴格低於昨收下跌門檻；LIMIT_UP 不使用。
 INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER / LIMIT_DOWN 作空：產業指數需低於昨收下跌此百分比的門檻
-INDUSTRY_MARKET_FILTER_LONG_PERCENT = 0 # LIMIT_UP 作多：產業指數需高於昨收上漲此百分比的門檻
 
 BROKERAGE_FEE_RATE = 0.001425 # 台股手續費率，買賣雙邊皆收
 SELL_TRANSACTION_TAX_RATE = 0.003 # 台股交易稅率，賣出時收
@@ -323,7 +320,7 @@ def get_api_cache_path(target_date: date) -> Path:
     return Path(__file__).resolve().parent / 'analysis_json_cache' / f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
 
 
-def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str, list], dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
+def load_api_cache(cache_path: Path, stock_list: list[tuple], industry_stock_list: list[tuple] | None = None) -> tuple[dict[str, list], dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
     """載入 API 快取；若不存在或格式不符則回傳 None。"""
     if not cache_path.exists():
         return None
@@ -343,7 +340,9 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
             for stock_name in current_names
         ):
             return None
-        required_index_keys = set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list)
+        required_index_keys = set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(
+            stock_list if industry_stock_list is None else industry_stock_list
+        )
         if any(
             key not in raw_index_minute_by_key
             for key in required_index_keys
@@ -525,14 +524,6 @@ def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float
 
 
 # ---------------------------------------------------------------------------
-# 股票清單 (tuple 格式：第一個元素為「名稱:代碼.TW」)
-# ---------------------------------------------------------------------------
-STOCK_LIST = [
-
-]
-
-
-# ---------------------------------------------------------------------------
 # Phase 1 / Phase 5 — CLI 與設定檔
 # ---------------------------------------------------------------------------
 
@@ -661,28 +652,40 @@ def filter_stocks_by_excluded_industries(stock_list: list[tuple]) -> list[tuple]
     ]
 
 
-def dedupe_stock_list(stock_lists: list[list[tuple]]) -> list[tuple]:
-    """依股票名稱去重，保留第一次出現的 tuple。"""
-    seen_names: set[str] = set()
-    deduped: list[tuple] = []
-    for stock_list in stock_lists:
-        for stock_item in stock_list:
-            stock_name = stock_item[0]
-            if stock_name in seen_names:
-                continue
-            seen_names.add(stock_name)
-            deduped.append(stock_item)
-    return deduped
+def validate_stock_list_overlaps(stock_groups: dict[str, list[tuple]]) -> None:
+    """依股票代碼檢查跨名單重複；列出全部衝突後停止。"""
+    memberships: dict[str, dict[str, str]] = {}
+    for group_name, stocks in stock_groups.items():
+        for stock_item in stocks:
+            symbol = extract_symbol(stock_item[0])
+            memberships.setdefault(symbol, {})[group_name] = stock_item[0]
+    overlaps = {symbol: groups for symbol, groups in memberships.items() if len(groups) > 1}
+    if overlaps:
+        for symbol, groups in sorted(overlaps.items()):
+            print(f'[ERROR] 股票代碼 {symbol} 跨名單重複: {groups}')
+        raise SystemExit(1)
+
+
+def parse_backtest_date(value: str) -> date | None:
+    """空字串代表所有日期，其餘必須是有效的八位數日期。"""
+    if value == "":
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{8}", value) is None:
+        raise ValueError('BACKTEST_DATE 必須是空字串或 YYYYMMDD 八位數日期')
+    return datetime.strptime(value, "%Y%m%d").date()
 
 
 def build_stock_strategy_assignments(
-    analysis_stock_list: list[tuple],
+    lower_stocks: list[tuple],
+    limit_up_stocks: list[tuple],
+    limit_down_stocks: list[tuple],
 ) -> list[tuple[tuple, bool, bool, bool]]:
-    """統一回測股票池中每支股票都開放 LOWER/LIMIT_UP/LIMIT_DOWN 逐日分類。"""
-    return [
-        (stock_item, True, True, True)
-        for stock_item in analysis_stock_list
-    ]
+    """各名單只執行自己的策略，不再合併後逐日分類。"""
+    return (
+        [(stock, True, False, False) for stock in lower_stocks]
+        + [(stock, False, True, False) for stock in limit_up_stocks]
+        + [(stock, False, False, True) for stock in limit_down_stocks]
+    )
 
 
 def get_required_industry_index_keys(stock_list: list[tuple]) -> set[str]:
@@ -1315,9 +1318,6 @@ def is_limit_industry_market_filter_passed(
     if strategy_type == STRATEGY_LIMIT_DOWN:
         threshold = previous_reference * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
         return industry_close < threshold
-    if strategy_type == STRATEGY_LIMIT_UP:
-        threshold = previous_reference * (1 + INDUSTRY_MARKET_FILTER_LONG_PERCENT / 100.0)
-        return industry_close > threshold
     return False
 
 
@@ -1585,50 +1585,37 @@ def scan_entry_signal_lower(
 
 
 def scan_entry_signal_limit_up(today_bars: list, ystats: dict):
-    """
-    LIMIT_UP 作多進場訊號：
-    1) 進場檢查時間為 LIMIT_UP_ENTRY_TIME 到 LIMIT_UP_LEAVE_TIME（含起訖）
-    2) 先找第一根 low 低於「昨收到跌停價」指定百分比門檻的分 K
-    3) 從下一根起，找第一根 high 高於「昨收到漲停價」指定百分比門檻的分 K
-    4) 候選進場價 = 站回分 K 的 high
-    """
+    """固定入場時間前最高價 N；N >= 昨高後，前根 high <= N 且當根 high >= N，以 N+1 tick 做多。"""
     start_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
     end_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
-    previous_close = float(ystats['close'])
-    limit_up_price, limit_down_price = calculate_limit_prices(previous_close)
-    break_down_threshold = previous_close + (
-        limit_down_price - previous_close
-    ) * (LIMIT_UP_BREAK_DOWN_PERCENT / 100.0)
-    rebound_threshold = previous_close + (
-        limit_up_price - previous_close
-    ) * (LIMIT_UP_REBOUND_PERCENT / 100.0)
-    broke_previous_close = False
-
-    indexed_bars = []
-    for bar in today_bars:
-        dtv = bar.get('dt')
-        if dtv is None:
-            continue
-        hm = dtv.hour * 60 + dtv.minute
-        indexed_bars.append((bar, hm))
-    indexed_bars.sort(key=lambda item: item[0]['dt'])
-
-    for bar, hm in indexed_bars:
-        if not (start_hm <= hm <= end_hm):
-            continue
-
-        if not broke_previous_close:
-            if bar.get('low') is not None and float(bar['low']) < break_down_threshold:
-                broke_previous_close = True
-            continue
-
-        if bar.get('high') is None:
-            continue
-
-        entry_price = float(bar['high'])
-        if entry_price > rebound_threshold:
-            return bar, entry_price
-
+    ordered = sorted(
+        (bar for bar in today_bars if bar.get('dt') is not None),
+        key=lambda bar: bar['dt'],
+    )
+    prior_highs = [
+        float(bar['high']) for bar in ordered
+        if bar['dt'].hour * 60 + bar['dt'].minute < start_hm
+        and bar.get('high') is not None
+    ]
+    if not prior_highs:
+        return None
+    reference_high = max(prior_highs)
+    if reference_high < float(ystats['high']):
+        return None
+    entry_price = float(Decimal(str(reference_high)) + Decimal(str(get_tick_size(reference_high))))
+    limit_up_price, _ = calculate_limit_prices(float(ystats['close']))
+    if entry_price >= limit_up_price:
+        return None
+    for index, bar in enumerate(ordered):
+        hm = bar['dt'].hour * 60 + bar['dt'].minute
+        if start_hm <= hm <= end_hm and bar.get('high') is not None:
+            if index == 0:
+                continue
+            previous_high = ordered[index - 1].get('high')
+            if previous_high is None:
+                continue
+            if float(previous_high) <= reference_high <= float(bar['high']):
+                return bar, entry_price
     return None
 
 
@@ -1695,18 +1682,17 @@ def is_same_price(left: float, right: float) -> bool:
     return math.isclose(float(left), float(right), abs_tol=1e-9)
 
 
-def has_limit_sequence_before_date(
+def has_limit_down_sequence_before_date(
     stock_name: str,
     target_date: date,
     day_candles_by_symbol: dict[str, list],
     allowed_days: list[int],
-    direction: str,
 ) -> bool:
     """判斷 target_date 前的實際連續漲跌停天數是否恰好在允許清單內。"""
     if not isinstance(allowed_days, list):
-        raise ValueError(f'{direction}連續天數必須是陣列: {allowed_days}')
+        raise ValueError(f'{STRATEGY_LIMIT_DOWN}連續天數必須是陣列: {allowed_days}')
     if any(type(days) is not int or days < 1 for days in allowed_days):
-        raise ValueError(f'{direction}連續天數只能包含正整數: {allowed_days}')
+        raise ValueError(f'{STRATEGY_LIMIT_DOWN}連續天數只能包含正整數: {allowed_days}')
     if not allowed_days:
         return False
 
@@ -1724,8 +1710,7 @@ def has_limit_sequence_before_date(
         previous_date = previous_dates[index - 1]
         current = daily_map[current_date]
         previous = daily_map[previous_date]
-        limit_up_price, limit_down_price = calculate_limit_prices(previous['close'])
-        limit_price = limit_up_price if direction == STRATEGY_LIMIT_UP else limit_down_price
+        _, limit_price = calculate_limit_prices(previous['close'])
         if not is_same_price(current['close'], limit_price):
             break
         actual_days += 1
@@ -1957,7 +1942,7 @@ def print_daily_candle_data_issues() -> None:
     for stock_name, raw_date, reason in sorted(DAILY_CANDLE_DATA_ISSUES):
         print(
             f'股票={stock_name}  原始日期={raw_date}  原因={reason}  '
-            '影響=該筆日K未納入 LIMIT_UP / LIMIT_DOWN 連續天數判斷'
+            '影響=該筆日K未納入 LIMIT_DOWN 連續天數判斷'
         )
     print('========== 日K資料異常結束 ==========')
     print('')
@@ -2149,10 +2134,7 @@ def print_daily_optimization_results(
         f'LIMIT_DOWN出場時間窗={INTRADAY_COMPARE_END_LIMIT_DOWN[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_DOWN[1]:02d}'
     )
     print(
-        f'LIMIT_UP允許的實際連續漲停天數={LONG_LIMIT_UP_DAYS}  '
-        f'LIMIT_UP下破區間={LIMIT_UP_BREAK_DOWN_PERCENT:.1f}%  '
-        f'LIMIT_UP反向突破區間={LIMIT_UP_REBOUND_PERCENT:.1f}%  '
-        f'LIMIT_UP進場=先下破跌停方向門檻後，首根突破漲停方向門檻的分K high  '
+        f'LIMIT_UP進場=N >= 昨高，時間窗內前根 high <= N 且當根 high >= N，以 N+1 tick 做多  '
         f'LIMIT_UP_ENTRY_TIME={LIMIT_UP_ENTRY_TIME[0]:02d}:{LIMIT_UP_ENTRY_TIME[1]:02d}  '
         f'LIMIT_UP_LEAVE_TIME={LIMIT_UP_LEAVE_TIME[0]:02d}:{LIMIT_UP_LEAVE_TIME[1]:02d}    '
         f'LIMIT_UP出場時間窗={INTRADAY_COMPARE_END_LIMIT_UP[0]:02d}:{INTRADAY_COMPARE_END_LIMIT_UP[1]:02d}'
@@ -2170,29 +2152,16 @@ def find_limit_candidate_on_date(
     day_candles_by_symbol: dict[str, list],
     index_minute_bars_by_key: dict[str, dict[str, list]],
     strategy_type: str,
-    sequence_already_confirmed: bool = False,
 ):
-    """判斷連續漲跌停後次一交易日的 limit 獨立策略候選交易。"""
+    """LIMIT_UP 使用盤中高點突破；LIMIT_DOWN 先驗證連跌停序列。"""
     stock_name = stock_item[0]
-    if strategy_type == STRATEGY_LIMIT_UP:
-        if not sequence_already_confirmed and not has_limit_sequence_before_date(
-            stock_name,
-            target_date,
-            day_candles_by_symbol,
-            LONG_LIMIT_UP_DAYS,
-            STRATEGY_LIMIT_UP,
-        ):
-            return None
-    elif strategy_type == STRATEGY_LIMIT_DOWN:
-        if not sequence_already_confirmed and not has_limit_sequence_before_date(
-            stock_name,
-            target_date,
-            day_candles_by_symbol,
+    if strategy_type == STRATEGY_LIMIT_DOWN:
+        if not has_limit_down_sequence_before_date(
+            stock_name, target_date, day_candles_by_symbol,
             SHORT_LIMIT_DOWN_DAYS,
-            STRATEGY_LIMIT_DOWN,
         ):
             return None
-    else:
+    elif strategy_type != STRATEGY_LIMIT_UP:
         return None
 
     today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, target_date)
@@ -2214,16 +2183,6 @@ def find_limit_candidate_on_date(
         if entry_signal is None:
             return None
         entry_bar, entry_price = entry_signal
-        if not is_limit_industry_market_filter_passed(
-            stock_item,
-            target_date,
-            entry_bar['dt'],
-            index_minute_bars_by_key,
-            strategy_type,
-        ):
-            return None
-        if entry_bar is None:
-            return None
         intraday_compare_end = INTRADAY_COMPARE_END_LIMIT_UP
         trade_side = TRADE_SIDE_LONG
     else:
@@ -2347,8 +2306,9 @@ def collect_trade_candidates(
     enable_general_strategies: bool = True,
     enable_limit_up_strategy: bool = False,
     enable_limit_down_strategy: bool = False,
+    backtest_date: date | None = None,
 ) -> list:
-    """逐日先執行強制 LIMIT 策略；未符合 LIMIT 序列時才執行一般策略。"""
+    """依來源名單執行固定策略；只篩選交易日期，保留先前行情資料。"""
     stock_name = stock_item[0]
     bars_by_date = minute_bars_by_symbol.get(stock_name, {})
     if not bars_by_date:
@@ -2362,38 +2322,19 @@ def collect_trade_candidates(
         reverse=True,
     )
 
+    if backtest_date is not None:
+        available_dates = [day for day in available_dates if day == backtest_date]
+
     candidates = []
     for current_date in available_dates:
-        limit_up_forced = enable_limit_up_strategy and has_limit_sequence_before_date(
-            stock_name,
-            current_date,
-            day_candles_by_symbol,
-            LONG_LIMIT_UP_DAYS,
-            STRATEGY_LIMIT_UP,
-        )
-        limit_down_forced = enable_limit_down_strategy and has_limit_sequence_before_date(
-            stock_name,
-            current_date,
-            day_candles_by_symbol,
-            SHORT_LIMIT_DOWN_DAYS,
-            STRATEGY_LIMIT_DOWN,
-        )
-        if limit_up_forced or limit_down_forced:
-            forced_strategy_type = (
-                STRATEGY_LIMIT_UP if limit_up_forced else STRATEGY_LIMIT_DOWN
-            )
+        if enable_limit_up_strategy or enable_limit_down_strategy:
+            strategy_type = STRATEGY_LIMIT_UP if enable_limit_up_strategy else STRATEGY_LIMIT_DOWN
             limit_candidate = find_limit_candidate_on_date(
-                stock_item,
-                current_date,
-                bars_by_date,
-                day_candles_by_symbol,
-                index_minute_bars_by_key,
-                forced_strategy_type,
-                sequence_already_confirmed=True,
+                stock_item, current_date, bars_by_date, day_candles_by_symbol,
+                index_minute_bars_by_key, strategy_type,
             )
             if limit_candidate is not None:
                 candidates.append(limit_candidate)
-            # LIMIT 屬強制策略；序列成立後即使沒有進場訊號，也不再執行其他策略。
             continue
 
         if not enable_general_strategies:
@@ -2675,17 +2616,27 @@ def main() -> None:
     builtins.print()
     try:
         args = parse_args()
-        raw_stock_list = STOCK_LIST or selected_stocks
+        validate_stock_list_overlaps({
+            'selected_stocks': selected_stocks,
+            'selected_limit_up_stocks': selected_limit_up_stocks,
+            'selected_limit_down_stocks': selected_limit_down_stocks,
+        })
+        try:
+            backtest_date = parse_backtest_date(BACKTEST_DATE)
+        except ValueError as exc:
+            print(f'[ERROR] {exc}', file=sys.stderr)
+            raise SystemExit(1)
+        raw_stock_list = selected_stocks
         stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
         limit_up_stock_list_for_data = filter_stocks_by_excluded_industries(selected_limit_up_stocks)
         limit_down_stock_list_for_data = filter_stocks_by_excluded_industries(selected_limit_down_stocks)
-        raw_analysis_stock_list = dedupe_stock_list([
-            raw_stock_list,
-            selected_limit_up_stocks,
-            selected_limit_down_stocks,
-        ])
-        analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
-        ensure_backtest_industry_index_metadata(analysis_stock_list)
+        stock_strategy_assignments = build_stock_strategy_assignments(
+            stock_list, limit_up_stock_list_for_data, limit_down_stock_list_for_data,
+        )
+        # 僅資料擷取與報表共用彙總清單；策略由各來源名單固定分派。
+        raw_analysis_stock_list = raw_stock_list + selected_limit_up_stocks + selected_limit_down_stocks
+        analysis_stock_list = [assignment[0] for assignment in stock_strategy_assignments]
+        ensure_backtest_industry_index_metadata(stock_list + limit_down_stock_list_for_data)
         excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
         if EXCLUDED_INDUSTRY_CODES:
             print(
@@ -2697,11 +2648,13 @@ def main() -> None:
             f'selected_stocks來源數={len(stock_list)}  '
             f'selected_limit_up_stocks來源數={len(limit_up_stock_list_for_data)}  '
             f'selected_limit_down_stocks來源數={len(limit_down_stock_list_for_data)}  '
-            f'統一回測股票池={len(analysis_stock_list)}'
+            f'回測股票總數={len(analysis_stock_list)}'
         )
 
         # 目標日期
-        if args.to:
+        if backtest_date is not None:
+            target_date = backtest_date
+        elif args.to:
             try:
                 target_date = datetime.strptime(args.to, '%Y-%m-%d').date()
             except ValueError:
@@ -2711,7 +2664,9 @@ def main() -> None:
             target_date = date.today()
 
         cache_path = get_api_cache_path(target_date)
-        cached = load_api_cache(cache_path, analysis_stock_list)
+        cached = load_api_cache(
+            cache_path, analysis_stock_list, stock_list + limit_down_stock_list_for_data,
+        )
         if cached is not None:
             day_candles_by_symbol, minute_bars_by_symbol, index_minute_bars_by_key = cached
             print(f'已載入API快取: {cache_path.name}')
@@ -2744,7 +2699,7 @@ def main() -> None:
             if total_stocks > 0:
                 builtins.print()
 
-            required_index_keys = sorted(set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(analysis_stock_list))
+            required_index_keys = sorted(set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list + limit_down_stock_list_for_data))
             total_indices = len(required_index_keys)
             for idx, index_key in enumerate(required_index_keys, start=1):
                 index_meta = MARKET_INDEX_METADATA.get(index_key, {})
@@ -2765,7 +2720,12 @@ def main() -> None:
             )
             print(f'已儲存API快取: {cache_path.name}')
 
-        stock_strategy_assignments = build_stock_strategy_assignments(analysis_stock_list)
+        if backtest_date is not None:
+            date_key = backtest_date.isoformat()
+            if not any(bars.get(date_key) for bars in minute_bars_by_symbol.values()):
+                print(f'[INFO] {date_key} 無當日分 K 資料（可能為非交易日），不改用其他日期。')
+                return
+        print(f'BACKTEST_DATE={BACKTEST_DATE or "全部可用歷史日期"}')
         total_stocks = len(stock_strategy_assignments)
 
         def evaluate_one_window() -> dict:
@@ -2796,7 +2756,7 @@ def main() -> None:
                 all_candidates.extend(
                     collect_trade_candidates(
                         stock_item,
-                        analysis_stock_list,
+                        stock_list,
                         target_date,
                         minute_bars_by_symbol,
                         day_candles_by_symbol,
@@ -2806,6 +2766,7 @@ def main() -> None:
                         enable_general_strategies,
                         enable_limit_up_strategy,
                         enable_limit_down_strategy,
+                        backtest_date,
                     )
                 )
 
@@ -2838,19 +2799,6 @@ def main() -> None:
             or len(set(SHORT_LIMIT_DOWN_DAYS)) != len(SHORT_LIMIT_DOWN_DAYS)
         ):
             print('[ERROR] SHORT_LIMIT_DOWN_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
-            sys.exit(1)
-        if (
-            not isinstance(LONG_LIMIT_UP_DAYS, list)
-            or any(type(days) is not int or days < 1 for days in LONG_LIMIT_UP_DAYS)
-            or len(set(LONG_LIMIT_UP_DAYS)) != len(LONG_LIMIT_UP_DAYS)
-        ):
-            print('[ERROR] LONG_LIMIT_UP_DAYS 必須是沒有重複值的正整數陣列（可為空）', file=sys.stderr)
-            sys.exit(1)
-        if not (0 <= LIMIT_UP_BREAK_DOWN_PERCENT <= 100):
-            print('[ERROR] LIMIT_UP_BREAK_DOWN_PERCENT 需介於 0~100', file=sys.stderr)
-            sys.exit(1)
-        if not (0 <= LIMIT_UP_REBOUND_PERCENT <= 100):
-            print('[ERROR] LIMIT_UP_REBOUND_PERCENT 需介於 0~100', file=sys.stderr)
             sys.exit(1)
         if not (0 <= LIMIT_DOWN_BREAK_UP_PERCENT <= 100):
             print('[ERROR] LIMIT_DOWN_BREAK_UP_PERCENT 需介於 0~100', file=sys.stderr)
@@ -2977,9 +2925,6 @@ def main() -> None:
         if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
             print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)
             sys.exit(1)
-        if INDUSTRY_MARKET_FILTER_LONG_PERCENT < 0:
-            print('[ERROR] INDUSTRY_MARKET_FILTER_LONG_PERCENT 不可小於 0', file=sys.stderr)
-            sys.exit(1)
         best_window_result = evaluate_one_window()
         builtins.print()
         best_results = best_window_result['best_results']
@@ -2989,7 +2934,7 @@ def main() -> None:
             best_results,
             index_minute_bars_by_key,
             minute_bars_by_symbol,
-            analysis_stock_list,
+            stock_list,
             market_start_gate_cache,
         )
     finally:
