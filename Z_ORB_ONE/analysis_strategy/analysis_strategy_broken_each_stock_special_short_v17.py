@@ -97,7 +97,7 @@ INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
 
-BACKTEST_DATE = "20260921" # YYYYMMDD；空字串回測全部可用歷史日期，非空時優先於 --to
+BACKTEST_DATE = "20260924" # YYYYMMDD；空字串回測全部可用歷史日期，非空時優先於 --to
 
 # 本日 09:30 前至少 20 根分 K；不足者視為延遲撮合股票。
 MIN_MINUTE_BARS_BEFORE_0930 = 20
@@ -109,7 +109,7 @@ OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 8.0 # limit down 停利百分比(%)
 OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
 
 OPTIMIZE_PROFIT_PER_LIMIT_UP = 9.0 # limit up 停利百分比(%)
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
+OPTIMIZE_LOSS_PER_LIMIT_UP = 3.0 # limit up 停損百分比(%)
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
