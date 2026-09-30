@@ -11,7 +11,7 @@ LOWER 模式成立條件
 3. IX0001、IX0043 均曾在 09:43 前跌破各自的 LOWER 啟動門檻且在判別模式時仍維持住。
 
 LIMIT_UP 策略成立條件
-1. 股票位於 selected_limit_up_stocks，入場時間前當日最高價 N >= 昨高。
+1. 股票位於 selected_limit_up_stocks。
 
 LIMIT_DOWN 策略成立條件
 1. 該股票連跌停符合指定次數
@@ -30,7 +30,7 @@ LOWER 模式個股入場條件
 1. 放空時若入場價加停損價差已達漲停價，或做多時若入場價減停損價差已達跌停價，皆不進場。
 
 LIMIT_UP 策略個股入場條件
-1. N 為當日嚴格早於 LIMIT_UP_ENTRY_TIME 的最高 high，且 N >= 前一交易日最高 high。
+1. N 為當日嚴格早於 LIMIT_UP_ENTRY_TIME 的最高 high。
 2. LIMIT_UP_ENTRY_TIME～LIMIT_UP_LEAVE_TIME（含）第一根同時符合前一根 high <= N、當根 high >= N 時，以 N+1 tick 做多。
 3. 入場價 >= 漲停價則不交易；不使用產業指數過濾。
 4. 入場分 K 之前不得觸及漲停或跌停，不包含入場分 K 本身。
@@ -97,7 +97,7 @@ INCLUDE_LIMIT_DOWN_IN_PRINT_STATS = False
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
 
-BACKTEST_DATE = "20260924" # YYYYMMDD；空字串回測全部可用歷史日期，非空時優先於 --to
+BACKTEST_DATE = "" # YYYYMMDD；空字串回測全部可用歷史日期，非空時優先於 --to
 
 # 本日 09:30 前至少 20 根分 K；不足者視為延遲撮合股票。
 MIN_MINUTE_BARS_BEFORE_0930 = 20
@@ -1585,7 +1585,7 @@ def scan_entry_signal_lower(
 
 
 def scan_entry_signal_limit_up(today_bars: list, ystats: dict):
-    """固定入場時間前最高價 N；N >= 昨高後，前根 high <= N 且當根 high >= N，以 N+1 tick 做多。"""
+    """固定入場時間前最高價 N；前根 high <= N 且當根 high >= N，以 N+1 tick 做多。"""
     start_hm = LIMIT_UP_ENTRY_TIME[0] * 60 + LIMIT_UP_ENTRY_TIME[1]
     end_hm = LIMIT_UP_LEAVE_TIME[0] * 60 + LIMIT_UP_LEAVE_TIME[1]
     ordered = sorted(
@@ -1600,8 +1600,6 @@ def scan_entry_signal_limit_up(today_bars: list, ystats: dict):
     if not prior_highs:
         return None
     reference_high = max(prior_highs)
-    if reference_high < float(ystats['high']):
-        return None
     entry_price = float(Decimal(str(reference_high)) + Decimal(str(get_tick_size(reference_high))))
     limit_up_price, _ = calculate_limit_prices(float(ystats['close']))
     if entry_price >= limit_up_price:
