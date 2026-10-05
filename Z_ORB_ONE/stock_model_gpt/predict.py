@@ -59,7 +59,7 @@ def save_prediction_version(payload, inputs, report_text, replace_official=False
 
 from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds,
                       build_signal_thresholds, detect_signal, build_signal_report_lines,
-                      predicted_class, sorted_signals)
+                      build_signal_symbol_summary, predicted_class, sorted_signals)
 
 
 def add_prediction_signal_arguments(parser):
@@ -265,6 +265,7 @@ def run_prediction(
     report_lines.insert(1 + len(coverage_lines), "[high 符合清單]")
     report_lines.extend(["", "[low 符合清單]",
                          *build_signal_report_lines(prediction_date, low_thresholds, low_signals, "low_price")[1:]])
+    report_lines.extend(["", build_signal_symbol_summary(signals, low_signals)])
     for line in report_lines:
         print(line)
     report_text = "\n".join(report_lines) + "\n"

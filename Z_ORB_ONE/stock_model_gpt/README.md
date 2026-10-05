@@ -128,7 +128,7 @@ python -m Z_ORB_ONE.stock_model_gpt.predict --universe-date 2026-09-15 --predict
 
 ### 查看結果
 
-- **控制台／`signal_reports/YYYY-MM-DD.txt`**：同一份摘要，分別列出 high、low 符合條件股票的五種機率、所選刻度合計機率、最高機率類別；兩份清單各自依合計機率由高到低排序，沒有符合股票時也會顯示該清單與條件。
+- **控制台／`signal_reports/YYYY-MM-DD.txt`**：同一份摘要，分別列出 high、low 符合條件股票的五種機率、所選刻度合計機率、最高機率類別；兩份清單各自依合計機率由高到低排序，沒有符合股票時也會顯示該清單與條件。報表最後會附上 high/low 符合股票代碼彙整，例如 `"3707","8150","1727"`。
 - **`predictions/YYYY-MM-DD.json`**：每支股票一筆，保存 high 與 low 各五種機率及 `signal_matches` 的兩個符合旗標，不符合門檻的股票也會保留。`high_signal_thresholds`、`low_signal_thresholds` 保存兩組設定；`high_signals`、`low_signals` 保存各自的符合清單。為維持現有 high 驗證相容性，`signal_thresholds`、`signals` 暫時保留為 high 的相同內容。
 
 ### Meta-labeling 資料累積

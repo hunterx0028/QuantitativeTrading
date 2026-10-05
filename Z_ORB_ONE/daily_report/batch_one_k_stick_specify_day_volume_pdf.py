@@ -35,8 +35,8 @@ from Z_ORB_ONE.stock_data import (
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
-SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
-SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
+SPECIFIED_DATE = "20261005"  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+SPECIFIED_STOCK_CODES = ["3707","8150","1727",]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 32) # follow 個股進場開始分K棒的(時, 分)，包含此時間

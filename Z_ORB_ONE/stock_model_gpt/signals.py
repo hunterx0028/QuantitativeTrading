@@ -72,6 +72,18 @@ def sorted_signals(signals):
     return sorted(signals, key=lambda s: (-s["target_probability"], s["symbol"]))
 
 
+def build_signal_symbol_summary(high_signals, low_signals):
+    symbols = []
+    seen = set()
+    for signal in [*sorted_signals(high_signals), *sorted_signals(low_signals)]:
+        symbol = signal["symbol"]
+        if symbol in seen:
+            continue
+        symbols.append(symbol)
+        seen.add(symbol)
+    return ",".join(f'"{symbol}"' for symbol in symbols)
+
+
 def build_signal_report_lines(prediction_date, thresholds, signals, target="high_price"):
     selected = ",".join(map(str, thresholds.classes))
     lines = [f"prediction_date={prediction_date.isoformat()}",
