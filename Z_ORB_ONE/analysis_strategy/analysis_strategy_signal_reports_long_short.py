@@ -29,7 +29,7 @@ OUTPUT_FILE = BASE_DIR / 'analysis_strategy_signal_reports_long_short_result.txt
 # 做多設定
 LONG_STOP_LOSS_PERCENT = 3.0
 LONG_TAKE_PROFIT_PERCENT = 5.0
-LONG_ENTRY_START_TIME = (10, 0)
+LONG_ENTRY_START_TIME = (9, 55)
 LONG_ENTRY_END_TIME = (10, 30)
 LONG_BREAKOUT_POINT = 1  # 0: 昨收，1: 昨高
 LONG_EARLY_BREAKOUT_POINT = 1  # 開始進場前曾突破：0 昨收、1 昨高、9 不須突破
@@ -301,15 +301,10 @@ def compact_cache(symbol, target, day_raw, minute_raw):
 def print_summary(emit, label, results):
     trades = [r for r in results if r['status'] == 'TRADE']
     capital = sum(r['entry_price'] for r in trades)
-    gross = sum(r['gross_pnl'] for r in trades)
-    costs = sum(r['cost'] for r in trades)
     net = sum(r['net_pnl'] for r in trades)
     wins = sum(r['net_pnl'] > 0 for r in trades)
     emit(f'{label}: 筆數={len(trades)} 勝率={wins / len(trades) * 100 if trades else 0:.2f}% '
-         f'每股毛收益合計={gross:.4f} 每股成本合計={costs:.4f} 每股淨收益合計={net:.4f} '
          f'總入場金額={sum(r["entry_amount"] for r in trades):,.2f}元 '
-         f'毛收益金額={sum(r["gross_amount"] for r in trades):+,.2f}元 '
-         f'交易成本金額={sum(r["cost_amount"] for r in trades):,.2f}元 '
          f'淨收益金額={sum(r["net_amount"] for r in trades):+,.2f}元 '
          f'總報酬率={net / capital * 100 if capital else 0:.4f}% '
          f'（每筆{TRADE_SHARES:,}股；SKIP={sum(r["status"] == "SKIP" for r in results)} '
@@ -381,12 +376,7 @@ def main(argv=None):
                         emit(f'{symbol} {side} 昨日={result["previous_date"]} 門檻={result["threshold"]:g} '
                              f'入場={result["entry_dt"]:%H:%M} @{result["entry_price"]:g} '
                              f'離場={result["exit_dt"]:%H:%M} @{result["exit_price"]:g} '
-                             f'原因={result["exit_reason"]} 每股成本={result["cost"]:.4f} '
-                             f'每股淨收益={result["net_pnl"]:+.4f} 股數={result["shares"]:,} '
-                             f'入場金額={result["entry_amount"]:,.2f}元 '
-                             f'毛收益金額={result["gross_amount"]:+,.2f}元 '
-                             f'交易成本金額={result["cost_amount"]:,.2f}元 '
-                             f'淨收益金額={result["net_amount"]:+,.2f}元 '
+                             f'原因={result["exit_reason"]} 淨收益金額={result["net_amount"]:+,.2f}元 '
                              f'報酬={result["return_percent"]:.4f}% 資料={source}')
                     else:
                         emit(f'{symbol} {side} [{result["status"]}] {result["reason"]}')
