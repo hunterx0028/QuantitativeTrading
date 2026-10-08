@@ -268,10 +268,11 @@ def build_industry_index_entry(
     }
 
 
-def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> None:
+def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> list[tuple]:
     """
     回測程式專用：啟動時檢查 stock_data.py 是否具備足夠產業別指數 metadata。
     只補齊產業指數結構與代碼，不更新最新 previous_close；回測會另外抓歷史分 K。
+    mapping 無對應指數的股票列入報告並排除，回傳可回測的股票清單。
     """
     required_targets = get_required_industry_targets(stock_list)
     missing_targets = [
@@ -280,7 +281,7 @@ def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> None:
         if not market_previous_close_indices.get(f'{exchange}:{industry_code}', {}).get('symbol')
     ]
     if not missing_targets:
-        return
+        return stock_list
 
     if not INDUSTRY_INDEX_MAP_PATH.exists():
         missing_text = ', '.join(f'{exchange}:{industry_code}' for exchange, industry_code in missing_targets)
@@ -301,21 +302,34 @@ def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> None:
         updated_indices[index_key] = entry
         added_keys.append(index_key)
 
-    if unresolved:
-        raise ValueError(
-            'industry_index_map.json 找不到以下產業指數 mapping: '
-            + ', '.join(unresolved)
-        )
-
-    write_stock_data_market_indices(updated_indices)
+    if added_keys:
+        write_stock_data_market_indices(updated_indices)
     market_previous_close_indices.clear()
     market_previous_close_indices.update(updated_indices)
     MARKET_INDEX_METADATA.clear()
     MARKET_INDEX_METADATA.update({**market_previous_close_indices, **RESERVE_MARKET_INDICES})
-    print(
-        '回測啟動檢查：已補齊 stock_data.py 產業別指數 metadata '
-        f'({len(added_keys)}): {", ".join(added_keys)}'
-    )
+    if added_keys:
+        print(
+            '回測啟動檢查：已補齊 stock_data.py 產業別指數 metadata '
+            f'({len(added_keys)}): {", ".join(added_keys)}'
+        )
+    eligible_stocks = []
+    for stock_item in stock_list:
+        if get_industry_index_key(stock_item) is None:
+            exchange = get_exchange_for_stock(stock_item[0])
+            industry_code = get_stock_industry_code(stock_item)
+            print(
+                f'[排除回測] {stock_item[0]}：缺少產業指數 mapping '
+                f'{exchange}:{industry_code}，無法驗證產業入場條件'
+            )
+        else:
+            eligible_stocks.append(stock_item)
+    if unresolved or len(eligible_stocks) != len(stock_list):
+        print(
+            f'缺少產業指數 mapping：排除股票數={len(stock_list) - len(eligible_stocks)} '
+            f'剩餘回測股票數={len(eligible_stocks)}'
+        )
+    return eligible_stocks
 
 
 def get_api_cache_path(target_date: date) -> Path:
@@ -2685,8 +2699,16 @@ def main() -> None:
             selected_limit_down_stocks,
         ])
         analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
-        ensure_backtest_industry_index_metadata(analysis_stock_list)
         excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
+        analysis_stock_list = ensure_backtest_industry_index_metadata(analysis_stock_list)
+        eligible_names = {item[0] for item in analysis_stock_list}
+        stock_list = [item for item in stock_list if item[0] in eligible_names]
+        limit_up_stock_list_for_data = [
+            item for item in limit_up_stock_list_for_data if item[0] in eligible_names
+        ]
+        limit_down_stock_list_for_data = [
+            item for item in limit_down_stock_list_for_data if item[0] in eligible_names
+        ]
         if EXCLUDED_INDUSTRY_CODES:
             print(
                 f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
@@ -2699,6 +2721,9 @@ def main() -> None:
             f'selected_limit_down_stocks來源數={len(limit_down_stock_list_for_data)}  '
             f'統一回測股票池={len(analysis_stock_list)}'
         )
+        if not analysis_stock_list:
+            print('[WARN] 沒有符合回測條件的股票，結束本次回測')
+            return
 
         # 目標日期
         if args.to:
