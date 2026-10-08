@@ -18,7 +18,7 @@ from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 from esun_marketdata import EsunMarketdata
 
 import stock_data
-from stock_data import selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks, market_previous_close_indices
+from stock_data import selected_stocks, market_previous_close_indices
 
 
 class TeeStream:
@@ -43,9 +43,8 @@ class TeeStream:
 # ============ 參數/常數 ============
 # 已知對齊原則與刻意差異：
 # 1. 回測版以分 K 模擬策略，實機版以 REST 即時 quote 執行；資料粒度差異不視為策略不一致。
-# 2. LIMIT_UP / LIMIT_DOWN 實機只交易當日名單，信任 selected_limit_up_stocks / selected_limit_down_stocks 已由前置流程產生。
-# 3. LOWER 實機多了 best bid/ask 可成交性保護；回測分 K 無足夠委買委賣資料。
-# 4. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
+# 2. LOWER 實機多了 best bid/ask 可成交性保護；回測分 K 無足夠委買委賣資料。
+# 3. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
@@ -54,38 +53,19 @@ STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 MAIN_START_TIME = (8, 50)  # 主程序開始執行時間
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
-# 單日策略前提：同一股票只會屬於 LOWER、LIMIT_DOWN、LIMIT_UP 其中一種模式，
-# 因此同一股票在當日只會有一個固定交易方向，不會同時作多與作空。
+# 單日策略前提：LOWER 每檔股票在當日只會有一個固定交易方向。
 STRATEGY_LOWER = 'LOWER'
-STRATEGY_LIMIT_DOWN = 'LIMIT_DOWN'
-STRATEGY_LIMIT_UP = 'LIMIT_UP'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
 ENABLE_ENTRY_MODE_LOWER = True  # False 時，LOWER_STRATEGY_DECISION 判定為 LOWER 後立即結束程序
-ENABLE_LIMIT_UP_STRATEGY = False  # False 時，selected_limit_up_stocks 會強制視為空陣列
-ENABLE_LIMIT_DOWN_STRATEGY = False  # False 時，selected_limit_down_stocks 會強制視為空陣列
 
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-OPTIMIZE_PROFIT_PER_LIMIT_DOWN = 6.0 # limit down 停利百分比(%)
-OPTIMIZE_LOSS_PER_LIMIT_DOWN = 2.0 # limit down 停損百分比(%)
-
-OPTIMIZE_PROFIT_PER_LIMIT_UP = 6.0 # limit up 停利百分比(%)
-OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
-
 PROTECT_PROFIT_SWITCH_LOWER = False # False 時 lower 不啟動獲利保護；True 維持原本獲利保護
 PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發獲利保護百分比
 PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
-
-PROTECT_PROFIT_SWITCH_LIMIT_UP = False # False 時 limit up 不啟動獲利保護；True 維持原本獲利保護
-PROTECT_PROFIT_PER_LIMIT_UP = 5.0 # limit up 觸發獲利保護百分比
-PROTECT_LOSS_PER_LIMIT_UP = 3.0 # limit up 獲利保護後的新停損百分比
-
-PROTECT_PROFIT_SWITCH_LIMIT_DOWN = False # False 時 limit down 不啟動獲利保護；True 維持原本獲利保護
-PROTECT_PROFIT_PER_LIMIT_DOWN = 4.5 # limit down 觸發獲利保護百分比
-PROTECT_LOSS_PER_LIMIT_DOWN = 2.5 # limit down 獲利保護後的新停損百分比
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
@@ -96,38 +76,23 @@ ENTRY_CHECK_START_TIME_LOWER = (9, 32)  # lower 進場檢核開始時間（含�
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 
 FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
-FORCE_CLOSE_TIME_LIMIT_DOWN = (13, 0)  # limit down 收盤前強制平倉時間
-FORCE_CLOSE_TIME_LIMIT_UP = (13, 0)  # limit up 收盤前強制平倉時間
 
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
-ENTRY_ORDER_QUANTITY_LIMIT_DOWN = 1 # limit down 每次進場下單數量
-ENTRY_ORDER_QUANTITY_LIMIT_UP = 1 # limit up 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例需嚴格小於此值，即下限 < 比例 < 上限
 
-LIMIT_UP_ENTRY_RANGE_END_PERCENT = 50.0 # limit up 入場價距昨收到漲停的結束百分比，可以為 50
-LIMIT_UP_ENTRY_RANGE_START_PERCENT = 10.0 # limit up 入場價距昨收到漲停的起始百分比，可以為 10
-LIMIT_UP_ENTRY_TIME = (9, 5) # limit up 開始嘗試進場時間，包含此時間點
-LIMIT_UP_LEAVE_TIME = (9, 6) # limit up 最晚嘗試進場時間，包含此時間點
-
-LIMIT_DOWN_ENTRY_RANGE_START_PERCENT = 10.0 # limit down 入場價距昨收到跌停的起始百分比，可以為 10
-LIMIT_DOWN_ENTRY_RANGE_END_PERCENT = 60.0 # limit down 入場價距昨收到跌停的結束百分比，可以為 60
-LIMIT_DOWN_ENTRY_TIME = (9, 9) # limit down 開始嘗試進場時間，包含此時間點
-LIMIT_DOWN_LEAVE_TIME = (9, 19) # limit down 最晚嘗試進場時間，包含此時間點
-
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
 IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
 
-# 產業盤勢過濾：作空須嚴格低於昨收下跌門檻，作多須嚴格高於昨收上漲門檻。
-INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER / LIMIT_DOWN 作空：產業指數需低於昨收下跌此百分比的門檻
-INDUSTRY_MARKET_FILTER_LONG_PERCENT = 0 # LIMIT_UP 作多：產業指數需高於昨收上漲此百分比的門檻
+# 產業盤勢過濾：LOWER 作空須嚴格低於昨收下跌門檻。
+INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER 作空：產業指數需低於昨收下跌此百分比的門檻
 
 PROFIT_BACK_PERCENT = 0.5 # 獲利後允許回撤百分比
 PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
@@ -663,16 +628,6 @@ def validate_market_reversal_time_config() -> None:
         )
     if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
         raise ValueError("INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0")
-    if INDUSTRY_MARKET_FILTER_LONG_PERCENT < 0:
-        raise ValueError("INDUSTRY_MARKET_FILTER_LONG_PERCENT 不可小於 0")
-    limit_up_entry_hm = time_tuple_to_minutes(LIMIT_UP_ENTRY_TIME, "LIMIT_UP_ENTRY_TIME")
-    limit_up_leave_hm = time_tuple_to_minutes(LIMIT_UP_LEAVE_TIME, "LIMIT_UP_LEAVE_TIME")
-    if limit_up_leave_hm < limit_up_entry_hm:
-        raise ValueError("LIMIT_UP_LEAVE_TIME 不可早於 LIMIT_UP_ENTRY_TIME")
-    limit_down_entry_hm = time_tuple_to_minutes(LIMIT_DOWN_ENTRY_TIME, "LIMIT_DOWN_ENTRY_TIME")
-    limit_down_leave_hm = time_tuple_to_minutes(LIMIT_DOWN_LEAVE_TIME, "LIMIT_DOWN_LEAVE_TIME")
-    if limit_down_leave_hm < limit_down_entry_hm:
-        raise ValueError("LIMIT_DOWN_LEAVE_TIME 不可早於 LIMIT_DOWN_ENTRY_TIME")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -2041,57 +1996,6 @@ def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
     return True
 
 
-def limit_industry_market_filter_pass(state: Dict[str, Any], strategy_type: str) -> bool:
-    """以當下最新且未逾時的產業指數檢查 limit 策略是否嚴格突破方向門檻。"""
-    market_key = state.get("market_index_key")
-    if not market_key:
-        market_key = get_market_key_for_symbol(
-            state.get("symbol_code_with_suf", ""),
-            state.get("industry_code", ""),
-        )
-
-    index_config = market_previous_close_indices.get(market_key, {})
-    previous_close = index_config.get("previous_close")
-    last_index_float, _age_seconds, stale_reason = get_fresh_market_index_value(market_key)
-    if last_index_float is None:
-        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網等待 {market_key} 指數資料：{stale_reason}")
-        return False
-
-    try:
-        previous_close_float = float(previous_close)
-    except (TypeError, ValueError):
-        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
-        return False
-    if previous_close_float <= 0:
-        print(f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
-        return False
-
-    if strategy_type == STRATEGY_LIMIT_UP:
-        filter_percent = INDUSTRY_MARKET_FILTER_LONG_PERCENT
-        threshold = previous_close_float * (1 + filter_percent / 100.0)
-        passed = last_index_float > threshold
-        required_direction = ">"
-    elif strategy_type == STRATEGY_LIMIT_DOWN:
-        filter_percent = INDUSTRY_MARKET_FILTER_SHORT_PERCENT
-        threshold = previous_close_float * (1 - filter_percent / 100.0)
-        passed = last_index_float < threshold
-        required_direction = "<"
-    else:
-        return False
-
-    if not passed:
-        index_name = index_config.get("name", "")
-        print(
-            f"[{state['symbol_name']}] LIMIT 產業別盤勢濾網未通過：{market_key} {index_name} "
-            f"指數 {last_index_float:.2f} 需 {required_direction} 門檻 {threshold:.2f} "
-            f"(昨收 {previous_close_float:.2f}, 偏離 {filter_percent:.2f}%)"
-        )
-        return False
-    return True
-
-
-
-
 def format_industry_market_filter_pass_text(state: Dict[str, Any]) -> str:
     market_key = state.get("market_index_key")
     if not market_key:
@@ -2398,67 +2302,31 @@ def is_lower_mode() -> bool:
     return get_current_entry_mode() == ENTRY_MODE_LOWER
 
 
-def is_limit_down_strategy(state: Dict[str, Any] | None) -> bool:
-    if not state:
-        return False
-    return state.get("strategy_type") == STRATEGY_LIMIT_DOWN
-
-
-def is_limit_up_strategy(state: Dict[str, Any] | None) -> bool:
-    if not state:
-        return False
-    return state.get("strategy_type") == STRATEGY_LIMIT_UP
-
-
-def is_independent_limit_strategy(state: Dict[str, Any] | None) -> bool:
-    return is_limit_down_strategy(state) or is_limit_up_strategy(state)
-
-
 def is_independent_strategy(state: Dict[str, Any] | None) -> bool:
-    return is_independent_limit_strategy(state)
+    return False
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
-    if is_limit_down_strategy(state):
-        return OPTIMIZE_LOSS_PER_LIMIT_DOWN, OPTIMIZE_PROFIT_PER_LIMIT_DOWN
-    if is_limit_up_strategy(state):
-        return OPTIMIZE_LOSS_PER_LIMIT_UP, OPTIMIZE_PROFIT_PER_LIMIT_UP
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
     return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
-    if is_limit_down_strategy(state):
-        return PROTECT_LOSS_PER_LIMIT_DOWN, PROTECT_PROFIT_PER_LIMIT_DOWN
-    if is_limit_up_strategy(state):
-        return PROTECT_LOSS_PER_LIMIT_UP, PROTECT_PROFIT_PER_LIMIT_UP
     return PROTECT_LOSS_PER_LOWER, PROTECT_PROFIT_PER_LOWER
 
 
 def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
-    if is_limit_down_strategy(state):
-        return PROTECT_PROFIT_SWITCH_LIMIT_DOWN
-    if is_limit_up_strategy(state):
-        return PROTECT_PROFIT_SWITCH_LIMIT_UP
     return PROTECT_PROFIT_SWITCH_LOWER
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
-    if is_limit_down_strategy(state):
-        return FORCE_CLOSE_TIME_LIMIT_DOWN
-    if is_limit_up_strategy(state):
-        return FORCE_CLOSE_TIME_LIMIT_UP
     if is_lower_mode():
         return FORCE_CLOSE_TIME_LOWER
     return FORCE_CLOSE_TIME_LOWER
 
 
 def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
-    if is_limit_down_strategy(state):
-        return ENTRY_ORDER_QUANTITY_LIMIT_DOWN
-    if is_limit_up_strategy(state):
-        return ENTRY_ORDER_QUANTITY_LIMIT_UP
     if is_lower_mode():
         return ENTRY_ORDER_QUANTITY_LOWER
     return 0
@@ -2494,10 +2362,6 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
-    if is_limit_down_strategy(state):
-        return LIMIT_DOWN_LEAVE_TIME
-    if is_limit_up_strategy(state):
-        return LIMIT_UP_LEAVE_TIME
     if is_lower_mode():
         return ENTRY_CHECK_END_TIME_LOWER
     return LOWER_STRATEGY_DECISION
@@ -2510,11 +2374,7 @@ def get_entry_check_start_time() -> tuple[int, int]:
 
 
 def get_latest_entry_check_end_time() -> tuple[int, int]:
-    return max(
-        ENTRY_CHECK_END_TIME_LOWER,
-        LIMIT_DOWN_LEAVE_TIME,
-        LIMIT_UP_LEAVE_TIME,
-    )
+    return ENTRY_CHECK_END_TIME_LOWER
 
 
 def entry_order_book_liquidity_pass(
@@ -2617,116 +2477,12 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
     return True
 
 
-def entry_limit_down_price_check(state: Dict[str, Any]) -> bool | str:
-    """
-    limit-down 獨立策略進場條件判斷；連續跌停條件已在狀態初始化前確認。
-    時間窗內 quote lastPrice 落在區間，且即時產業指數嚴格低於昨收下跌門檻時作空。
-    """
-    now_local = now_tpe()
-    now_hm = (now_local.hour, now_local.minute)
-    if now_hm < LIMIT_DOWN_ENTRY_TIME:
-        return False
-    if now_hm > LIMIT_DOWN_LEAVE_TIME:
-        state["exit_reason"] = "limit_entry_window_expired"
-        return 'BLOCKED'
-
-    yesterday_close_price = state.get("yesterday_close_price")
-    limit_down_price = state.get("limit_down_price")
-    last_price = state.get("last_price")
-    try:
-        yesterday_close = float(yesterday_close_price)
-        limit_down = float(limit_down_price)
-        last_px = float(last_price)
-    except (TypeError, ValueError):
-        return False
-
-    if yesterday_close <= 0 or limit_down <= 0 or last_px <= 0:
-        return False
-
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_down,
-        LIMIT_DOWN_ENTRY_RANGE_START_PERCENT,
-        LIMIT_DOWN_ENTRY_RANGE_END_PERCENT,
-    )
-    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"LIMIT_DOWN quote 未落入入場區間，等待下一輪 "
-            f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
-        )
-        return False
-
-    if not entry_order_book_liquidity_pass(state, TRADE_SIDE_SHORT, last_px, "LIMIT_DOWN"):
-        return False
-    if not limit_industry_market_filter_pass(state, STRATEGY_LIMIT_DOWN):
-        return False
-
-    state["entry_trigger_price"] = last_px
-    state["side"] = TRADE_SIDE_SHORT
-    return True
-
-
-def entry_limit_up_price_check(state: Dict[str, Any]) -> bool | str:
-    """
-    limit-up 獨立策略進場條件判斷；連續漲停條件已在狀態初始化前確認。
-    時間窗內 quote lastPrice 落在區間，且即時產業指數嚴格高於昨收上漲門檻時作多。
-    """
-    now_local = now_tpe()
-    now_hm = (now_local.hour, now_local.minute)
-    if now_hm < LIMIT_UP_ENTRY_TIME:
-        return False
-    if now_hm > LIMIT_UP_LEAVE_TIME:
-        state["exit_reason"] = "limit_entry_window_expired"
-        return 'BLOCKED'
-
-    yesterday_close_price = state.get("yesterday_close_price")
-    limit_up_price = state.get("limit_up_price")
-    last_price = state.get("last_price")
-    try:
-        yesterday_close = float(yesterday_close_price)
-        limit_up = float(limit_up_price)
-        last_px = float(last_price)
-    except (TypeError, ValueError):
-        return False
-
-    if yesterday_close <= 0 or limit_up <= 0 or last_px <= 0:
-        return False
-
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_up,
-        LIMIT_UP_ENTRY_RANGE_START_PERCENT,
-        LIMIT_UP_ENTRY_RANGE_END_PERCENT,
-    )
-    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        print(
-            f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} "
-            f"LIMIT_UP quote 未落入入場區間，等待下一輪 "
-            f"last_price={last_px} entry_range={entry_lower_bound:.2f}~{entry_upper_bound:.2f}"
-        )
-        return False
-
-    if not entry_order_book_liquidity_pass(state, TRADE_SIDE_LONG, last_px, "LIMIT_UP"):
-        return False
-    if not limit_industry_market_filter_pass(state, STRATEGY_LIMIT_UP):
-        return False
-
-    state["entry_trigger_price"] = last_px
-    state["side"] = TRADE_SIDE_LONG
-    return True
-
-
 def entry_price_check(state: Dict[str, Any]) -> bool | str:
     """
     依 entry_mode 分派進場條件判斷。
     """
     if MARKET_INDEX_REST_FATAL_EVENT.is_set():
         return 'BLOCKED'
-    if is_limit_down_strategy(state):
-        return entry_limit_down_price_check(state)
-    if is_limit_up_strategy(state):
-        return entry_limit_up_price_check(state)
     if get_current_entry_mode() == ENTRY_MODE_NO_TRADE:
         now_local = now_tpe()
         if (now_local.hour, now_local.minute) < LOWER_STRATEGY_DECISION:
@@ -2865,111 +2621,6 @@ def try_open_position(state: Dict[str, Any], mysdk):
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
 
 
-def try_place_preopen_limit_order(state: Dict[str, Any], mysdk) -> bool:
-    print(f"[{state.get('symbol_name')}] LIMIT 預掛流程已停用，改由指定時間後即時 quote 觸發")
-    return False
-
-
-def try_place_preopen_limit_order_legacy(state: Dict[str, Any], mysdk) -> bool:
-    if not check_open_status(state):
-        return False
-
-    if is_limit_up_strategy(state):
-        side = TRADE_SIDE_LONG
-        action_type = Action.Buy
-        trade_type = Trade.Cash
-        price_flag = PriceFlag.LimitUp
-        entry_ref_px = state.get("limit_up_price", 0)
-        order_text = "預掛漲停買單"
-    elif is_limit_down_strategy(state):
-        side = TRADE_SIDE_SHORT
-        action_type = Action.Sell
-        trade_type = Trade.DayTradingSell
-        price_flag = PriceFlag.LimitDown
-        entry_ref_px = state.get("limit_down_price", 0)
-        order_text = "預掛跌停賣單"
-    else:
-        return False
-
-    try:
-        entry_ref_px = float(entry_ref_px)
-    except (TypeError, ValueError):
-        entry_ref_px = 0.0
-
-    if entry_ref_px <= 0:
-        state["traded"] = True
-        state["entry_time"] = now_tpe().isoformat()
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        print(f"[{state['symbol_name']}] 無法取得預掛委託參考價，不追蹤")
-        return False
-
-    qty = state.get("qty", 1)
-    place_order_result = type_place_order(
-        mysdk,
-        state["symbol_code_with_suf"],
-        action_type,
-        trade_type,
-        quantity=qty,
-        price_flag=price_flag,
-        price=entry_ref_px,
-    )
-
-    state["entry_time"] = now_tpe().isoformat()
-    if not place_order_result:
-        state["traded"] = True
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        print(f"[{state['symbol_name']}] {order_text}失敗，不追蹤")
-        return False
-
-    state["side"] = side
-    state["entry_order_pending"] = True
-    state["in_position"] = False
-    state["entry_order_qty"] = qty
-    state["entry_filled_qty"] = 0
-    state["entry_fully_filled"] = False
-    state["entry_fill_confirmed"] = False
-    state["entry_trigger_price"] = entry_ref_px
-    state["entry_price_source"] = "estimated"
-    state["entry_price"] = entry_ref_px
-    state["dealt_report_filled_shares"] = 0
-    state["dealt_report_filled_value"] = 0.0
-    state["profit_tracking_active"] = False
-    recalc_entry_position_prices(state)
-    # 最後才公開 ord_no，避免 callback 在估計欄位尚未初始化完成時搶先更新又遭覆寫。
-    state["entry_order_no"] = str(place_order_result)
-    apply_pending_dealt_reports(state)
-    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-    trade_log(
-        "ORDER_PENDING",
-        **state_symbol_fields(state),
-        role="entry",
-        ord_no=state.get("entry_order_no"),
-        qty=state.get("entry_order_qty"),
-        price=f"{entry_ref_px:.2f}",
-        reason=order_text,
-    )
-    print_entry_position_prices(state)
-    return True
-
-
-def place_preopen_limit_orders(states: Dict[str, Dict[str, Any]], mysdk) -> None:
-    # LIMIT_UP / LIMIT_DOWN 實機只交易當日輸入名單；連續漲跌停天數由前置選股流程負責。
-    limit_states = [
-        state
-        for state in states.values()
-        if is_limit_up_strategy(state) or is_limit_down_strategy(state)
-    ]
-    if not limit_states:
-        return
-
-    print(f"[PREOPEN] 發現 {len(limit_states)} 檔 LIMIT_UP/LIMIT_DOWN 標的，開始預掛委託")
-    success_count = 0
-    for state in limit_states:
-        if try_place_preopen_limit_order(state, mysdk):
-            success_count += 1
-    print(f"[PREOPEN] 預掛委託完成：成功 {success_count}/{len(limit_states)}")
-
-
 def try_close_position(state: Dict[str, Any], mysdk):
     if not state.get("in_position"):
         return
@@ -3054,14 +2705,8 @@ def _protect_profit_stop(state: Dict[str, Any]):
     except (TypeError, ValueError):
         return
 
-    if is_limit_up_strategy(state) and side == TRADE_SIDE_LONG:
-        trigger_price_field = "high_price"
-    elif is_limit_down_strategy(state) and side == TRADE_SIDE_SHORT:
-        trigger_price_field = "low_price"
-    else:
-        trigger_price_field = "last_price"
     try:
-        px = float(state.get(trigger_price_field))
+        px = float(state.get("last_price"))
     except (TypeError, ValueError):
         return
 
@@ -3124,15 +2769,9 @@ def reached_stop_to_profit(state: Dict[str, Any]) -> bool:
 def reached_resize_profit(state: Dict[str, Any]) -> bool:
     """純判斷：現價是否已達下一個獲利目標點（不修改 state）。"""
     side = state.get("side")
-    if is_limit_up_strategy(state) and side == TRADE_SIDE_LONG:
-        trigger_price_field = "high_price"
-    elif is_limit_down_strategy(state) and side == TRADE_SIDE_SHORT:
-        trigger_price_field = "low_price"
-    else:
-        trigger_price_field = "last_price"
 
     try:
-        px = float(state.get(trigger_price_field))
+        px = float(state.get("last_price"))
         profit_price = float(state.get("profit_price"))
     except (TypeError, ValueError):
         return False
@@ -3556,12 +3195,7 @@ def initialize_states(
             print(f"[{symbolStr}] ⚠️ 處置股，排除")
             continue
 
-        if strategy_type == STRATEGY_LIMIT_DOWN:
-            quantity = ENTRY_ORDER_QUANTITY_LIMIT_DOWN
-        elif strategy_type == STRATEGY_LIMIT_UP:
-            quantity = ENTRY_ORDER_QUANTITY_LIMIT_UP
-        else:
-            quantity = get_entry_order_quantity()
+        quantity = get_entry_order_quantity()
 
         st = load_or_init_state(
             symbolStr,
@@ -3578,14 +3212,6 @@ def initialize_states(
             down_streak_days,
             strategy_type,
         )
-        if strategy_type == STRATEGY_LIMIT_DOWN:
-            st["side"] = TRADE_SIDE_SHORT
-            st["qty"] = ENTRY_ORDER_QUANTITY_LIMIT_DOWN
-            st["entry_order_qty"] = ENTRY_ORDER_QUANTITY_LIMIT_DOWN
-        elif strategy_type == STRATEGY_LIMIT_UP:
-            st["side"] = TRADE_SIDE_LONG
-            st["qty"] = ENTRY_ORDER_QUANTITY_LIMIT_UP
-            st["entry_order_qty"] = ENTRY_ORDER_QUANTITY_LIMIT_UP
         st["industry_name"] = market_index_config.get("industry_name")
         st["market_index_symbol"] = market_index_config.get("symbol")
         st["market_index_name"] = market_index_config.get("name")
@@ -3810,8 +3436,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         and (not st.get("entry_order_pending"))
                         and (not st.get("exit_order_pending"))
                         ):
-                        if is_independent_limit_strategy(st):
-                            st["exit_reason"] = "limit_entry_window_expired"
                         st["traded"] = True
                         st["entry_time"] = now_tpe().isoformat()
                         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
@@ -3832,12 +3456,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                                 atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
                                 print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} 無法取得進場觸發價，不追蹤")
                                 continue
-                            if is_limit_down_strategy(st):
-                                st["side"] = TRADE_SIDE_SHORT
-                            elif is_limit_up_strategy(st):
-                                st["side"] = TRADE_SIDE_LONG
-                            else:
-                                st["side"] = TRADE_SIDE_SHORT
+                            st["side"] = TRADE_SIDE_SHORT
                             st["entry_trigger_price"] = trigger_price
                             try_open_position(st, mysdk)
                         elif entry_result == 'BLOCKED':
@@ -3920,29 +3539,9 @@ if __name__ == "__main__":
             trade_log("LOGIN_ERROR", error=True, api="trade", error_msg=repr(exc))
             raise
 
-        # stock_data.py 的三份單日名單互斥：同一股票代碼不會同時出現在
-        # selected_stocks、selected_limit_up_stocks、selected_limit_down_stocks。
-        # 因此依序 update states 不會讓不同模式的同一股票互相覆蓋。
+        # stock_data.py 的 selected_stocks 為 LOWER 候選名單。
         candidate_symbols = selected_stocks
-        candidate_limit_up_symbols = selected_limit_up_stocks if ENABLE_LIMIT_UP_STRATEGY else []
-        candidate_limit_down_symbols = selected_limit_down_stocks if ENABLE_LIMIT_DOWN_STRATEGY else []
-        if not ENABLE_LIMIT_UP_STRATEGY:
-            print("[CONFIG] ENABLE_LIMIT_UP_STRATEGY=False，selected_limit_up_stocks 強制視為空陣列")
-        if not ENABLE_LIMIT_DOWN_STRATEGY:
-            print("[CONFIG] ENABLE_LIMIT_DOWN_STRATEGY=False，selected_limit_down_stocks 強制視為空陣列")
         states = initialize_states(candidate_symbols, realtime_sdk)
-        limit_up_states = initialize_states(
-            candidate_limit_up_symbols,
-            realtime_sdk,
-            strategy_type=STRATEGY_LIMIT_UP,
-        )
-        states.update(limit_up_states)
-        limit_down_states = initialize_states(
-            candidate_limit_down_symbols,
-            realtime_sdk,
-            strategy_type=STRATEGY_LIMIT_DOWN,
-        )
-        states.update(limit_down_states)
         ACTIVE_ORDER_STATES.clear()
         ACTIVE_ORDER_STATES.update(states)
         print_rest_quote_rate_limit_estimate(states)
