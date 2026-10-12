@@ -60,16 +60,12 @@ STRATEGY_SIGNAL_SHORT = 'SIGNAL_SHORT'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-ENABLE_ENTRY_MODE_LOWER = True  # False 時，LOWER_STRATEGY_DECISION 判定為 LOWER 後立即結束程序
+PROTECT_PROFIT_SWITCH = False # 所有策略共用：False 不啟動獲利保護；True 啟動獲利保護
+PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
+PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
 
-OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
-OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
-OPTIMIZE_PROFIT_PER_SIGNAL = 5.0 # signal long/short 停利百分比(%)
-OPTIMIZE_LOSS_PER_SIGNAL = 3.0 # signal long/short 停損百分比(%)
-
-PROTECT_PROFIT_SWITCH_LOWER = False # False 時 lower 不啟動獲利保護；True 維持原本獲利保護
-PROTECT_PROFIT_PER_LOWER = 2.5 # lower 觸發獲利保護百分比
-PROTECT_LOSS_PER_LOWER = 1.5 # lower 獲利保護後的新停損百分比
+PROFIT_BACK_PERCENT = 0.5 # 獲利後允許回撤百分比
+PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 
@@ -79,18 +75,24 @@ LOWER_STRATEGY_DECISION = (9, 31)  # LOWER 市場模式判斷截止時間，不�
 ENTRY_CHECK_START_TIME_LOWER = (9, 32)  # lower 進場檢核開始時間（含）
 ENTRY_CHECK_END_TIME_LOWER = (10, 1)  # lower 進場檢核截止時間（含）
 FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
+OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
+OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
 LONG_ENTRY_START_TIME = (9, 55)  # signal long 進場檢核開始時間（含）
 LONG_ENTRY_END_TIME = (10, 30)  # signal long 進場檢核截止時間（含）
 LONG_EARLY_BREAKOUT_POINT = 1  # signal long 開始進場前曾突破：0 昨收、1 昨高、9 不須突破
 LONG_BREAKOUT_POINT = 1  # signal long 突破點：0 昨收、1 昨高
 LONG_FORCE_EXIT_TIME = (12, 50)  # signal long 收盤前強制平倉時間
+OPTIMIZE_PROFIT_PER_SIGNAL_LONG = 5.0 # signal long 停利百分比(%)
+OPTIMIZE_LOSS_PER_SIGNAL_LONG = 3.0 # signal long 停損百分比(%)
 
 SHORT_ENTRY_START_TIME = (9, 40)  # signal short 進場檢核開始時間（含）
 SHORT_ENTRY_END_TIME = (10, 15)  # signal short 進場檢核截止時間（含）
 SHORT_EARLY_BREAKOUT_POINT = 9  # signal short 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
 SHORT_BREAKOUT_POINT = -1  # signal short 突破點：0 昨收、-1 昨低
 SHORT_FORCE_EXIT_TIME = (12, 50)  # signal short 收盤前強制平倉時間
+OPTIMIZE_PROFIT_PER_SIGNAL_SHORT = 5.0 # signal short 停利百分比(%)
+OPTIMIZE_LOSS_PER_SIGNAL_SHORT = 3.0 # signal short 停損百分比(%)
 
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
@@ -109,9 +111,6 @@ IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻
 
 # 產業盤勢過濾：LOWER 作空須嚴格低於昨收下跌門檻。
 INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER 作空：產業指數需低於昨收下跌此百分比的門檻
-
-PROFIT_BACK_PERCENT = 0.5 # 獲利後允許回撤百分比
-PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 開盤前不查委託結果，09:00 後才補成交價量
@@ -682,8 +681,10 @@ def validate_market_reversal_time_config() -> None:
     if any(
         not math.isfinite(value) or not 0 < value < 100
         for value in (
-            OPTIMIZE_PROFIT_PER_SIGNAL,
-            OPTIMIZE_LOSS_PER_SIGNAL,
+            OPTIMIZE_PROFIT_PER_SIGNAL_LONG,
+            OPTIMIZE_LOSS_PER_SIGNAL_LONG,
+            OPTIMIZE_PROFIT_PER_SIGNAL_SHORT,
+            OPTIMIZE_LOSS_PER_SIGNAL_SHORT,
         )
     ):
         raise ValueError("signal 停損停利百分比須大於 0 且小於 100")
@@ -1825,7 +1826,9 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
     stock_quote_rounds_per_minute = math.ceil(60 / QUOTE_ROUND_INTERVAL_SECONDS)
     stock_and_industry_per_minute = stock_and_industry_per_round * stock_quote_rounds_per_minute
 
-    market_index_count = len(MARKET_GATE_INDEX_KEYS)
+    market_index_count = (
+        0 if MARKET_INDEX_REST_STOP_EVENT.is_set() else len(MARKET_GATE_INDEX_KEYS)
+    )
     market_index_rounds_per_minute = math.ceil(60 / MARKET_INDEX_REST_POLL_SECONDS)
     market_indices_per_minute = market_index_count * market_index_rounds_per_minute
 
@@ -1836,10 +1839,11 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
         f"個股與產業指數：{stock_and_industry_per_round} × {stock_quote_rounds_per_minute} "
         f"= {stock_and_industry_per_minute} 次／分鐘"
     )
-    print(
-        f"大盤 IX0001、IX0043：{market_index_count} × {market_index_rounds_per_minute} "
-        f"= {market_indices_per_minute} 次／分鐘"
-    )
+    if market_index_count:
+        print(
+            f"大盤 IX0001、IX0043：{market_index_count} × {market_index_rounds_per_minute} "
+            f"= {market_indices_per_minute} 次／分鐘"
+        )
     print(f"合計：約 {total_per_minute} 次／分鐘")
     print(f"連線限制：每分鐘 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} 次")
     print(
@@ -1849,6 +1853,8 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
 
 
 def log_market_index_rest_watchdog_once(now_local: datetime) -> None:
+    if MARKET_INDEX_REST_STOP_EVENT.is_set():
+        return
     if (now_local.hour, now_local.minute) < MARKET_INDEX_REST_START_TIME:
         return
 
@@ -2358,9 +2364,7 @@ def get_current_entry_mode() -> int:
 
 
 def is_entry_mode_enabled(entry_mode: int) -> bool:
-    if entry_mode == ENTRY_MODE_LOWER:
-        return ENABLE_ENTRY_MODE_LOWER
-    return False
+    return entry_mode == ENTRY_MODE_LOWER
 
 
 def is_lower_mode() -> bool:
@@ -2388,19 +2392,21 @@ def is_independent_strategy(state: Dict[str, Any] | None) -> bool:
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
-    if is_signal_strategy(state):
-        return OPTIMIZE_LOSS_PER_SIGNAL, OPTIMIZE_PROFIT_PER_SIGNAL
+    if is_signal_long_strategy(state):
+        return OPTIMIZE_LOSS_PER_SIGNAL_LONG, OPTIMIZE_PROFIT_PER_SIGNAL_LONG
+    if is_signal_short_strategy(state):
+        return OPTIMIZE_LOSS_PER_SIGNAL_SHORT, OPTIMIZE_PROFIT_PER_SIGNAL_SHORT
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
     return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
-    return PROTECT_LOSS_PER_LOWER, PROTECT_PROFIT_PER_LOWER
+    return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
 
 
 def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
-    return PROTECT_PROFIT_SWITCH_LOWER
+    return PROTECT_PROFIT_SWITCH
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
@@ -3635,15 +3641,14 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results, states)
                 entry_mode_decided = True
-                if entry_mode == ENTRY_MODE_LOWER and not ENABLE_ENTRY_MODE_LOWER:
-                    print(
-                        "[MODE] LOWER_STRATEGY_DECISION 判定為 LOWER，但 "
-                        "ENABLE_ENTRY_MODE_LOWER=False，今日不執行此模式，"
-                        "非獨立策略將停止追蹤"
+                if entry_mode == ENTRY_MODE_NO_TRADE:
+                    # LOWER 已確定不成立；signal 不依賴大盤，停止後續背景取價。
+                    MARKET_INDEX_REST_STOP_EVENT.set()
+                    trade_log(
+                        "MARKET_INDEX_REST_POLLING_STOP_REQUESTED",
+                        reason="lower_not_established",
+                        action="stop_market_index_polling_continue_signal",
                     )
-                    if block_non_independent_states_for_disabled_entry_mode(states, "LOWER"):
-                        return
-                elif entry_mode == ENTRY_MODE_NO_TRADE:
                     entry_check_start_announced = False
                     if not initialize_signal_states(states, realtime_sdk):
                         return
