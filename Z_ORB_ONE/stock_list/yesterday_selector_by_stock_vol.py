@@ -14,7 +14,7 @@ ATR_PERIOD = 14
 TSE_LIMIT = 150
 OTC_LIMIT = 75
 
-PRICE_RANGE_UP = 250
+PRICE_RANGE_UP = 300
 PRICE_RANGE_DOWN = 50
 
 ETF_CODE = ["24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "37", "38", "39", "40", "41", "45", "46", "47"]
