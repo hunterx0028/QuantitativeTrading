@@ -18,7 +18,7 @@ from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 from esun_marketdata import EsunMarketdata
 
 import stock_data
-from stock_data import selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks, market_previous_close_indices
+from stock_data import selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks, market_previous_close_indices, total_stocks
 
 
 class TeeStream:
@@ -107,7 +107,7 @@ LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例需嚴格小�
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
 IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.0 # IX0043 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
+IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.3 # IX0043 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
 
 # 產業盤勢過濾：LOWER 作空須嚴格低於昨收下跌門檻。
 INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER 作空：產業指數需低於昨收下跌此百分比的門檻
@@ -1404,27 +1404,42 @@ def calculate_percent(numerator: int, denominator: int) -> float:
 
 def summarize_lower_strategy_decision_candidates(
     states: Dict[str, Dict[str, Any]],
+    realtime_sdk: EsunMarketdata,
 ) -> Dict[str, Any]:
+    """僅在模式決策時對 total_stocks 取價一次；無效資料不納入分母。"""
     candidate_count = 0
     decline_count = 0
     data_missing_count = 0
 
-    for state in states.values():
-        if is_independent_strategy(state):
+    seen_symbols = set()
+    quote_request_count = 0
+    for stock_item in total_stocks:
+        symbol_name = stock_item[0]
+        _, symbol_code = get_pure_symbol(symbol_name)
+        if symbol_code in seen_symbols:
             continue
-        candidate_count += 1
+        seen_symbols.add(symbol_code)
 
         try:
-            yesterday_close = float(state.get("yesterday_close_price"))
-            limit_down = float(state.get("limit_down_price"))
-            last_price = float(state.get("last_price"))
-        except (TypeError, ValueError):
+            yesterday_close = float(stock_item[5])
+            state = next((item for item in states.values() if item.get("symbol_code_with_suf") == symbol_code), None)
+            if state is not None and state.get("limit_down_price"):
+                limit_down = float(state["limit_down_price"])
+            else:
+                # 僅供 LOWER 比例判斷：依昨收九折並向上對齊 tick 推算跌停價。
+                limit_down = ceil_price_to_tick_value(yesterday_close * 0.90)
+            quote_request_count += 1
+            quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol_code.split(".")[0])
+            last_price = float(quote.get("lastPrice"))
+        except Exception as exc:
             data_missing_count += 1
+            print(f"[MODE] total_stocks {symbol_name} 取價資料不足，排除本次比例計算：{exc!r}")
             continue
 
-        if yesterday_close <= 0 or limit_down <= 0 or last_price <= 0:
+        if not all(math.isfinite(value) and value > 0 for value in (yesterday_close, limit_down, last_price)):
             data_missing_count += 1
             continue
+        candidate_count += 1
 
         entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
             yesterday_close,
@@ -1441,10 +1456,13 @@ def summarize_lower_strategy_decision_candidates(
         "decline_count": decline_count,
         "decline_percent": decline_percent,
         "data_missing_count": data_missing_count,
+        "source_count": len(seen_symbols),
+        "quote_request_count": quote_request_count,
         "threshold": LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
         "max_threshold": LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD,
         "passed": (
-            LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
+            candidate_count > 0
+            and LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
             < decline_percent
             < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
         ),
@@ -1457,6 +1475,8 @@ def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
         f"< {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
         f"候選={summary.get('candidate_count', 0)} "
         f"下降={summary.get('decline_count', 0)} "
+        f"排除資料不足={summary.get('data_missing_count', 0)} "
+        f"報價查詢={summary.get('quote_request_count', 0)} "
         f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}%"
     )
 
@@ -1464,6 +1484,7 @@ def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
 def decide_entry_mode_by_market_gate(
     states: Dict[str, Dict[str, Any]],
     market_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+    realtime_sdk: Optional[EsunMarketdata] = None,
 ) -> tuple[int, list[Dict[str, Any]]]:
     market_snapshots = market_snapshots or {}
     gate_results = [
@@ -1514,7 +1535,9 @@ def decide_entry_mode_by_market_gate(
     lower_mode_passed = all(result["rebound_level_maintained"] for result in gate_results)
 
     if lower_mode_passed:
-        lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
+        lower_decision_summary = summarize_lower_strategy_decision_candidates(states, realtime_sdk)
+        for result in gate_results:
+            result["lower_decision_summary"] = lower_decision_summary
         if not lower_decision_summary["passed"]:
             print(
                 "[MODE] LOWER 個股池下降比例未落在允許範圍："
@@ -1663,7 +1686,10 @@ def print_entry_mode_decision(
     states: Dict[str, Dict[str, Any]],
 ) -> None:
     mode_text = get_entry_mode_text(entry_mode)
-    lower_decision_summary = summarize_lower_strategy_decision_candidates(states)
+    lower_decision_summary = next(
+        (result["lower_decision_summary"] for result in gate_results if "lower_decision_summary" in result),
+        None,
+    )
     for result in gate_results:
         drop_percent = get_strategy_decision_drop_percent(result["index_key"])
         rebound_percent = get_strategy_decision_rebound_percent(result["index_key"])
@@ -1699,7 +1725,10 @@ def print_entry_mode_decision(
                 reason=result.get("lower_reason") or "市場指數資料不足",
                 action="fail_closed",
             )
-    print(f"[MODE] LOWER {format_lower_decision_summary(lower_decision_summary)}")
+    if lower_decision_summary is not None:
+        print(f"[MODE] LOWER {format_lower_decision_summary(lower_decision_summary)}")
+    else:
+        print("[MODE] LOWER 指數條件未通過，未查詢 total_stocks 比例")
     print(f"[MODE] LOWER_STRATEGY_DECISION 模式判斷：{mode_text}")
 
 
@@ -2659,6 +2688,24 @@ def update_signal_early_breakout_state(
     state["signal_early_breakout_backfilled"] = backfill_after_start
 
 
+def format_signal_no_entry_reason(state: Dict[str, Any]) -> str:
+    start, end, point, early_point, side, label = get_signal_entry_settings(state)
+    direction = "突破" if side == TRADE_SIDE_LONG else "跌破"
+    if not signal_early_breakout_pass(state, early_point, side):
+        threshold = get_signal_threshold_price(state, early_point, side)
+        reason = (
+            f"開始進場時間 {start[0]:02d}:{start[1]:02d} 前未曾{direction}"
+            f"早盤門檻 {threshold:g}（選項={early_point}）"
+            if threshold > 0 else "早盤門檻資料不足，無法確認早盤突破資格"
+        )
+    else:
+        threshold = get_signal_threshold_price(state, point, side)
+        reason = state.get("signal_crossed_no_entry_reason") or state.get("signal_last_entry_check_reason") or (
+            f"進場區間內未取得有效的即時價格穿越檢核（門檻={threshold:g}）"
+        )
+    return f"{label} 未進場原因：{reason}；進場區間={start[0]:02d}:{start[1]:02d}~{end[0]:02d}:{end[1]:02d}，不追蹤"
+
+
 def entry_signal_price_check(state: Dict[str, Any]) -> bool | str:
     """
     signal long/short 實機進場條件。
@@ -2678,14 +2725,17 @@ def entry_signal_price_check(state: Dict[str, Any]) -> bool | str:
 
     threshold = get_signal_threshold_price(state, breakout_point, side)
     if threshold <= 0:
+        state["signal_last_entry_check_reason"] = "進場門檻資料不足或價位無效"
         return False
 
     try:
         pre_last_px = float(state.get("pre_last_price"))
         last_px = float(state.get("last_price"))
     except (TypeError, ValueError):
+        state["signal_last_entry_check_reason"] = "前次或本次即時成交價資料不足，無法判斷穿越門檻"
         return False
     if pre_last_px <= 0 or last_px <= 0:
+        state["signal_last_entry_check_reason"] = "前次或本次即時成交價無效，無法判斷穿越門檻"
         return False
 
     if side == TRADE_SIDE_LONG:
@@ -2693,11 +2743,23 @@ def entry_signal_price_check(state: Dict[str, Any]) -> bool | str:
     else:
         crossed = pre_last_px >= threshold > last_px
     if not crossed:
+        state["signal_last_entry_check_reason"] = (
+            f"進場區間內未出現再次{'突破' if side == TRADE_SIDE_LONG else '跌破'}入場點 "
+            f"{threshold:g}；最後檢核前價={pre_last_px:g} 現價={last_px:g}"
+        )
         return False
 
     if not entry_order_book_liquidity_pass(state, side, last_px, label):
+        book_field = "best_ask_price" if side == TRADE_SIDE_LONG else "best_bid_price"
+        state["signal_last_entry_check_reason"] = (
+            f"已穿越入場門檻 {threshold:g}，但買賣一檔條件未通過；"
+            f"現價={last_px:g} {book_field}={state.get(book_field)}"
+        )
+        state["signal_crossed_no_entry_reason"] = state["signal_last_entry_check_reason"]
         return False
 
+    state["signal_last_entry_check_reason"] = "價格與買賣一檔條件已通過，但未完成進場，請查閱前述委託或入場安全檢核紀錄"
+    state["signal_crossed_no_entry_reason"] = state["signal_last_entry_check_reason"]
     state["entry_trigger_price"] = last_px
     state["side"] = side
     return True
@@ -3637,6 +3699,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 entry_mode, gate_results = decide_entry_mode_by_market_gate(
                     states,
                     market_snapshots,
+                    realtime_sdk,
                 )
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results, states)
@@ -3777,7 +3840,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         st["traded"] = True
                         st["entry_time"] = now_tpe().isoformat()
                         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
-                        print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} 檢核時間結束仍未進場，不追蹤")
+                        reason = (
+                            format_signal_no_entry_reason(st) if is_signal_strategy(st)
+                            else "檢核時間結束仍未進場，不追蹤"
+                        )
+                        print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} {reason}")
                         continue
 
                     if (st.get("in_position")) and (not st.get("traded")):  # 已持倉嘗試平倉
