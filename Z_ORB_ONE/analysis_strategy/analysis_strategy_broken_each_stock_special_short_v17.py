@@ -71,6 +71,7 @@ from Z_ORB_ONE.stock_data import (
     selected_limit_down_stocks,
     selected_limit_up_stocks,
     selected_stocks,
+    total_stocks as lower_decision_stocks,
 )
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
@@ -80,6 +81,7 @@ EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name('analysis_strategy_broken_each
 OUTPUT_BUFFER: list[str] = []
 DAILY_CANDLE_DATA_ISSUES: set[tuple[str, str, str]] = set()
 GATE_LOWER_PASSED = 'LOWER_PASSED'
+GATE_LOWER_PERCENT_REJECTED = 'LOWER_PERCENT_REJECTED'
 GATE_NO_TRADE = 'NO_TRADE'
 GATE_DATA_INCOMPLETE = 'DATA_INCOMPLETE'
 STRATEGY_LOWER = 'LOWER'
@@ -337,7 +339,7 @@ def get_api_cache_path(target_date: date) -> Path:
     return Path(__file__).resolve().parent / 'analysis_json_cache' / f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
 
 
-def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str, list], dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
+def load_api_cache(cache_path: Path, stock_list: list[tuple], decision_stock_list: list[tuple] | None = None) -> tuple[dict[str, list], dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
     """載入 API 快取；若不存在或格式不符則回傳 None。"""
     if not cache_path.exists():
         return None
@@ -345,8 +347,9 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
         payload = json.loads(cache_path.read_text(encoding='utf-8'))
         cached_names = payload.get('stock_names', [])
         current_names = [item[0] for item in stock_list]
+        minute_names = [item[0] for item in dedupe_stock_list([stock_list, decision_stock_list or []])]
         cached_name_set = set(cached_names)
-        if any(stock_name not in cached_name_set for stock_name in current_names):
+        if any(stock_name not in cached_name_set for stock_name in minute_names):
             return None
         day_candles_by_symbol = payload.get('day_candles_by_symbol', {})
         raw_minute_by_symbol = payload.get('minute_raw_by_symbol', {})
@@ -356,6 +359,8 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
             or stock_name not in raw_minute_by_symbol
             for stock_name in current_names
         ):
+            return None
+        if any(stock_name not in raw_minute_by_symbol for stock_name in minute_names):
             return None
         required_index_keys = set(RESERVE_MARKET_INDICES) | get_required_industry_index_keys(stock_list)
         if any(
@@ -369,7 +374,7 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple]) -> tuple[dict[str,
         }
         minute_bars_by_symbol = {
             stock_name: parse_bars(raw_minute_by_symbol.get(stock_name, []))
-            for stock_name in current_names
+            for stock_name in minute_names
         }
         index_minute_bars_by_key = {
             index_key: parse_bars(raw_index_minute_by_key.get(index_key, []))
@@ -1225,7 +1230,7 @@ def get_strategy_market_decision_gate_status(
         return GATE_NO_TRADE
 
     candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
-        stock_list,
+        lower_decision_stocks,
         target_date,
         minute_bars_by_symbol,
     )
@@ -1235,7 +1240,7 @@ def get_strategy_market_decision_gate_status(
         < decline_percent
         <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
     ):
-        return GATE_NO_TRADE
+        return GATE_LOWER_PERCENT_REJECTED
     return GATE_LOWER_PASSED
 
 
@@ -2000,13 +2005,15 @@ def print_daily_optimization_results(
     }
     strategy_type_by_gate_status = {
         GATE_LOWER_PASSED: STRATEGY_LOWER,
+        GATE_LOWER_PERCENT_REJECTED: STRATEGY_NO_TRADE,
         GATE_NO_TRADE: STRATEGY_NO_TRADE,
         GATE_DATA_INCOMPLETE: STRATEGY_NO_TRADE,
     }
     lower_gate_date_keys = {
         current_date.strftime('%Y-%m-%d')
         for current_date, gate_status in market_start_gate_cache.items()
-        if gate_status == GATE_LOWER_PASSED and INCLUDE_LOWER_IN_PRINT_STATS
+        if gate_status in (GATE_LOWER_PASSED, GATE_LOWER_PERCENT_REJECTED)
+        and INCLUDE_LOWER_IN_PRINT_STATS
     }
     if summary['total'] == 0 and not lower_gate_date_keys:
         print('固定參數下沒有交易結果。')
@@ -2062,9 +2069,13 @@ def print_daily_optimization_results(
             target_date = datetime.strptime(date_key, '%Y-%m-%d').date()
             market_open_text = ''
             lower_decision_text = ''
-            if strategy_type == STRATEGY_LOWER:
+            percent_rejected = (
+                strategy_type == STRATEGY_NO_TRADE
+                and gate_status_by_date_key.get(date_key) == GATE_LOWER_PERCENT_REJECTED
+            )
+            if strategy_type == STRATEGY_LOWER or percent_rejected:
                 candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
-                    stock_list,
+                    lower_decision_stocks,
                     target_date,
                     minute_bars_by_symbol,
                 )
@@ -2074,6 +2085,12 @@ def print_daily_optimization_results(
                     f'下降={decline_count}  '
                     f'{decline_percent:.2f}%  '
                 )
+                if percent_rejected:
+                    lower_decision_text += (
+                        '原因=LOWER 股票比例不符 '
+                        f'({LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:g}% < 比例 '
+                        f'<= {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:g}%)  '
+                    )
             print(
                 f'{format_date_with_weekday(date_key)} '
                 f'模式={strategy_type}  '
@@ -2085,7 +2102,7 @@ def print_daily_optimization_results(
                 f'總支出={day_total_cost:.2f}  '
                 f'總收益={day_total:+.2f}'
             )
-            if strategy_type == STRATEGY_LOWER and date_key in lower_gate_date_keys:
+            if (strategy_type == STRATEGY_LOWER or percent_rejected) and date_key in lower_gate_date_keys:
                 for index_summary in build_market_index_daily_low_summary(
                     target_date,
                     index_minute_bars_by_key,
@@ -2736,7 +2753,9 @@ def main() -> None:
             target_date = date.today()
 
         cache_path = get_api_cache_path(target_date)
-        cached = load_api_cache(cache_path, analysis_stock_list)
+        # total_stocks 僅提供 LOWER 比例判斷所需的分 K，不加入交易股票池。
+        minute_data_stock_list = dedupe_stock_list([analysis_stock_list, lower_decision_stocks])
+        cached = load_api_cache(cache_path, analysis_stock_list, lower_decision_stocks)
         if cached is not None:
             day_candles_by_symbol, minute_bars_by_symbol, index_minute_bars_by_key = cached
             print(f'已載入API快取: {cache_path.name}')
@@ -2751,11 +2770,13 @@ def main() -> None:
             minute_bars_by_symbol: dict[str, dict[str, list]] = {}
             index_minute_raw_by_key: dict[str, list] = {}
             index_minute_bars_by_key: dict[str, dict[str, list]] = {}
-            total_stocks = len(analysis_stock_list)
-            for idx, stock_item in enumerate(analysis_stock_list, start=1):
+            total_stocks = len(minute_data_stock_list)
+            analysis_stock_names = {item[0] for item in analysis_stock_list}
+            for idx, stock_item in enumerate(minute_data_stock_list, start=1):
                 stock_name = stock_item[0]
                 print_api_progress(idx, total_stocks, stock_name)
-                day_candles_by_symbol[stock_name] = fetch_day_candles(stock_item, target_date, rest_stock)
+                if stock_name in analysis_stock_names:
+                    day_candles_by_symbol[stock_name] = fetch_day_candles(stock_item, target_date, rest_stock)
                 try:
                     symbol = extract_symbol(stock_name)
                 except ValueError as exc:
@@ -2783,7 +2804,7 @@ def main() -> None:
 
             save_api_cache(
                 cache_path,
-                analysis_stock_list,
+                minute_data_stock_list,
                 day_candles_by_symbol,
                 minute_raw_by_symbol,
                 index_minute_raw_by_key,
