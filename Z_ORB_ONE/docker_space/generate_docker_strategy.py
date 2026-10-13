@@ -15,6 +15,14 @@ from pathlib import Path
 STRATEGY_FILENAME = "execute_strategy_broken_high_falling_singleton_v17.py"
 OVERWRITE_OUTPUT = True
 
+SUPPORTED_STOCK_DATA_EXPORTS = {
+    "selected_stocks",
+    "selected_limit_up_stocks",
+    "selected_limit_down_stocks",
+    "market_previous_close_indices",
+    "total_stocks",
+}
+
 
 DOCKER_HELPERS = '''
 
@@ -26,6 +34,7 @@ selected_stocks = []
 selected_limit_up_stocks = []
 selected_limit_down_stocks = []
 market_previous_close_indices = {}
+total_stocks = []
 
 REQUIRED_RUNTIME_FILES = (
     "config.ini",
@@ -115,6 +124,7 @@ def load_stock_data_from_runtime_file():
     """
     global stock_data, selected_stocks, selected_limit_up_stocks
     global selected_limit_down_stocks, market_previous_close_indices
+    global total_stocks
 
     import importlib.util
     import sys
@@ -136,6 +146,7 @@ def load_stock_data_from_runtime_file():
         "selected_limit_up_stocks",
         "selected_limit_down_stocks",
         "market_previous_close_indices",
+        "total_stocks",
     )
     missing_fields = [
         field_name
@@ -153,6 +164,7 @@ def load_stock_data_from_runtime_file():
     selected_limit_up_stocks = module.selected_limit_up_stocks
     selected_limit_down_stocks = module.selected_limit_down_stocks
     market_previous_close_indices = module.market_previous_close_indices
+    total_stocks = module.total_stocks
     return selected_stocks
 
 
@@ -322,6 +334,19 @@ def has_top_level_function(source: str, function_name: str) -> bool:
     )
 
 
+def get_stock_data_imported_names(source: str) -> set[str]:
+    tree = ast.parse(source)
+    imported_names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module != "stock_data":
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                raise ValueError("Unsupported wildcard import from stock_data")
+            imported_names.add(alias.asname or alias.name)
+    return imported_names
+
+
 def replace_once_required(source: str, old: str, new: str, description: str) -> str:
     """Replace one Docker-specific hook, failing instead of silently dropping behavior."""
     occurrences = source.count(old)
@@ -386,6 +411,14 @@ def transform_main_for_docker(source: str) -> str:
 
 def transform_singleton_to_docker(source: str) -> str:
     source = source.replace("\r\n", "\n")
+
+    stock_data_imported_names = get_stock_data_imported_names(source)
+    unsupported_stock_data_names = sorted(stock_data_imported_names - SUPPORTED_STOCK_DATA_EXPORTS)
+    if unsupported_stock_data_names:
+        raise ValueError(
+            "Docker helper must be updated for stock_data import(s): "
+            + ", ".join(unsupported_stock_data_names)
+        )
 
     # Docker 版必須先從 S3 下載 stock_data.py，不能在 module import 階段載入。
     # 分別移除兩種 import，避免 stock_data 新增匯出名稱時，因完整字串不符而殘留。
