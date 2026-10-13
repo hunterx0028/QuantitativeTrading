@@ -793,7 +793,13 @@ def main() -> int:
     selected_limit_down_stocks: List[StockTuple] = list(
         getattr(stock_module, "selected_limit_down_stocks", [])
     )
-    target_stocks = selected_stocks + selected_limit_up_stocks + selected_limit_down_stocks
+    total_stocks: List[StockTuple] = list(getattr(stock_module, "total_stocks", []))
+    base_target_stocks = total_stocks if total_stocks else selected_stocks
+    target_stocks = (
+        base_target_stocks
+        + selected_limit_up_stocks
+        + selected_limit_down_stocks
+    )
     existing_indices = dict(getattr(stock_module, "market_previous_close_indices", {}))
 
     original_cwd = Path.cwd()
@@ -844,6 +850,11 @@ def main() -> int:
         log(f"[INFO] selected_stocks_count={len(selected_stocks)}")
         log(f"[INFO] selected_limit_up_stocks_count={len(selected_limit_up_stocks)}")
         log(f"[INFO] selected_limit_down_stocks_count={len(selected_limit_down_stocks)}")
+        log(f"[INFO] total_stocks_count={len(total_stocks)}")
+        log(
+            "[INFO] index_target_source="
+            + ("total_stocks" if total_stocks else "selected_stocks")
+        )
         log(f"[INFO] index_target_stocks_count={len(target_stocks)}")
         log(f"[INFO] 候選股票涉及 {len(selected_industry_keys(target_stocks))} 個交易所/產業組合")
         log(f"[INFO] 可更新產業類股指數 {len(targets)} 個")
