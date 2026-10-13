@@ -450,12 +450,18 @@ def update_selected_stocks_file(
     selected_records: list[tuple],
     limit_up_records: list[tuple],
     limit_down_records: list[tuple],
+    total_records: list[tuple] | None = None,
 ) -> None:
     source = stock_data_path.read_text(encoding="utf-8")
     source = ensure_selected_limit_stock_lists(source)
     source = replace_stock_records_assignment(source, "selected_stocks", selected_records)
     source = replace_stock_records_assignment(source, "selected_limit_up_stocks", limit_up_records)
     source = replace_stock_records_assignment(source, "selected_limit_down_stocks", limit_down_records)
+    if total_records is not None:
+        if find_assignment(source, "total_stocks") is None:
+            source = source.rstrip() + "\n\n" + format_stock_records_assignment("total_stocks", total_records) + "\n"
+        else:
+            source = replace_stock_records_assignment(source, "total_stocks", total_records)
     stock_data_path.write_text(source, encoding="utf-8")
 
 
@@ -556,6 +562,8 @@ def main() -> None:
     consecutive_filtered = filter_records_by_excluded_industries(consecutive_atr_filtered)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
     repeat_records, repeat_header = select_records_for_repeat_count(consecutive_filtered)
+    # 額外輸出取消連續出現天數門檻的清單，不參與原有選股或產業指數更新。
+    total_stock_records = select_by_min_repeat_count(consecutive_filtered, 0)
     updated_lines = build_result_lines(
         execution_start_time,
         ranked_records,
@@ -579,38 +587,15 @@ def main() -> None:
         selected_stock_records,
         selected_limit_up_stock_records,
         selected_limit_down_stock_records,
+        total_stock_records,
     )
 
     log(f"done: {output_result_path}")
     log(f"updated selected_stocks: {stock_data_path}")
     log(f"source={cache_path}")
-    log(f"trading_dates={trading_dates}")
-    log(f"ranked_count={len(ranked_records)}")
-    log(f"price_filtered_ranked_count={len(price_filtered_ranked_records)}")
-    log(f"atr_filtered_ranked_count={len(atr_filtered_ranked_records)}")
-    log(f"filtered_ranked_count={len(filtered_ranked_records)}")
-    log(f"excluded_industry_codes={EXCLUDED_INDUSTRY_CODES}")
-    log(f"top_rank={TOP_RANK}")
-    log(f"min_repeat_count={MIN_REPEAT_COUNT}")
-    log(f"long_limit_up_days={LONG_LIMIT_UP_DAYS}")
-    log(f"short_limit_down_days={SHORT_LIMIT_DOWN_DAYS}")
-    log(f"max_limit_up_price={MAX_LIMIT_UP_PRICE}")
-    log(f"min_limit_down_price={MIN_LIMIT_DOWN_PRICE}")
-    log(f"min_atr_pct={MIN_ATR_PCT}% (ATR / previous_close * 100)")
-    log(f"top_result_count(rank)={len(rank_records)}")
-    log(f"top_result_count(repeat_count)={len(repeat_records)}")
     log(f"selected_stocks_count={len(selected_stock_records)}")
-    log(f"selected_limit_up_stocks_count={len(selected_limit_up_stock_records)}")
-    log(f"selected_limit_down_stocks_count={len(selected_limit_down_stock_records)}")
+    log(f"total_stocks_count={len(total_stock_records)}")
     log(f"selected_stocks_previous_close_total={sum_previous_close_prices(selected_stock_records)}")
-    log(
-        "selected_limit_up_stocks_previous_close_total="
-        f"{sum_previous_close_prices(selected_limit_up_stock_records)}"
-    )
-    log(
-        "selected_limit_down_stocks_previous_close_total="
-        f"{sum_previous_close_prices(selected_limit_down_stock_records)}"
-    )
 
     update_script_path = base_dir.parent / "update_stock_data_industry_indices.py"
     log(f"[INFO] 選股完成，開始更新產業指數: {update_script_path}")
