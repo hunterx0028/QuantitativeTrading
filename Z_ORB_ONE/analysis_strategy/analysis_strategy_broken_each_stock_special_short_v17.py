@@ -120,7 +120,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
-LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD = 75.0 # 同一比例嚴格超過此值時，沿用 LOWER 訊號反向做多
+LOWER_DECISION_DECLINE_PERCENT_LONG_THRESHOLD = 80.0 # 同一比例嚴格超過此值時，沿用 LOWER 訊號反向做多
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
