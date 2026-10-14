@@ -33,6 +33,7 @@ LONG_ENTRY_START_TIME = (9, 55)
 LONG_ENTRY_END_TIME = (10, 30)
 LONG_BREAKOUT_POINT = 1  # 0: 昨收，1: 昨高
 LONG_EARLY_BREAKOUT_POINT = 1  # 開始進場前曾突破：0 昨收、1 昨高、9 不須突破
+LONG_EARLY_BREAKOUT_PERCENT = 2.5  # 早盤門檻上方幅度；3 代表須突破基準價的 103%，選項 9 時不作用
 LONG_FORCE_EXIT_TIME = (12, 50)
 
 # 做空設定
@@ -42,6 +43,7 @@ SHORT_ENTRY_START_TIME = (9, 40)
 SHORT_ENTRY_END_TIME = (10, 15)
 SHORT_BREAKOUT_POINT = -1  # 0: 昨收，-1: 昨低
 SHORT_EARLY_BREAKOUT_POINT = 9  # 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
+SHORT_EARLY_BREAKOUT_PERCENT = 0.0  # 早盤門檻下方幅度；3 代表須跌破基準價的 97%，選項 9 時不作用
 SHORT_FORCE_EXIT_TIME = (12, 50)
 
 # 共用設定
@@ -68,6 +70,10 @@ def validate_settings():
         early_point = LONG_EARLY_BREAKOUT_POINT if side == 'LONG' else SHORT_EARLY_BREAKOUT_POINT
         if type(early_point) is not int or early_point not in ((0, 1, 9) if side == 'LONG' else (0, -1, 9)):
             raise ValueError(f'{side} 早盤突破點設定不合法: {early_point!r}')
+        early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == 'LONG' else SHORT_EARLY_BREAKOUT_PERCENT
+        if early_point != 9 and (type(early_percent) not in (int, float)
+                                or not math.isfinite(early_percent) or not 0 <= early_percent < 100):
+            raise ValueError(f'{side} 早盤突破百分比須大於等於 0 且小於 100')
         start, end, force, point, loss, profit = side_settings(side)
         for value in (start, end, force):
             if (not isinstance(value, tuple) or len(value) != 2
@@ -179,6 +185,9 @@ def backtest(side, bars, yesterday):
     early = [b for b in bars if hm(b) < start]
     early_threshold = (None if early_point == 9 else yesterday[
         'close' if early_point == 0 else ('high' if side == 'LONG' else 'low')])
+    if early_point != 9:
+        early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == 'LONG' else SHORT_EARLY_BREAKOUT_PERCENT
+        early_threshold *= 1 + (1 if side == 'LONG' else -1) * early_percent / 100
     qualified = early_point == 9 or any(
         b['high'] > early_threshold if side == 'LONG' else b['low'] < early_threshold for b in early)
     if not qualified:
@@ -350,7 +359,8 @@ def main(argv=None):
         for side in ('LONG', 'SHORT'):
             emit(f'{side}: 開始/停止/強制離場/突破點/停損%/停利%={side_settings(side)}')
             early_point = LONG_EARLY_BREAKOUT_POINT if side == 'LONG' else SHORT_EARLY_BREAKOUT_POINT
-            emit(f'{side}: 早盤突破點={early_point!r}（9 代表免除早盤突破資格）')
+            early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == 'LONG' else SHORT_EARLY_BREAKOUT_PERCENT
+            emit(f'{side}: 早盤突破點={early_point!r} 早盤突破幅度%={early_percent!r}（9 代表免除早盤突破資格，幅度不作用）')
         emit('前一根須為上一分鐘；本根 high/low 突破，以門檻上/下方 1 tick 固定入場（含跳空）。')
         emit('入場棒以 high/low 檢查風控；後續棒跳空停損停利以 open 成交；同棒雙觸及採停損優先。')
         if not reports:
