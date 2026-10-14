@@ -81,6 +81,7 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 LONG_ENTRY_START_TIME = (9, 55)  # signal long 進場檢核開始時間（含）
 LONG_ENTRY_END_TIME = (10, 30)  # signal long 進場檢核截止時間（含）
 LONG_EARLY_BREAKOUT_POINT = 1  # signal long 開始進場前曾突破：0 昨收、1 昨高、9 不須突破
+LONG_EARLY_BREAKOUT_PERCENT = 2.5  # 早盤門檻上方幅度；3 代表須突破基準價的 103%，選項 9 時不作用
 LONG_BREAKOUT_POINT = 1  # signal long 突破點：0 昨收、1 昨高
 LONG_FORCE_EXIT_TIME = (12, 50)  # signal long 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_SIGNAL_LONG = 5.0 # signal long 停利百分比(%)
@@ -89,6 +90,7 @@ OPTIMIZE_LOSS_PER_SIGNAL_LONG = 3.0 # signal long 停損百分比(%)
 SHORT_ENTRY_START_TIME = (9, 40)  # signal short 進場檢核開始時間（含）
 SHORT_ENTRY_END_TIME = (10, 15)  # signal short 進場檢核截止時間（含）
 SHORT_EARLY_BREAKOUT_POINT = 9  # signal short 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
+SHORT_EARLY_BREAKOUT_PERCENT = 0.0  # 早盤門檻下方幅度；3 代表須跌破基準價的 97%，選項 9 時不作用
 SHORT_BREAKOUT_POINT = -1  # signal short 突破點：0 昨收、-1 昨低
 SHORT_FORCE_EXIT_TIME = (12, 50)  # signal short 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_SIGNAL_SHORT = 5.0 # signal short 停利百分比(%)
@@ -647,7 +649,7 @@ def validate_market_reversal_time_config() -> None:
         ENTRY_CHECK_START_TIME_LOWER,
         "ENTRY_CHECK_START_TIME_LOWER",
     )
-    for strategy_name, start_time, end_time, force_time, breakout_point, early_breakout_point in (
+    for strategy_name, start_time, end_time, force_time, breakout_point, early_breakout_point, early_breakout_percent in (
         (
             "SIGNAL_LONG",
             LONG_ENTRY_START_TIME,
@@ -655,6 +657,7 @@ def validate_market_reversal_time_config() -> None:
             LONG_FORCE_EXIT_TIME,
             LONG_BREAKOUT_POINT,
             LONG_EARLY_BREAKOUT_POINT,
+            LONG_EARLY_BREAKOUT_PERCENT,
         ),
         (
             "SIGNAL_SHORT",
@@ -663,6 +666,7 @@ def validate_market_reversal_time_config() -> None:
             SHORT_FORCE_EXIT_TIME,
             SHORT_BREAKOUT_POINT,
             SHORT_EARLY_BREAKOUT_POINT,
+            SHORT_EARLY_BREAKOUT_PERCENT,
         ),
     ):
         start_hm = time_tuple_to_minutes(start_time, f"{strategy_name}_ENTRY_START_TIME")
@@ -678,6 +682,12 @@ def validate_market_reversal_time_config() -> None:
             raise ValueError(f"{strategy_name} 突破點設定不合法: {breakout_point!r}")
         if early_breakout_point not in valid_early_breakout_points:
             raise ValueError(f"{strategy_name} 早盤突破點設定不合法: {early_breakout_point!r}")
+        if early_breakout_point != 9 and (
+            type(early_breakout_percent) not in (int, float)
+            or not math.isfinite(early_breakout_percent)
+            or not 0 <= early_breakout_percent < 100
+        ):
+            raise ValueError(f"{strategy_name} 早盤突破百分比須大於等於 0 且小於 100")
     if any(
         not math.isfinite(value) or not 0 < value < 100
         for value in (
@@ -2645,6 +2655,17 @@ def get_signal_threshold_price(state: Dict[str, Any], point: int, side: str) -> 
     return price if price > 0 else 0.0
 
 
+def get_signal_early_threshold_price(state: Dict[str, Any], early_point: int, side: str) -> float:
+    """只調整早盤資格門檻；選項 9 不使用突破百分比。"""
+    if early_point == 9:
+        return 0.0
+    threshold = get_signal_threshold_price(state, early_point, side)
+    if threshold <= 0:
+        return 0.0
+    early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == TRADE_SIDE_LONG else SHORT_EARLY_BREAKOUT_PERCENT
+    return threshold * (1 + (1 if side == TRADE_SIDE_LONG else -1) * early_percent / 100)
+
+
 def signal_early_breakout_pass(state: Dict[str, Any], early_point: int, _side: str) -> bool:
     if early_point == 9:
         return True
@@ -2664,7 +2685,7 @@ def update_signal_early_breakout_state(
     backfill_after_start = now_hm >= start_time and allow_initial_backfill
     if now_hm >= start_time and not backfill_after_start:
         return
-    threshold = get_signal_threshold_price(state, early_point, side)
+    threshold = get_signal_early_threshold_price(state, early_point, side)
     if threshold <= 0:
         return
     try:
@@ -2692,7 +2713,7 @@ def format_signal_no_entry_reason(state: Dict[str, Any]) -> str:
     start, end, point, early_point, side, label = get_signal_entry_settings(state)
     direction = "突破" if side == TRADE_SIDE_LONG else "跌破"
     if not signal_early_breakout_pass(state, early_point, side):
-        threshold = get_signal_threshold_price(state, early_point, side)
+        threshold = get_signal_early_threshold_price(state, early_point, side)
         reason = (
             f"開始進場時間 {start[0]:02d}:{start[1]:02d} 前未曾{direction}"
             f"早盤門檻 {threshold:g}（選項={early_point}）"
