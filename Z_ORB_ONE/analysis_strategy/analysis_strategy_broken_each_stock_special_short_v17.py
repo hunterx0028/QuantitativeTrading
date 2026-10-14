@@ -115,7 +115,7 @@ OPTIMIZE_LOSS_PER_LIMIT_UP = 2.0 # limit up 停損百分比(%)
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
-LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例不可超過此值（含），即下限 < 比例 <= 上限
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
 
 LONG_LIMIT_UP_DAYS = [2] # limit up 策略允許的「實際」連續收漲停天數
 LIMIT_UP_BREAK_DOWN_PERCENT = 3.0 # 下破門檻：昨收到跌停價距離的百分比
@@ -1238,7 +1238,7 @@ def get_strategy_market_decision_gate_status(
     if not (
         LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
         < decline_percent
-        <= LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
+        < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
     ):
         return GATE_LOWER_PERCENT_REJECTED
     return GATE_LOWER_PASSED
@@ -2089,7 +2089,7 @@ def print_daily_optimization_results(
                     lower_decision_text += (
                         '原因=LOWER 股票比例不符 '
                         f'({LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:g}% < 比例 '
-                        f'<= {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:g}%)  '
+                        f'< {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:g}%)  '
                     )
             print(
                 f'{format_date_with_weekday(date_key)} '
