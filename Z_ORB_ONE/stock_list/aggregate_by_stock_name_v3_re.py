@@ -562,7 +562,7 @@ def main() -> None:
     consecutive_filtered = filter_records_by_excluded_industries(consecutive_atr_filtered)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
     repeat_records, repeat_header = select_records_for_repeat_count(consecutive_filtered)
-    # 額外輸出取消連續出現天數門檻的清單，不參與原有選股或產業指數更新。
+    # 額外輸出取消連續出現天數門檻的清單，供產業指數更新使用最大候選範圍。
     total_stock_records = select_by_min_repeat_count(consecutive_filtered, 0)
     updated_lines = build_result_lines(
         execution_start_time,

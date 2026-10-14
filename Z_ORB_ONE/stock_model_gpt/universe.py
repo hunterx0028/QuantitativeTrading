@@ -43,7 +43,7 @@ def _load_stock_data_module(path: Path = STOCK_DATA_PATH):
 def load_selected_stocks(path: Path = STOCK_DATA_PATH) -> list[StockIdentity]:
     module = _load_stock_data_module(path)
     identities: dict[str, StockIdentity] = {}
-    for item in getattr(module, "selected_stocks", []):
+    for item in getattr(module, "total_stocks", []):
         identity = parse_stock_label(item[0])
         identities[identity.symbol] = identity
     return sorted(identities.values(), key=lambda item: item.symbol)

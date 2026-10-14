@@ -25,7 +25,7 @@ def main() -> None:
         "--symbols",
         nargs="*",
         default=None,
-        help="只重同步指定股票代號；預設使用 stock_data.py 的 selected_stocks",
+        help="只重同步指定股票代號；預設使用 stock_data.py 的 total_stocks",
     )
     args = parser.parse_args()
     clear_query_cache()

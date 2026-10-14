@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,7 +17,7 @@ from .config import Settings
 from .dataset import INPUT_ALIGNMENT, encode_sequence
 from .device import describe_device, select_device
 from .night_futures import load_night_futures
-from .paths import CHECKPOINT_DIR, FEATURES_DIR, PREDICTIONS_DIR, SIGNAL_REPORTS_DIR, ensure_runtime_dirs
+from .paths import CHECKPOINT_DIR, FEATURES_DIR, PREDICTIONS_DIR, SIGNAL_REPORTS_DIR, STOCK_DATA_PATH, ensure_runtime_dirs
 from .storage import read_jsonl
 from .training import build_model, ensure_checkpoint_compatible
 from .universe import load_universe_snapshot
@@ -55,6 +57,137 @@ def save_prediction_version(payload, inputs, report_text, replace_official=False
         if saved_report.exists():
             atomic_text(SIGNAL_REPORTS_DIR / f"{day}.txt", saved_report.read_text(encoding="utf-8"))
     return version
+
+
+def find_stock_data_assignment(source: str, name: str) -> tuple[int, int] | None:
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if name in target_names and node.end_lineno is not None:
+                return node.lineno - 1, node.end_lineno
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.end_lineno is not None
+        ):
+            return node.lineno - 1, node.end_lineno
+    return None
+
+
+def literal_stock_data_assignment(source: str, name: str) -> list[tuple]:
+    module = ast.parse(source)
+    for node in module.body:
+        value_node = None
+        if isinstance(node, ast.Assign):
+            target_names = [
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            ]
+            if name in target_names:
+                value_node = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        ):
+            value_node = node.value
+        if value_node is None:
+            continue
+        value = ast.literal_eval(value_node)
+        if not isinstance(value, list):
+            raise ValueError(f"stock_data.py 的 {name} 必須是 list")
+        return value
+    return []
+
+
+def format_stock_records_assignment(name: str, records: list[tuple]) -> str:
+    lines = [f"{name} = ["]
+    lines.extend(f"    {record!r}," for record in records)
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def replace_stock_records_assignment(source: str, name: str, records: list[tuple]) -> str:
+    lines = source.splitlines()
+    assignment = find_stock_data_assignment(source, name)
+    if assignment is None:
+        raise ValueError(f"找不到 {name} 宣告")
+    start_line, end_line = assignment
+    replacement = format_stock_records_assignment(name, records).splitlines()
+    return "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
+
+
+def stock_record_symbol(record: tuple) -> str:
+    symbol_name = str(record[0] if record else "")
+    code_part = symbol_name.split(":", 1)[-1]
+    return code_part.split(".", 1)[0]
+
+
+def signal_symbols(signals: list[dict]) -> list[str]:
+    symbols = []
+    seen = set()
+    for signal in sorted_signals(signals):
+        symbol = str(signal.get("symbol", "")).strip()
+        if symbol and symbol not in seen:
+            symbols.append(symbol)
+            seen.add(symbol)
+    return symbols
+
+
+def build_signal_stock_records(source: str, symbols: list[str]) -> list[tuple]:
+    source_record_lists = [
+        literal_stock_data_assignment(source, "total_stocks"),
+        literal_stock_data_assignment(source, "selected_stocks"),
+        literal_stock_data_assignment(source, "selected_limit_up_stocks"),
+        literal_stock_data_assignment(source, "selected_limit_down_stocks"),
+    ]
+    records_by_symbol = {}
+    for records in source_record_lists:
+        for record in records:
+            if isinstance(record, tuple) and record:
+                records_by_symbol.setdefault(stock_record_symbol(record), record)
+
+    missing_symbols = [symbol for symbol in symbols if symbol not in records_by_symbol]
+    if missing_symbols:
+        raise ValueError(
+            "stock_data.py 找不到 signal 股票資料，無法寫入實機候選清單: "
+            + ", ".join(missing_symbols)
+        )
+    return [records_by_symbol[symbol] for symbol in symbols]
+
+
+def update_stock_data_signal_lists(
+    *,
+    high_signals: list[dict],
+    low_signals: list[dict],
+    stock_data_path: Path = STOCK_DATA_PATH,
+) -> None:
+    source = stock_data_path.read_text(encoding="utf-8")
+    long_symbols = signal_symbols(high_signals)
+    short_symbols = signal_symbols(low_signals)
+    overlap_symbols = sorted(set(long_symbols) & set(short_symbols))
+    if overlap_symbols:
+        raise ValueError(
+            "同一股票不可同時寫入 selected_limit_up_stocks 與 selected_limit_down_stocks: "
+            + ", ".join(overlap_symbols)
+        )
+    long_records = build_signal_stock_records(source, long_symbols)
+    short_records = build_signal_stock_records(source, short_symbols)
+    source = replace_stock_records_assignment(source, "selected_limit_up_stocks", long_records)
+    source = replace_stock_records_assignment(source, "selected_limit_down_stocks", short_records)
+    atomic_text(stock_data_path, source)
+    print(
+        f"已更新 stock_data.py signal 候選："
+        f"selected_limit_up_stocks={len(long_records)}，"
+        f"selected_limit_down_stocks={len(short_records)}"
+    )
 
 
 from .signals import (CLASSES, OUTPUT_SCHEMA, SignalThresholds,
@@ -274,6 +407,10 @@ def run_prediction(
     official_payload = json.loads(official_path.read_text(encoding="utf-8"))
     if official_payload.get("prediction_id") == run_id:
         record_prediction(payload, official_path, settings)
+        if os.environ.get("STOCK_MODEL_GPT_WRITE_ROOT"):
+            print("偵測到 STOCK_MODEL_GPT_WRITE_ROOT，略過正式 stock_data.py signal 候選更新")
+        else:
+            update_stock_data_signal_lists(high_signals=signals, low_signals=low_signals)
     print(f"預測版本已儲存: {output} ({len(predictions)}支)")
     return output, naive_baseline, in_sample_loss
 
