@@ -2927,7 +2927,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
                 price=entry_ref_px,
                 reason="entry_signal",
             )
-            print_entry_position_prices(state)
+            # 停損／保本／停利由成交確認流程輸出，避免重複印出或顯示估計價位。
         else:  # 下單失敗
             state["traded"] = True
 
