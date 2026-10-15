@@ -29,7 +29,16 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import selected_stocks
+from Z_ORB_ONE.stock_data import (
+    selected_stocks,
+    total_stocks,
+    selected_limit_up_stocks,
+    selected_limit_down_stocks,
+)
+
+# 可指定多個區塊，例如 ["U", "D"]；重複股票保留首次出現的資料。
+# S: selected_stocks，T: total_stocks，U: selected_limit_up_stocks，D: selected_limit_down_stocks
+MONITOR_STOCK_BLOCKS = ["U","D"]
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 TZ = pytz.timezone("Asia/Taipei")
@@ -106,6 +115,29 @@ def get_pure_symbol(symbol_str: str) -> tuple[str, str]:
     symbol_with_suffix = symbol_str.split(":")[1]
     symbol = symbol_with_suffix.split(".")[0]
     return symbol, symbol_with_suffix
+
+
+def build_monitor_stocks(blocks: list[str]) -> list[tuple]:
+    stock_blocks = {
+        "S": selected_stocks,
+        "T": total_stocks,
+        "U": selected_limit_up_stocks,
+        "D": selected_limit_down_stocks,
+    }
+    invalid_blocks = [block for block in blocks if block not in stock_blocks]
+    if invalid_blocks:
+        raise ValueError(f"未知的監看區塊：{invalid_blocks}，請使用 S、T、U、D。")
+
+    stocks = []
+    seen_codes: set[str] = set()
+    for block in blocks:
+        for stock in stock_blocks[block]:
+            symbol_code, _ = get_pure_symbol(stock[0])
+            if symbol_code in seen_codes:
+                continue
+            seen_codes.add(symbol_code)
+            stocks.append(stock)
+    return stocks
 
 
 def parse_stock_float(value: Any, field_name: str, symbol_name: str, default: float = 0.0) -> float:
@@ -1030,6 +1062,7 @@ class DesktopIntradayMonitorApp:
 
 
 def main():
+    monitor_stocks = build_monitor_stocks(MONITOR_STOCK_BLOCKS)
     config = ConfigParser()
     config.read(CONFIG_PATH)
     normalize_config_paths(config)
@@ -1044,14 +1077,14 @@ def main():
         f"每分鐘秒數至{FETCH_SECOND_IN_MINUTE:02d}更新 | "
         f"停止監看時間 {format_hms(STOP_MONITOR_TIME)}"
     )
-    if not selected_stocks:
+    if not monitor_stocks:
         log("沒有可監看的股票，程式結束。")
         return
 
-    log(f"監看股票數量：{len(selected_stocks)}")
+    log(f"監看區塊：{MONITOR_STOCK_BLOCKS} | 去重後股票數量：{len(monitor_stocks)}")
     root = tk.Tk()
     app = DesktopIntradayMonitorApp(root, rest_stock)
-    app.initialize_states(selected_stocks)
+    app.initialize_states(monitor_stocks)
     app.start()
     root.mainloop()
 
