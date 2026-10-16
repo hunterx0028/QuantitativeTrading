@@ -37,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from esun_marketdata import EsunMarketdata
 # 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = "20260929"
+HISTORICAL_CACHE_DATE = "20260810"
 
 if not HISTORICAL_CACHE_DATE:
     from Z_ORB_ONE.stock_data import (
@@ -82,8 +82,8 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
-LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
-LOWER_EXIT_PERCENT_THRESHOLD = 0.0 # 入場後每分鐘檢查；比例嚴格低於此值，全平倉且當日不再入場
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 70.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
+LOWER_EXIT_PERCENT_THRESHOLD = 30.0 # 相對 LOWER 模式成立時比例 N 的下降百分點；每分鐘比例 <= N - 此值時全平倉且當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
@@ -2185,13 +2185,18 @@ def apply_lower_percent_exit(
     all_results: list,
     minute_bars_by_symbol: dict[str, dict[str, list]],
 ) -> list:
-    """首筆實際入場後，以完整股票池逐分鐘判斷；觸發後當日不再入場。"""
+    """以 LOWER 模式成立時比例為固定基準，首筆入場後逐分鐘檢查下降百分點。"""
     results_by_date: dict[str, list] = {}
     for signal, result in all_results:
         results_by_date.setdefault(signal['date_str'], []).append((signal, result))
     adjusted_results = []
     for date_key, day_results in results_by_date.items():
         first_entry = min(signal['entry_dt'] for signal, _ in day_results)
+        entry_total, entry_decline = summarize_lower_strategy_decision_candidates(
+            lower_decision_stocks, first_entry.date(), minute_bars_by_symbol,
+        )
+        entry_percent = calculate_percent(entry_decline, entry_total)
+        exit_percent = entry_percent - LOWER_EXIT_PERCENT_THRESHOLD
         settlement_dt = first_entry.replace(
             hour=INTRADAY_COMPARE_END_LOWER[0],
             minute=INTRADAY_COMPARE_END_LOWER[1], second=0, microsecond=0,
@@ -2205,11 +2210,13 @@ def apply_lower_percent_exit(
                 minute_bars_by_symbol, decision_dt=check_dt,
             )
             percent = calculate_percent(decline, total)
-            if percent < LOWER_EXIT_PERCENT_THRESHOLD:
+            if percent <= exit_percent:
                 trigger_dt = check_dt
                 print(
                     f'{date_key} LOWER 比例出場觸發={check_dt:%H:%M} '
-                    f'比例={percent:.2f}% < {LOWER_EXIT_PERCENT_THRESHOLD:g}% '
+                    f'入場基準={entry_percent:.2f}% '
+                    f'下降門檻={LOWER_EXIT_PERCENT_THRESHOLD:g}個百分點 '
+                    f'比例={percent:.2f}% <= 平倉門檻={exit_percent:.2f}% '
                     '（該分鐘收完後，下一根個股 K 的 open 平倉；當日不再入場）'
                 )
                 break
@@ -2234,6 +2241,8 @@ def apply_lower_percent_exit(
                     result['exit_dt'] = exit_bar['dt']
                     result['lower_percent_trigger_dt'] = trigger_dt
                     result['lower_percent_trigger_percent'] = percent
+                    result['lower_percent_entry_percent'] = entry_percent
+                    result['lower_percent_exit_threshold'] = exit_percent
                 # 無後續 K 時保留原結算，不虛構可成交價格。
             adjusted_results.append((signal, result))
     return adjusted_results
