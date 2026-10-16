@@ -36,11 +36,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from esun_marketdata import EsunMarketdata
-from Z_ORB_ONE.stock_data import (
-    market_previous_close_indices,
-    selected_stocks,
-    total_stocks as lower_decision_stocks,
-)
+# 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
+HISTORICAL_CACHE_DATE = "20260929"
+
+if not HISTORICAL_CACHE_DATE:
+    from Z_ORB_ONE.stock_data import (
+        market_previous_close_indices,
+        selected_stocks,
+        total_stocks as lower_decision_stocks,
+    )
+else:
+    market_previous_close_indices = {}
+    selected_stocks = []
+    lower_decision_stocks = []
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 STOCK_DATA_PATH = Path(__file__).resolve().parents[1] / 'stock_data.py'
@@ -75,6 +83,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
+LOWER_EXIT_PERCENT_THRESHOLD = 0.0 # 入場後每分鐘檢查；比例嚴格低於此值，全平倉且當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
@@ -316,6 +325,33 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple], decision_stock_lis
         return minute_bars_by_symbol, index_minute_bars_by_key
     except Exception:
         return None
+
+
+def load_historical_api_cache(cache_path: Path) -> tuple[list[tuple], dict, dict]:
+    """僅讀取歷史 cache；失敗報錯，不回退 API，不使用當天股票資料。"""
+    try:
+        payload = json.loads(cache_path.read_text(encoding='utf-8'))
+        names = payload['stock_names']
+        if not isinstance(names, list) or not names or any(
+            not isinstance(name, str) or not name for name in names
+        ):
+            raise ValueError('stock_names 必須是非空的股票名稱清單')
+        stocks = dedupe_stock_list([[(name,) for name in names]])
+        raw_stocks = payload['minute_raw_by_symbol']
+        raw_indices = payload['index_minute_raw_by_key']
+        for name, in stocks:
+            if not isinstance(raw_stocks[name], list):
+                raise ValueError(f'{name} 分 K 必須是陣列')
+        for key in RESERVE_MARKET_INDICES:
+            if not isinstance(raw_indices[key], list):
+                raise ValueError(f'{key} 分 K 必須是陣列')
+        return (
+            stocks,
+            {name: parse_bars(raw_stocks[name]) for name, in stocks},
+            {key: parse_bars(raw_indices[key]) for key in RESERVE_MARKET_INDICES},
+        )
+    except Exception as exc:
+        raise ValueError(f'歷史 cache 載入失敗: {cache_path}；{exc}') from exc
 
 
 def save_api_cache(
@@ -1132,6 +1168,8 @@ def is_industry_market_filter_passed(
     strategy_type: str,
 ) -> bool:
     """LOWER 入場前，產業指數前一根已完成分 K 須嚴格低於作空門檻。"""
+    if HISTORICAL_CACHE_DATE:
+        return True  # cache 無個股產業對照，依歷史模式設定略過。
     index_key = get_industry_index_key(stock_item)
     if index_key is None:
         return False
@@ -1477,6 +1515,8 @@ def format_result_line(stock_name: str, date_str: str,
         return f'{stock_label} / {date_str} / {status_label}(已達獲利, 淨損益: {signed:+.2f})'
     if exit_reason == 'stop':
         return f'{stock_label} / {date_str} / {status_label}(已達停損, 淨損益: {signed:+.2f})'
+    if exit_reason == 'lower_percent':
+        return f'{stock_label} / {date_str} / {status_label}(LOWER 比例不足平倉, 淨損益: {signed:+.2f})'
     if exit_reason == 'close':
         return f'{stock_label} / {date_str} / {status_label}(收盤結算, 淨損益: {signed:+.2f})'
 
@@ -1583,10 +1623,11 @@ def summarize_lower_strategy_decision_candidates(
     stock_list: list[tuple],
     target_date: date,
     minute_bars_by_symbol: dict[str, dict[str, list]],
+    decision_dt: datetime | None = None,
 ) -> tuple[int, int]:
-    """統計 LOWER 模式判斷完成時，股票池與已落入 lower 入場區間的數量。"""
+    """以指定分鐘（預設模式判斷時間）的 close 統計 LOWER 區間比例，分母固定為完整股票池。"""
     decline_count = 0
-    decision_dt = datetime(
+    decision_dt = decision_dt or datetime(
         target_date.year,
         target_date.month,
         target_date.day,
@@ -1667,11 +1708,19 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
+    lower_percent_exit_text_by_date: dict[str, str] = {}
     grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
+        if result.get('exit_reason') == 'lower_percent':
+            trigger_dt = result.get('lower_percent_trigger_dt')
+            trigger_percent = result.get('lower_percent_trigger_percent')
+            if trigger_dt is not None and trigger_percent is not None:
+                lower_percent_exit_text_by_date[date_key] = (
+                    f'{trigger_percent:.2f}%({trigger_dt:%H:%M})  '
+                )
         strategy_type = signal.get('strategy_type', STRATEGY_NO_TRADE)
         grouped_results.setdefault((date_key, strategy_type), []).append((
             signal['name'],
@@ -1730,6 +1779,8 @@ def print_daily_optimization_results(
                     f'下降={decline_count}  '
                     f'{decline_percent:.2f}%  '
                 )
+                if strategy_type == STRATEGY_LOWER:
+                    lower_decision_text += lower_percent_exit_text_by_date.get(date_key, '')
                 if percent_rejected:
                     lower_decision_text += (
                         '原因=LOWER 股票比例不符 '
@@ -2130,58 +2181,134 @@ def evaluate_candidates(
 # Main
 # ---------------------------------------------------------------------------
 
+def apply_lower_percent_exit(
+    all_results: list,
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+) -> list:
+    """首筆實際入場後，以完整股票池逐分鐘判斷；觸發後當日不再入場。"""
+    results_by_date: dict[str, list] = {}
+    for signal, result in all_results:
+        results_by_date.setdefault(signal['date_str'], []).append((signal, result))
+    adjusted_results = []
+    for date_key, day_results in results_by_date.items():
+        first_entry = min(signal['entry_dt'] for signal, _ in day_results)
+        settlement_dt = first_entry.replace(
+            hour=INTRADAY_COMPARE_END_LOWER[0],
+            minute=INTRADAY_COMPARE_END_LOWER[1], second=0, microsecond=0,
+        )
+        trigger_dt = None
+        check_dt = first_entry.replace(second=0, microsecond=0)
+        # 即使已全部停損停利，仍檢查完整股票池，避免稍後重新入場。
+        while check_dt < settlement_dt:
+            total, decline = summarize_lower_strategy_decision_candidates(
+                lower_decision_stocks, first_entry.date(),
+                minute_bars_by_symbol, decision_dt=check_dt,
+            )
+            percent = calculate_percent(decline, total)
+            if percent < LOWER_EXIT_PERCENT_THRESHOLD:
+                trigger_dt = check_dt
+                print(
+                    f'{date_key} LOWER 比例出場觸發={check_dt:%H:%M} '
+                    f'比例={percent:.2f}% < {LOWER_EXIT_PERCENT_THRESHOLD:g}% '
+                    '（該分鐘收完後，下一根個股 K 的 open 平倉；當日不再入場）'
+                )
+                break
+            check_dt += timedelta(minutes=1)
+        for signal, result in day_results:
+            if trigger_dt is None:
+                adjusted_results.append((signal, result))
+                continue
+            if signal['entry_dt'] > trigger_dt:
+                continue
+            # 觸發當根已停損停利的部位保留；下一根 open 優先於其高低價。
+            if result['exit_dt'] > trigger_dt:
+                bars = minute_bars_by_symbol[signal['name']].get(date_key, [])
+                exit_bar = next(
+                    (bar for bar in bars if trigger_dt < bar['dt'] <= result['exit_dt']),
+                    None,
+                )
+                if exit_bar is not None:
+                    result = build_outcome_result(
+                        'lower_percent', signal['entry_price'], float(exit_bar['open']),
+                    )
+                    result['exit_dt'] = exit_bar['dt']
+                    result['lower_percent_trigger_dt'] = trigger_dt
+                    result['lower_percent_trigger_percent'] = percent
+                # 無後續 K 時保留原結算，不虛構可成交價格。
+            adjusted_results.append((signal, result))
+    return adjusted_results
+
+
 def main() -> None:
     OUTPUT_BUFFER.clear()
     builtins.print(f'開始時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     builtins.print()
     try:
         args = parse_args()
-        if STOCK_DATA_SOURCE == "S":
-            source_stock_list = selected_stocks
-            stock_source_name = 'selected_stocks'
-        elif STOCK_DATA_SOURCE == "T":
-            source_stock_list = lower_decision_stocks
-            stock_source_name = 'total_stocks'
-        else:
-            raise ValueError('STOCK_DATA_SOURCE 必須設定為 "S" 或 "T"')
-        raw_stock_list = STOCK_LIST or source_stock_list
-        if STOCK_LIST:
-            stock_source_name = 'STOCK_LIST'
-        stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
-        raw_analysis_stock_list = dedupe_stock_list([raw_stock_list])
-        analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
-        excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
-        analysis_stock_list = ensure_backtest_industry_index_metadata(analysis_stock_list)
-        eligible_names = {item[0] for item in analysis_stock_list}
-        stock_list = [item for item in stock_list if item[0] in eligible_names]
-        if EXCLUDED_INDUSTRY_CODES:
-            print(
-                f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
-                f'排除股票數={excluded_stock_count} '
-                f'剩餘統一回測股票數={len(analysis_stock_list)}'
-            )
-        print(
-            f'{stock_source_name}來源數={len(stock_list)}  '
-            f'統一回測股票池={len(analysis_stock_list)}'
-        )
-        if not analysis_stock_list:
-            print('[WARN] 沒有符合回測條件的股票，結束本次回測')
-            return
-
-        # 目標日期
-        if args.to:
+        if HISTORICAL_CACHE_DATE:
             try:
-                target_date = datetime.strptime(args.to, '%Y-%m-%d').date()
-            except ValueError:
-                print(f'[ERROR] 日期格式錯誤，請使用 YYYY-MM-DD: {args.to}', file=sys.stderr)
+                if not re.fullmatch(r'\d{8}', HISTORICAL_CACHE_DATE):
+                    raise ValueError('歷史日期必須為 YYYYMMDD')
+                target_date = datetime.strptime(HISTORICAL_CACHE_DATE, '%Y%m%d').date()
+                cache_path = get_api_cache_path(target_date)
+                analysis_stock_list, minute_bars_by_symbol, index_minute_bars_by_key = (
+                    load_historical_api_cache(cache_path)
+                )
+            except ValueError as exc:
+                print(f'[ERROR] {exc}', file=sys.stderr)
                 sys.exit(1)
+            lower_decision_stocks[:] = analysis_stock_list
+            cached = (minute_bars_by_symbol, index_minute_bars_by_key)
+            print(f'歷史 cache 模式：目標日期={target_date}，股票數={len(analysis_stock_list)}')
+            print('回測與 LOWER 比例判斷使用 cache 全部股票；忽略 STOCK_DATA_SOURCE、STOCK_LIST 與 --to。')
+            print('未使用 stock_data.py；略過產業指數進場過濾、產業排除及產業分類統計。')
         else:
-            target_date = date.today()
+            if STOCK_DATA_SOURCE == "S":
+                source_stock_list = selected_stocks
+                stock_source_name = 'selected_stocks'
+            elif STOCK_DATA_SOURCE == "T":
+                source_stock_list = lower_decision_stocks
+                stock_source_name = 'total_stocks'
+            else:
+                raise ValueError('STOCK_DATA_SOURCE 必須設定為 "S" 或 "T"')
+            raw_stock_list = STOCK_LIST or source_stock_list
+            if STOCK_LIST:
+                stock_source_name = 'STOCK_LIST'
+            stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
+            raw_analysis_stock_list = dedupe_stock_list([raw_stock_list])
+            analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
+            excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
+            analysis_stock_list = ensure_backtest_industry_index_metadata(analysis_stock_list)
+            eligible_names = {item[0] for item in analysis_stock_list}
+            stock_list = [item for item in stock_list if item[0] in eligible_names]
+            if EXCLUDED_INDUSTRY_CODES:
+                print(
+                    f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
+                    f'排除股票數={excluded_stock_count} '
+                    f'剩餘統一回測股票數={len(analysis_stock_list)}'
+                )
+            print(
+                f'{stock_source_name}來源數={len(stock_list)}  '
+                f'統一回測股票池={len(analysis_stock_list)}'
+            )
+            if not analysis_stock_list:
+                print('[WARN] 沒有符合回測條件的股票，結束本次回測')
+                return
 
-        cache_path = get_api_cache_path(target_date)
-        # total_stocks 持續提供 LOWER 比例判斷所需的分 K；交易股票池由上述來源設定決定。
-        minute_data_stock_list = dedupe_stock_list([analysis_stock_list, lower_decision_stocks])
-        cached = load_api_cache(cache_path, analysis_stock_list, lower_decision_stocks)
+            # 目標日期
+            if args.to:
+                try:
+                    target_date = datetime.strptime(args.to, '%Y-%m-%d').date()
+                except ValueError:
+                    print(f'[ERROR] 日期格式錯誤，請使用 YYYY-MM-DD: {args.to}', file=sys.stderr)
+                    sys.exit(1)
+            else:
+                target_date = date.today()
+
+            cache_path = get_api_cache_path(target_date)
+            # total_stocks 持續提供 LOWER 比例判斷所需的分 K；交易股票池由上述來源設定決定。
+            minute_data_stock_list = dedupe_stock_list([analysis_stock_list, lower_decision_stocks])
+            cached = load_api_cache(cache_path, analysis_stock_list, lower_decision_stocks)
         if cached is not None:
             minute_bars_by_symbol, index_minute_bars_by_key = cached
             print(f'已載入API快取: {cache_path.name}')
@@ -2258,6 +2385,7 @@ def main() -> None:
                 all_candidates,
                 print_results=False,
             )
+            results = apply_lower_percent_exit(results, minute_bars_by_symbol)
             return {
                 'best_results': results,
                 'market_start_gate_cache': market_start_gate_cache,
@@ -2342,6 +2470,9 @@ def main() -> None:
                 'LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100',
                 file=sys.stderr,
             )
+            sys.exit(1)
+        if not 0 <= LOWER_EXIT_PERCENT_THRESHOLD <= 100:
+            print('[ERROR] LOWER_EXIT_PERCENT_THRESHOLD 必須介於 0 與 100', file=sys.stderr)
             sys.exit(1)
         if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
             print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)

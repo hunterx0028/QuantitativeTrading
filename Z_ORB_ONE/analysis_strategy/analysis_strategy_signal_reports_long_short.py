@@ -27,6 +27,7 @@ OUTPUT_FILE = BASE_DIR / 'analysis_strategy_signal_reports_long_short_result.txt
 
 # 百分比常數：3 代表 3%，5 代表 5%。
 # 做多設定
+LONG_MIN_PROBABILITY_PERCENT = 90  # 所選合計機率 >= 此百分比才納入做多
 LONG_STOP_LOSS_PERCENT = 3.0
 LONG_TAKE_PROFIT_PERCENT = 5.0
 LONG_ENTRY_START_TIME = (9, 55)
@@ -37,6 +38,7 @@ LONG_EARLY_BREAKOUT_PERCENT = 2.5  # 早盤門檻上方幅度；3 代表須突�
 LONG_FORCE_EXIT_TIME = (12, 50)
 
 # 做空設定
+SHORT_MIN_PROBABILITY_PERCENT = 90  # 所選合計機率 >= 此百分比才納入做空
 SHORT_STOP_LOSS_PERCENT = 3.0
 SHORT_TAKE_PROFIT_PERCENT = 5.0
 SHORT_ENTRY_START_TIME = (9, 40)
@@ -44,7 +46,7 @@ SHORT_ENTRY_END_TIME = (10, 15)
 SHORT_BREAKOUT_POINT = -1  # 0: 昨收，-1: 昨低
 SHORT_EARLY_BREAKOUT_POINT = 9  # 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
 SHORT_EARLY_BREAKOUT_PERCENT = 0.0  # 早盤門檻下方幅度；3 代表須跌破基準價的 97%，選項 9 時不作用
-SHORT_FORCE_EXIT_TIME = (12, 50)
+SHORT_FORCE_EXIT_TIME = (11, 50)
 
 # 共用設定
 TRADE_SHARES = 1000  # 每筆交易股數，預設一張；收益金額 = 每股損益 × 股數
@@ -67,6 +69,10 @@ def validate_settings():
     if type(TRADE_SHARES) is not int or TRADE_SHARES <= 0:
         raise ValueError('TRADE_SHARES 必須是正整數股數')
     for side in ('LONG', 'SHORT'):
+        probability = LONG_MIN_PROBABILITY_PERCENT if side == 'LONG' else SHORT_MIN_PROBABILITY_PERCENT
+        if (type(probability) not in (int, float) or not math.isfinite(probability)
+                or not 0 <= probability <= 100):
+            raise ValueError(f'{side} 最低預測機率百分比須介於 0 與 100（含）')
         early_point = LONG_EARLY_BREAKOUT_POINT if side == 'LONG' else SHORT_EARLY_BREAKOUT_POINT
         if type(early_point) is not int or early_point not in ((0, 1, 9) if side == 'LONG' else (0, -1, 9)):
             raise ValueError(f'{side} 早盤突破點設定不合法: {early_point!r}')
@@ -92,7 +98,7 @@ def validate_settings():
 
 
 def parse_signal_report(path):
-    """只讀 high/low 區段的股票行，不將 SKIP、條件及機率類別當股票。"""
+    """依各方向門檻篩選 high/low 股票行的「所選合計」機率。"""
     result = {'LONG': [], 'SHORT': []}
     section = None
     for line in path.read_text(encoding='utf-8-sig').splitlines():
@@ -103,9 +109,12 @@ def parse_signal_report(path):
         if line.startswith('['):
             section = {'[high 符合清單]': 'LONG', '[low 符合清單]': 'SHORT'}.get(line)
             continue
-        match = re.match(r'^(\d{4,6})\s+[-+\d.]+%', line)
-        if section and match and match[1] not in result[section]:
-            result[section].append(match[1])
+        # 五個類別機率之後的第六個百分比為「所選合計」。
+        match = re.match(r'^(\d{4,6})\s+(?:[-+\d.]+%\s+){5}([-+\d.]+)%', line)
+        if section and match:
+            minimum = LONG_MIN_PROBABILITY_PERCENT if section == 'LONG' else SHORT_MIN_PROBABILITY_PERCENT
+            if float(match[2]) >= minimum and match[1] not in result[section]:
+                result[section].append(match[1])
     return result
 
 
@@ -357,6 +366,8 @@ def main(argv=None):
         emit(f'手續費率={BROKERAGE_FEE_RATE} 賣出交易稅率={SELL_TRANSACTION_TAX_RATE}')
         emit(f'每筆股數={TRADE_SHARES:,}股；金額按股數換算，成本沿用費率模型。總入場金額為各筆加總。')
         for side in ('LONG', 'SHORT'):
+            minimum = LONG_MIN_PROBABILITY_PERCENT if side == 'LONG' else SHORT_MIN_PROBABILITY_PERCENT
+            emit(f'{side}: 最低預測機率={minimum:g}%（所選合計，含門檻）')
             emit(f'{side}: 開始/停止/強制離場/突破點/停損%/停利%={side_settings(side)}')
             early_point = LONG_EARLY_BREAKOUT_POINT if side == 'LONG' else SHORT_EARLY_BREAKOUT_POINT
             early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == 'LONG' else SHORT_EARLY_BREAKOUT_PERCENT
