@@ -3,6 +3,8 @@
 直接執行：回測全部日期報表。--from / --to：指定日期區間。
 --cache-only：只讀快取，不登入行情 API。每股每日每方向最多一筆。
 前一根指上一分鐘；缺少上一分鐘不判定該棒進場。
+做多以前一分鐘 low < 突破點、本分鐘 high > 突破點，近似實機向上穿越。
+做空以前一分鐘 high > 突破點、本分鐘 low < 突破點，近似實機向下穿越。
 分 K 無法判斷同棒價格先後，同棒停損停利皆觸及時採停損優先。
 每股損益另依 TRADE_SHARES 換算收益金額；總報酬率並非資金複利。
 """
@@ -209,8 +211,9 @@ def backtest(side, bars, yesterday):
         previous = by_dt.get(bar['dt'] - timedelta(minutes=1))
         if previous is None:
             continue
-        crossed = (bar['high'] > threshold and previous['high'] < threshold if side == 'LONG'
-                   else bar['low'] < threshold and previous['low'] > threshold)
+        # 做多以前一分鐘曾在下方、本分鐘到上方；做空方向相反，近似實機穿越。
+        crossed = (bar['high'] > threshold and previous['low'] < threshold if side == 'LONG'
+                   else bar['low'] < threshold and previous['high'] > threshold)
         if crossed:
             entry_idx = idx
             break
@@ -373,6 +376,8 @@ def main(argv=None):
             early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == 'LONG' else SHORT_EARLY_BREAKOUT_PERCENT
             emit(f'{side}: 早盤突破點={early_point!r} 早盤突破幅度%={early_percent!r}（9 代表免除早盤突破資格，幅度不作用）')
         emit('前一根須為上一分鐘；本根 high/low 突破，以門檻上/下方 1 tick 固定入場（含跳空）。')
+        emit('LONG: 前一分鐘 low < 突破點、本分鐘 high > 突破點，視為實機向上穿越的分 K 近似。')
+        emit('SHORT: 前一分鐘 high > 突破點、本分鐘 low < 突破點，視為實機向下穿越的分 K 近似。')
         emit('入場棒以 high/low 檢查風控；後續棒跳空停損停利以 open 成交；同棒雙觸及採停損優先。')
         if not reports:
             emit('指定範圍內沒有日期報表。')
