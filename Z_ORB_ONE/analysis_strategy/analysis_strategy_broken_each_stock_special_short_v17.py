@@ -36,11 +36,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from esun_marketdata import EsunMarketdata
-from Z_ORB_ONE.stock_data import (
-    market_previous_close_indices,
-    selected_stocks,
-    total_stocks as lower_decision_stocks,
-)
+# 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
+HISTORICAL_CACHE_DATE = ""
+
+if not HISTORICAL_CACHE_DATE:
+    from Z_ORB_ONE.stock_data import (
+        market_previous_close_indices,
+        selected_stocks,
+        total_stocks as lower_decision_stocks,
+    )
+else:
+    market_previous_close_indices = {}
+    selected_stocks = []
+    lower_decision_stocks = []
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 STOCK_DATA_PATH = Path(__file__).resolve().parents[1] / 'stock_data.py'
@@ -316,6 +324,33 @@ def load_api_cache(cache_path: Path, stock_list: list[tuple], decision_stock_lis
         return minute_bars_by_symbol, index_minute_bars_by_key
     except Exception:
         return None
+
+
+def load_historical_api_cache(cache_path: Path) -> tuple[list[tuple], dict, dict]:
+    """僅讀取歷史 cache；失敗報錯，不回退 API，不使用當天股票資料。"""
+    try:
+        payload = json.loads(cache_path.read_text(encoding='utf-8'))
+        names = payload['stock_names']
+        if not isinstance(names, list) or not names or any(
+            not isinstance(name, str) or not name for name in names
+        ):
+            raise ValueError('stock_names 必須是非空的股票名稱清單')
+        stocks = dedupe_stock_list([[(name,) for name in names]])
+        raw_stocks = payload['minute_raw_by_symbol']
+        raw_indices = payload['index_minute_raw_by_key']
+        for name, in stocks:
+            if not isinstance(raw_stocks[name], list):
+                raise ValueError(f'{name} 分 K 必須是陣列')
+        for key in RESERVE_MARKET_INDICES:
+            if not isinstance(raw_indices[key], list):
+                raise ValueError(f'{key} 分 K 必須是陣列')
+        return (
+            stocks,
+            {name: parse_bars(raw_stocks[name]) for name, in stocks},
+            {key: parse_bars(raw_indices[key]) for key in RESERVE_MARKET_INDICES},
+        )
+    except Exception as exc:
+        raise ValueError(f'歷史 cache 載入失敗: {cache_path}；{exc}') from exc
 
 
 def save_api_cache(
@@ -1132,6 +1167,8 @@ def is_industry_market_filter_passed(
     strategy_type: str,
 ) -> bool:
     """LOWER 入場前，產業指數前一根已完成分 K 須嚴格低於作空門檻。"""
+    if HISTORICAL_CACHE_DATE:
+        return True  # cache 無個股產業對照，依歷史模式設定略過。
     index_key = get_industry_index_key(stock_item)
     if index_key is None:
         return False
@@ -2136,52 +2173,70 @@ def main() -> None:
     builtins.print()
     try:
         args = parse_args()
-        if STOCK_DATA_SOURCE == "S":
-            source_stock_list = selected_stocks
-            stock_source_name = 'selected_stocks'
-        elif STOCK_DATA_SOURCE == "T":
-            source_stock_list = lower_decision_stocks
-            stock_source_name = 'total_stocks'
-        else:
-            raise ValueError('STOCK_DATA_SOURCE 必須設定為 "S" 或 "T"')
-        raw_stock_list = STOCK_LIST or source_stock_list
-        if STOCK_LIST:
-            stock_source_name = 'STOCK_LIST'
-        stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
-        raw_analysis_stock_list = dedupe_stock_list([raw_stock_list])
-        analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
-        excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
-        analysis_stock_list = ensure_backtest_industry_index_metadata(analysis_stock_list)
-        eligible_names = {item[0] for item in analysis_stock_list}
-        stock_list = [item for item in stock_list if item[0] in eligible_names]
-        if EXCLUDED_INDUSTRY_CODES:
-            print(
-                f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
-                f'排除股票數={excluded_stock_count} '
-                f'剩餘統一回測股票數={len(analysis_stock_list)}'
-            )
-        print(
-            f'{stock_source_name}來源數={len(stock_list)}  '
-            f'統一回測股票池={len(analysis_stock_list)}'
-        )
-        if not analysis_stock_list:
-            print('[WARN] 沒有符合回測條件的股票，結束本次回測')
-            return
-
-        # 目標日期
-        if args.to:
+        if HISTORICAL_CACHE_DATE:
             try:
-                target_date = datetime.strptime(args.to, '%Y-%m-%d').date()
-            except ValueError:
-                print(f'[ERROR] 日期格式錯誤，請使用 YYYY-MM-DD: {args.to}', file=sys.stderr)
+                if not re.fullmatch(r'\d{8}', HISTORICAL_CACHE_DATE):
+                    raise ValueError('歷史日期必須為 YYYYMMDD')
+                target_date = datetime.strptime(HISTORICAL_CACHE_DATE, '%Y%m%d').date()
+                cache_path = get_api_cache_path(target_date)
+                analysis_stock_list, minute_bars_by_symbol, index_minute_bars_by_key = (
+                    load_historical_api_cache(cache_path)
+                )
+            except ValueError as exc:
+                print(f'[ERROR] {exc}', file=sys.stderr)
                 sys.exit(1)
+            lower_decision_stocks[:] = analysis_stock_list
+            cached = (minute_bars_by_symbol, index_minute_bars_by_key)
+            print(f'歷史 cache 模式：目標日期={target_date}，股票數={len(analysis_stock_list)}')
+            print('回測與 LOWER 比例判斷使用 cache 全部股票；忽略 STOCK_DATA_SOURCE、STOCK_LIST 與 --to。')
+            print('未使用 stock_data.py；略過產業指數進場過濾、產業排除及產業分類統計。')
         else:
-            target_date = date.today()
+            if STOCK_DATA_SOURCE == "S":
+                source_stock_list = selected_stocks
+                stock_source_name = 'selected_stocks'
+            elif STOCK_DATA_SOURCE == "T":
+                source_stock_list = lower_decision_stocks
+                stock_source_name = 'total_stocks'
+            else:
+                raise ValueError('STOCK_DATA_SOURCE 必須設定為 "S" 或 "T"')
+            raw_stock_list = STOCK_LIST or source_stock_list
+            if STOCK_LIST:
+                stock_source_name = 'STOCK_LIST'
+            stock_list = filter_stocks_by_excluded_industries(raw_stock_list)
+            raw_analysis_stock_list = dedupe_stock_list([raw_stock_list])
+            analysis_stock_list = filter_stocks_by_excluded_industries(raw_analysis_stock_list)
+            excluded_stock_count = len(raw_analysis_stock_list) - len(analysis_stock_list)
+            analysis_stock_list = ensure_backtest_industry_index_metadata(analysis_stock_list)
+            eligible_names = {item[0] for item in analysis_stock_list}
+            stock_list = [item for item in stock_list if item[0] in eligible_names]
+            if EXCLUDED_INDUSTRY_CODES:
+                print(
+                    f'已排除產業別: {EXCLUDED_INDUSTRY_CODES} '
+                    f'排除股票數={excluded_stock_count} '
+                    f'剩餘統一回測股票數={len(analysis_stock_list)}'
+                )
+            print(
+                f'{stock_source_name}來源數={len(stock_list)}  '
+                f'統一回測股票池={len(analysis_stock_list)}'
+            )
+            if not analysis_stock_list:
+                print('[WARN] 沒有符合回測條件的股票，結束本次回測')
+                return
 
-        cache_path = get_api_cache_path(target_date)
-        # total_stocks 持續提供 LOWER 比例判斷所需的分 K；交易股票池由上述來源設定決定。
-        minute_data_stock_list = dedupe_stock_list([analysis_stock_list, lower_decision_stocks])
-        cached = load_api_cache(cache_path, analysis_stock_list, lower_decision_stocks)
+            # 目標日期
+            if args.to:
+                try:
+                    target_date = datetime.strptime(args.to, '%Y-%m-%d').date()
+                except ValueError:
+                    print(f'[ERROR] 日期格式錯誤，請使用 YYYY-MM-DD: {args.to}', file=sys.stderr)
+                    sys.exit(1)
+            else:
+                target_date = date.today()
+
+            cache_path = get_api_cache_path(target_date)
+            # total_stocks 持續提供 LOWER 比例判斷所需的分 K；交易股票池由上述來源設定決定。
+            minute_data_stock_list = dedupe_stock_list([analysis_stock_list, lower_decision_stocks])
+            cached = load_api_cache(cache_path, analysis_stock_list, lower_decision_stocks)
         if cached is not None:
             minute_bars_by_symbol, index_minute_bars_by_key = cached
             print(f'已載入API快取: {cache_path.name}')
