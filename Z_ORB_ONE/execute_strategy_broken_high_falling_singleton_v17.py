@@ -103,8 +103,9 @@ ENTRY_ORDER_QUANTITY_SIGNAL = 1 # signal long/short 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
-LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例需嚴格小於此值，即下限 < 比例 < 上限
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 67.0 # 同一比例需嚴格小於此值，即下限 < 比例 < 上限
+LOWER_EXIT_PERCENT_THRESHOLD = 30.0
 
 IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
 IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.6 # IX0001 反彈失效門檻：LOWER_STRATEGY_DECISION 的最新有效即時值須維持在此水準以下
@@ -125,6 +126,7 @@ MARKET_INDEX_FUTURE_TOLERANCE_SECONDS = 1.0  # 容許供應商與本機最多 1 
 MARKET_INDEX_CRITICAL_WAIT_SECONDS = 13.0  # 關鍵判斷資料逾時時，最多等待既有背景輪次恢復為新鮮資料
 INDUSTRY_INDEX_STALE_SECONDS = 20.0  # 產業指數配合每分鐘四輪 REST 查詢
 QUOTE_ROUND_INTERVAL_SECONDS = 15.0
+LOWER_EXIT_CHECK_QUOTE_ROUNDS = 4
 INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 2000
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
@@ -148,16 +150,6 @@ MARKET_INDEX_REST_STOP_EVENT = threading.Event()
 MARKET_INDEX_REST_FATAL_EVENT = threading.Event()
 MARKET_REVERSAL_STOP_EVENT = threading.Event()
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
-POSITION_MARKET_REVERSAL_EVENT = threading.Event()
-POSITION_MARKET_REVERSAL_LOCK = threading.Lock()
-POSITION_MARKET_REVERSAL_STATE: Dict[str, Any] = {
-    "triggered": False,
-    "trigger_time": None,
-    "index_key": None,
-    "index_value": None,
-    "threshold": None,
-    "strategy_type": None,
-}
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_LOWER = 2
 stock_data.entry_mode = ENTRY_MODE_NO_TRADE
@@ -604,6 +596,8 @@ def time_tuple_to_minutes(value: tuple[int, int], name: str) -> int:
 
 
 def validate_market_reversal_time_config() -> None:
+    if not 0 <= LOWER_EXIT_PERCENT_THRESHOLD <= 100:
+        raise ValueError("LOWER_EXIT_PERCENT_THRESHOLD 必須介於 0 與 100")
     lower_strategy_early_breakout_deadline_hm = (
         LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
         + LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
@@ -1118,64 +1112,6 @@ def update_market_strategy_decision_gate_state(market_key: str, index_value: flo
             )
 
 
-def update_position_market_reversal_state(
-    market_key: str,
-    index_value: float,
-    event_time: Any,
-) -> None:
-    """模式確定後，以即時指數判斷是否須封鎖進場並平掉非獨立策略持倉。"""
-    if market_key not in MARKET_GATE_INDEX_KEYS or POSITION_MARKET_REVERSAL_EVENT.is_set():
-        return
-
-    now_local = now_tpe()
-    entry_mode = get_current_entry_mode()
-    if entry_mode != ENTRY_MODE_LOWER:
-        return
-    strategy_type = STRATEGY_LOWER
-    start_time = ENTRY_CHECK_START_TIME_LOWER
-    end_time = FORCE_CLOSE_TIME_LOWER
-    threshold_percent = get_strategy_decision_rebound_percent(market_key)
-    comparison_text = ">="
-
-    now_hm = (now_local.hour, now_local.minute)
-    if now_hm < start_time or now_hm >= end_time or threshold_percent is None:
-        return
-
-    previous_close = market_previous_close_indices.get(market_key, {}).get("previous_close")
-    try:
-        previous_close_float = float(previous_close)
-        index_value_float = float(index_value)
-    except (TypeError, ValueError):
-        return
-    if previous_close_float <= 0:
-        return
-
-    threshold = previous_close_float * (1 - threshold_percent / 100.0)
-    triggered = index_value_float >= threshold
-    if not triggered:
-        return
-
-    with POSITION_MARKET_REVERSAL_LOCK:
-        if POSITION_MARKET_REVERSAL_STATE["triggered"]:
-            return
-        trigger_time = event_time or now_local.isoformat()
-        POSITION_MARKET_REVERSAL_STATE.update({
-            "triggered": True,
-            "trigger_time": trigger_time,
-            "index_key": market_key,
-            "index_value": index_value_float,
-            "threshold": threshold,
-            "strategy_type": strategy_type,
-        })
-        POSITION_MARKET_REVERSAL_EVENT.set()
-
-    print(
-        f"[MARKET_REVERSAL] {now_local.strftime('%H:%M:%S')} {market_key} "
-        f"index={index_value_float:.2f} {comparison_text} threshold={threshold:.2f}，"
-        "封鎖今日新進場並準備平掉非獨立策略持倉"
-    )
-
-
 def get_market_index_snapshot(index_key: str) -> Dict[str, Any]:
     with MARKET_INDEX_STATE_LOCK:
         return dict(MARKET_INDEX_STATE.get(index_key, {}))
@@ -1415,13 +1351,18 @@ def calculate_percent(numerator: int, denominator: int) -> float:
 def summarize_lower_strategy_decision_candidates(
     states: Dict[str, Dict[str, Any]],
     realtime_sdk: EsunMarketdata,
+    completed_trade_matches: Optional[Dict[str, bool]] = None,
+    current_prices: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """僅在模式決策時對 total_stocks 取價一次；無效資料不納入分母。"""
+    """以去重後 total_stocks 為固定分母；已停利算符合、已停損算不符。"""
     candidate_count = 0
     decline_count = 0
     data_missing_count = 0
 
     seen_symbols = set()
+    completed_trade_matches = completed_trade_matches or {}
+    current_prices = current_prices or {}
+    states_by_symbol = {state.get("symbol_code_with_suf"): state for state in states.values()}
     quote_request_count = 0
     for stock_item in total_stocks:
         symbol_name = stock_item[0]
@@ -1429,21 +1370,28 @@ def summarize_lower_strategy_decision_candidates(
         if symbol_code in seen_symbols:
             continue
         seen_symbols.add(symbol_code)
+        if symbol_code in completed_trade_matches:
+            candidate_count += 1
+            decline_count += int(completed_trade_matches[symbol_code])
+            continue
 
         try:
             yesterday_close = float(stock_item[5])
-            state = next((item for item in states.values() if item.get("symbol_code_with_suf") == symbol_code), None)
+            state = states_by_symbol.get(symbol_code)
             if state is not None and state.get("limit_down_price"):
                 limit_down = float(state["limit_down_price"])
             else:
                 # 僅供 LOWER 比例判斷：依昨收九折並向上對齊 tick 推算跌停價。
                 limit_down = ceil_price_to_tick_value(yesterday_close * 0.90)
-            quote_request_count += 1
-            quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol_code.split(".")[0])
-            last_price = float(quote.get("lastPrice"))
+            if symbol_code in current_prices:
+                last_price = float(current_prices[symbol_code])
+            else:
+                quote_request_count += 1
+                quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol_code.split(".")[0])
+                last_price = float(quote.get("lastPrice"))
         except Exception as exc:
             data_missing_count += 1
-            print(f"[MODE] total_stocks {symbol_name} 取價資料不足，排除本次比例計算：{exc!r}")
+            print(f"[LOWER_PERCENT] total_stocks {symbol_name} 取價資料不足：{exc!r}")
             continue
 
         if not all(math.isfinite(value) and value > 0 for value in (yesterday_close, limit_down, last_price)):
@@ -1460,9 +1408,12 @@ def summarize_lower_strategy_decision_candidates(
         if is_price_in_entry_range(last_price, entry_lower_bound, entry_upper_bound):
             decline_count += 1
 
+    valid_count = candidate_count
+    candidate_count = len(seen_symbols)
     decline_percent = calculate_percent(decline_count, candidate_count)
     return {
         "candidate_count": candidate_count,
+        "valid_count": valid_count,
         "decline_count": decline_count,
         "decline_percent": decline_percent,
         "data_missing_count": data_missing_count,
@@ -1479,13 +1430,90 @@ def summarize_lower_strategy_decision_candidates(
     }
 
 
+def check_lower_percent_exit(
+    states: Dict[str, Dict[str, Any]],
+    realtime_sdk: EsunMarketdata,
+    entry_percent: float,
+    current_prices: Dict[str, float],
+) -> Optional[Dict[str, Any]]:
+    """相對決策時固定比例檢查下降百分點，資料不足時等待下一次檢核。"""
+    with ORDER_STATE_LOCK:
+        completed_trade_matches = {
+            state["symbol_code_with_suf"]: state.get("exit_reason") == "profit"
+            for state in states.values()
+            if (
+                not is_independent_strategy(state)
+                and state.get("exit_fully_filled")
+                and state.get("exit_fill_confirmed")
+                and state.get("exit_reason") in ("profit", "stop")
+            )
+        }
+    summary = summarize_lower_strategy_decision_candidates(
+        states, realtime_sdk, completed_trade_matches, current_prices,
+    )
+    exit_threshold = entry_percent - LOWER_EXIT_PERCENT_THRESHOLD
+    data_complete = summary["candidate_count"] > 0 and summary["data_missing_count"] == 0
+    triggered = data_complete and summary["decline_percent"] <= exit_threshold
+    trade_log(
+        "LOWER_PERCENT_EXIT_CHECK",
+        entry_percent=entry_percent,
+        decline_percent=summary["decline_percent"],
+        exit_threshold=exit_threshold,
+        candidate_count=summary["candidate_count"],
+        data_missing_count=summary["data_missing_count"],
+        quote_request_count=summary["quote_request_count"],
+        action="close_all_lower" if triggered else "continue" if data_complete else "skip_incomplete_data",
+    )
+    if not triggered:
+        return None
+    summary.update({
+        "entry_percent": entry_percent,
+        "exit_threshold": exit_threshold,
+        "trigger_time": now_tpe().isoformat(),
+    })
+    return summary
+
+
+def handle_lower_percent_exit(
+    states: Dict[str, Dict[str, Any]],
+    mysdk,
+    summary: Dict[str, Any],
+) -> None:
+    """封鎖當日 LOWER 新進場，待入場成交確認後平倉並持續重試失敗委託。"""
+    for state in states.values():
+        if is_independent_strategy(state) or state.get("traded"):
+            continue
+        try:
+            state.update({
+                "lower_percent_trigger_dt": summary["trigger_time"],
+                "lower_percent_trigger_percent": summary["decline_percent"],
+                "lower_percent_entry_percent": summary["entry_percent"],
+                "lower_percent_exit_threshold": summary["exit_threshold"],
+            })
+            if state.get("entry_order_pending") or state.get("exit_order_pending"):
+                atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+                continue
+            if state.get("in_position"):
+                if state.get("entry_fill_confirmed"):
+                    close_flat_position(state, mysdk, "lower_percent")
+            else:
+                state["traded"] = True
+                state["exit_reason"] = "lower_percent"
+            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        except Exception as exc:
+            trade_log(
+                "LOWER_PERCENT_EXIT_ERROR", error=True,
+                **state_symbol_fields(state), error_msg=repr(exc), action="retry_next_loop",
+            )
+
+
 def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
     return (
         f"數量門檻={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% < 比例 "
         f"< {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
         f"候選={summary.get('candidate_count', 0)} "
         f"下降={summary.get('decline_count', 0)} "
-        f"排除資料不足={summary.get('data_missing_count', 0)} "
+        f"資料不足={summary.get('data_missing_count', 0)} "
         f"報價查詢={summary.get('quote_request_count', 0)} "
         f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}%"
     )
@@ -1833,8 +1861,6 @@ def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool
             index_value=index_value,
             action="fail_closed",
         )
-    if is_fresh:
-        update_position_market_reversal_state(index_key, index_value, provider_time_raw)
     return True
 
 
@@ -1871,7 +1897,13 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
     market_index_rounds_per_minute = math.ceil(60 / MARKET_INDEX_REST_POLL_SECONDS)
     market_indices_per_minute = market_index_count * market_index_rounds_per_minute
 
-    total_per_minute = stock_and_industry_per_minute + market_indices_per_minute
+    lower_pool_count = len({get_pure_symbol(stock[0])[1] for stock in total_stocks})
+    lower_exit_checks_per_minute = 60 / (LOWER_EXIT_CHECK_QUOTE_ROUNDS * QUOTE_ROUND_INTERVAL_SECONDS)
+    lower_exit_quotes_per_minute = (
+        0 if states and all(is_signal_strategy(state) for state in states.values())
+        else math.ceil(lower_pool_count * lower_exit_checks_per_minute)
+    )
+    total_per_minute = stock_and_industry_per_minute + market_indices_per_minute + lower_exit_quotes_per_minute
     usage_percent = total_per_minute / INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE * 100
 
     print(
@@ -1883,6 +1915,7 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
             f"大盤 IX0001、IX0043：{market_index_count} × {market_index_rounds_per_minute} "
             f"= {market_indices_per_minute} 次／分鐘"
         )
+    print(f"LOWER 比例出場檢核：最多額外 {lower_exit_quotes_per_minute} 次／分鐘（本輪已取價與已停利停損標的免重查）")
     print(f"合計：約 {total_per_minute} 次／分鐘")
     print(f"連線限制：每分鐘 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} 次")
     print(
@@ -2026,42 +2059,6 @@ def calculate_entry_range_bounds(
 def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float) -> bool:
     """判斷價格是否落在入場區間內，含上下界。"""
     return lower_bound <= price <= upper_bound
-
-
-def is_market_reversal_blocked_at_entry(state: Dict[str, Any], strategy_type: str) -> bool:
-    """入場當下任一市場指數回到模式失效門檻即封鎖；缺資料亦封鎖。"""
-    for index_key in MARKET_GATE_INDEX_KEYS:
-        index_config = market_previous_close_indices.get(index_key, {})
-        previous_close = index_config.get("previous_close")
-        last_index_float, _age_seconds, stale_reason = get_fresh_market_index_value(index_key)
-        if last_index_float is None:
-            print(f"[{state['symbol_name']}] 市場模式入場檢查等待 {index_key} 指數資料：{stale_reason}")
-            return True
-        try:
-            previous_close_float = float(previous_close)
-        except (TypeError, ValueError):
-            print(f"[{state['symbol_name']}] 市場模式入場檢查 {index_key} 昨收指數設定錯誤: {previous_close}")
-            return True
-
-        if previous_close_float <= 0:
-            print(f"[{state['symbol_name']}] 市場模式入場檢查 {index_key} 昨收指數設定錯誤: {previous_close}")
-            return True
-
-        if strategy_type == STRATEGY_LOWER:
-            rebound_percent = get_strategy_decision_rebound_percent(index_key)
-            if rebound_percent is None:
-                print(f"[{state['symbol_name']}] 市場模式入場檢查 {index_key} lower 反彈門檻設定錯誤")
-                return True
-            threshold = previous_close_float * (1 - rebound_percent / 100.0)
-            if last_index_float >= threshold:
-                print(
-                    f"[{state['symbol_name']}] 市場模式入場檢查封鎖 LOWER："
-                    f"{index_key} last_index={last_index_float:.2f} >= rebound_threshold={threshold:.2f}"
-                )
-                return True
-        else:
-            return True
-    return False
 
 
 def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
@@ -2608,8 +2605,6 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
     if not entry_order_book_liquidity_pass(state, TRADE_SIDE_SHORT, last_px, "LOWER"):
         return False
 
-    if is_market_reversal_blocked_at_entry(state, STRATEGY_LOWER):
-        return 'BLOCKED'
     if not lower_industry_market_filter_pass(state):
         return False
 
@@ -2817,12 +2812,6 @@ def try_open_position(state: Dict[str, Any], mysdk):
             **state_symbol_fields(state),
             action="no_new_entry_existing_positions_continue",
         )
-        return
-    if POSITION_MARKET_REVERSAL_EVENT.is_set() and not is_independent_strategy(state):
-        state["traded"] = True
-        state["exit_reason"] = "market_reversal"
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        print(f"[{state['symbol_name']}] 大盤反轉已觸發，取消今日進場")
         return
 
     last_px = state.get("last_price", 0.0) # 現價
@@ -3261,49 +3250,6 @@ def endtime_close_position(state: Dict[str, Any], mysdk, exit_reason: str = "for
     )
 
 
-def apply_market_reversal_metadata(state: Dict[str, Any]) -> None:
-    state["exit_reason"] = "market_reversal"
-    state["market_reversal_trigger_time"] = POSITION_MARKET_REVERSAL_STATE.get("trigger_time")
-    state["market_reversal_index_key"] = POSITION_MARKET_REVERSAL_STATE.get("index_key")
-    state["market_reversal_index_value"] = POSITION_MARKET_REVERSAL_STATE.get("index_value")
-    state["market_reversal_threshold"] = POSITION_MARKET_REVERSAL_STATE.get("threshold")
-    state["market_reversal_strategy_type"] = POSITION_MARKET_REVERSAL_STATE.get("strategy_type")
-
-
-def handle_position_market_reversal(
-    states: Dict[str, Dict[str, Any]],
-    mysdk,
-) -> bool:
-    """大盤反轉後送出非獨立策略平倉委託；成交確認後才視為完成。"""
-    for state in states.values():
-        if is_independent_strategy(state):
-            continue
-
-        apply_market_reversal_metadata(state)
-
-        if state.get("traded"):
-            continue
-
-        if state.get("entry_order_pending"):
-            continue
-
-        if not state.get("in_position"):
-            state["traded"] = True
-            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-            continue
-
-        close_flat_position(state, mysdk, "market_reversal")
-        if state.get("exit_order_pending"):
-            print(f"[{state.get('symbol_name')}] 大盤反轉平倉委託已送出")
-
-    non_independent_states = {
-        symbol: state
-        for symbol, state in states.items()
-        if not is_independent_strategy(state)
-    }
-    return (not non_independent_states) or all_traded(non_independent_states)
-
-
 # ============ 主監控流程 ============
 def load_or_init_state(
     symbol: str,
@@ -3644,6 +3590,10 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     market_index_rest_fatal_announced = False
     market_mode_blocked_waiting_signal_announced = False
     last_order_results_update_monotonic = 0.0
+    lower_entry_percent = None
+    lower_percent_monitor_started = False
+    lower_percent_quote_rounds = 0
+    lower_percent_exit_summary = None
     while True:
         if MARKET_INDEX_REST_FATAL_EVENT.is_set():
             blocked_count = mark_unentered_states_blocked_after_market_index_rest_fatal(states)
@@ -3662,13 +3612,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     pending_orders=pending_orders,
                     action="block_all_new_entries_continue_existing_position_and_order_monitoring",
                 )
-
-        if POSITION_MARKET_REVERSAL_EVENT.is_set() and has_unfinished_non_independent_states(states):
-            if handle_position_market_reversal(states, mysdk):
-                if not has_unfinished_independent_states(states):
-                    print("[MARKET_REVERSAL] 所有標的均已完成大盤反轉處理，結束監控")
-                    return
-                print("[MARKET_REVERSAL] 非獨立策略標的已完成大盤反轉處理，獨立策略繼續監控")
 
         if MARKET_REVERSAL_STOP_EVENT.is_set():
             mark_non_independent_states_blocked(states, "market_mode_blocked")
@@ -3724,6 +3667,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 )
                 apply_entry_mode_to_states(states, entry_mode)
                 print_entry_mode_decision(entry_mode, gate_results, states)
+                if entry_mode == ENTRY_MODE_LOWER:
+                    lower_entry_percent = next(
+                        result["lower_decision_summary"]["decline_percent"]
+                        for result in gate_results if "lower_decision_summary" in result
+                    )
                 entry_mode_decided = True
                 if entry_mode == ENTRY_MODE_NO_TRADE:
                     # LOWER 已確定不成立；signal 不依賴大盤，停止後續背景取價。
@@ -3781,6 +3729,9 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             update_entry_fills_from_order_results(states, mysdk)
             last_order_results_update_monotonic = now_monotonic
 
+        if lower_percent_exit_summary is not None:
+            handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
+
         # 已全數完成交易則收工
         if all_traded(states):
             if all_force_close_time_reached:
@@ -3793,6 +3744,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         if round_should_update_realtime:
             update_required_industry_indices(states, realtime_sdk)
 
+        current_round_prices = {}
         # 輪詢
         for st in states.values():
             if st.get("traded"):
@@ -3801,6 +3753,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
             try:
                 need_persist_at_end = False
+                if lower_percent_exit_summary is not None and not is_independent_strategy(st):
+                    continue
 
                 if force_close_time_reached(st) and st.get("in_position") and not st.get("traded"):
                     try_close_position(st, mysdk)
@@ -3846,6 +3800,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["pre_last_price_time"] = st.get("last_price_time")
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
+                    current_round_prices[st["symbol_code_with_suf"]] = px
                     update_signal_early_breakout_state(
                         st,
                         (now_local.hour, now_local.minute),
@@ -3896,6 +3851,30 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             except Exception as e:
                 print(f"[{st.get('symbol_name', 'UNKNOWN')}] ⚠️ 單檔監控處理失敗，略過本輪：{e}")
                 continue
+
+        if (
+            round_should_update_realtime
+            and lower_entry_percent is not None
+            and lower_percent_exit_summary is None
+            and (now_tpe().hour, now_tpe().minute) < FORCE_CLOSE_TIME_LOWER
+        ):
+            if lower_percent_monitor_started:
+                lower_percent_quote_rounds += 1
+                if lower_percent_quote_rounds >= LOWER_EXIT_CHECK_QUOTE_ROUNDS:
+                    lower_percent_quote_rounds = 0
+                    try:
+                        lower_percent_exit_summary = check_lower_percent_exit(
+                            states, realtime_sdk, lower_entry_percent, current_round_prices,
+                        )
+                    except Exception as exc:
+                        trade_log("LOWER_PERCENT_EXIT_CHECK_ERROR", error=True, error_msg=repr(exc))
+                    if lower_percent_exit_summary is not None:
+                        handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
+            elif any(
+                not is_independent_strategy(state) and state.get("entry_order_no")
+                for state in states.values()
+            ):
+                lower_percent_monitor_started = True
 
         # print("========= 下一輪監控等待中... =========")
         now_local = now_tpe()
