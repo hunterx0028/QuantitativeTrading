@@ -37,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from esun_marketdata import EsunMarketdata
 # 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "20260929"
 
 if not HISTORICAL_CACHE_DATE:
     from Z_ORB_ONE.stock_data import (
@@ -83,6 +83,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 40.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 55.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
+LOWER_EXIT_PERCENT_THRESHOLD = 0.0 # 入場後每分鐘檢查；比例嚴格低於此值，全平倉且當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
@@ -1514,6 +1515,8 @@ def format_result_line(stock_name: str, date_str: str,
         return f'{stock_label} / {date_str} / {status_label}(已達獲利, 淨損益: {signed:+.2f})'
     if exit_reason == 'stop':
         return f'{stock_label} / {date_str} / {status_label}(已達停損, 淨損益: {signed:+.2f})'
+    if exit_reason == 'lower_percent':
+        return f'{stock_label} / {date_str} / {status_label}(LOWER 比例不足平倉, 淨損益: {signed:+.2f})'
     if exit_reason == 'close':
         return f'{stock_label} / {date_str} / {status_label}(收盤結算, 淨損益: {signed:+.2f})'
 
@@ -1620,10 +1623,11 @@ def summarize_lower_strategy_decision_candidates(
     stock_list: list[tuple],
     target_date: date,
     minute_bars_by_symbol: dict[str, dict[str, list]],
+    decision_dt: datetime | None = None,
 ) -> tuple[int, int]:
-    """統計 LOWER 模式判斷完成時，股票池與已落入 lower 入場區間的數量。"""
+    """以指定分鐘（預設模式判斷時間）的 close 統計 LOWER 區間比例，分母固定為完整股票池。"""
     decline_count = 0
-    decision_dt = datetime(
+    decision_dt = decision_dt or datetime(
         target_date.year,
         target_date.month,
         target_date.day,
@@ -1704,11 +1708,19 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
+    lower_percent_exit_text_by_date: dict[str, str] = {}
     grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
+        if result.get('exit_reason') == 'lower_percent':
+            trigger_dt = result.get('lower_percent_trigger_dt')
+            trigger_percent = result.get('lower_percent_trigger_percent')
+            if trigger_dt is not None and trigger_percent is not None:
+                lower_percent_exit_text_by_date[date_key] = (
+                    f'{trigger_percent:.2f}%({trigger_dt:%H:%M})  '
+                )
         strategy_type = signal.get('strategy_type', STRATEGY_NO_TRADE)
         grouped_results.setdefault((date_key, strategy_type), []).append((
             signal['name'],
@@ -1767,6 +1779,8 @@ def print_daily_optimization_results(
                     f'下降={decline_count}  '
                     f'{decline_percent:.2f}%  '
                 )
+                if strategy_type == STRATEGY_LOWER:
+                    lower_decision_text += lower_percent_exit_text_by_date.get(date_key, '')
                 if percent_rejected:
                     lower_decision_text += (
                         '原因=LOWER 股票比例不符 '
@@ -2167,6 +2181,64 @@ def evaluate_candidates(
 # Main
 # ---------------------------------------------------------------------------
 
+def apply_lower_percent_exit(
+    all_results: list,
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+) -> list:
+    """首筆實際入場後，以完整股票池逐分鐘判斷；觸發後當日不再入場。"""
+    results_by_date: dict[str, list] = {}
+    for signal, result in all_results:
+        results_by_date.setdefault(signal['date_str'], []).append((signal, result))
+    adjusted_results = []
+    for date_key, day_results in results_by_date.items():
+        first_entry = min(signal['entry_dt'] for signal, _ in day_results)
+        settlement_dt = first_entry.replace(
+            hour=INTRADAY_COMPARE_END_LOWER[0],
+            minute=INTRADAY_COMPARE_END_LOWER[1], second=0, microsecond=0,
+        )
+        trigger_dt = None
+        check_dt = first_entry.replace(second=0, microsecond=0)
+        # 即使已全部停損停利，仍檢查完整股票池，避免稍後重新入場。
+        while check_dt < settlement_dt:
+            total, decline = summarize_lower_strategy_decision_candidates(
+                lower_decision_stocks, first_entry.date(),
+                minute_bars_by_symbol, decision_dt=check_dt,
+            )
+            percent = calculate_percent(decline, total)
+            if percent < LOWER_EXIT_PERCENT_THRESHOLD:
+                trigger_dt = check_dt
+                print(
+                    f'{date_key} LOWER 比例出場觸發={check_dt:%H:%M} '
+                    f'比例={percent:.2f}% < {LOWER_EXIT_PERCENT_THRESHOLD:g}% '
+                    '（該分鐘收完後，下一根個股 K 的 open 平倉；當日不再入場）'
+                )
+                break
+            check_dt += timedelta(minutes=1)
+        for signal, result in day_results:
+            if trigger_dt is None:
+                adjusted_results.append((signal, result))
+                continue
+            if signal['entry_dt'] > trigger_dt:
+                continue
+            # 觸發當根已停損停利的部位保留；下一根 open 優先於其高低價。
+            if result['exit_dt'] > trigger_dt:
+                bars = minute_bars_by_symbol[signal['name']].get(date_key, [])
+                exit_bar = next(
+                    (bar for bar in bars if trigger_dt < bar['dt'] <= result['exit_dt']),
+                    None,
+                )
+                if exit_bar is not None:
+                    result = build_outcome_result(
+                        'lower_percent', signal['entry_price'], float(exit_bar['open']),
+                    )
+                    result['exit_dt'] = exit_bar['dt']
+                    result['lower_percent_trigger_dt'] = trigger_dt
+                    result['lower_percent_trigger_percent'] = percent
+                # 無後續 K 時保留原結算，不虛構可成交價格。
+            adjusted_results.append((signal, result))
+    return adjusted_results
+
+
 def main() -> None:
     OUTPUT_BUFFER.clear()
     builtins.print(f'開始時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
@@ -2313,6 +2385,7 @@ def main() -> None:
                 all_candidates,
                 print_results=False,
             )
+            results = apply_lower_percent_exit(results, minute_bars_by_symbol)
             return {
                 'best_results': results,
                 'market_start_gate_cache': market_start_gate_cache,
@@ -2397,6 +2470,9 @@ def main() -> None:
                 'LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100',
                 file=sys.stderr,
             )
+            sys.exit(1)
+        if not 0 <= LOWER_EXIT_PERCENT_THRESHOLD <= 100:
+            print('[ERROR] LOWER_EXIT_PERCENT_THRESHOLD 必須介於 0 與 100', file=sys.stderr)
             sys.exit(1)
         if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
             print('[ERROR] INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0', file=sys.stderr)
