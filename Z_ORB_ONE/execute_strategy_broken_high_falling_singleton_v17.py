@@ -92,7 +92,7 @@ SHORT_ENTRY_END_TIME = (10, 15)  # signal short 進場檢核截止時間（含�
 SHORT_EARLY_BREAKOUT_POINT = 9  # signal short 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
 SHORT_EARLY_BREAKOUT_PERCENT = 0.0  # 早盤門檻下方幅度；3 代表須跌破基準價的 97%，選項 9 時不作用
 SHORT_BREAKOUT_POINT = -1  # signal short 突破點：0 昨收、-1 昨低
-SHORT_FORCE_EXIT_TIME = (12, 50)  # signal short 收盤前強制平倉時間
+SHORT_FORCE_EXIT_TIME = (11, 50)  # signal short 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_SIGNAL_SHORT = 5.0 # signal short 停利百分比(%)
 OPTIMIZE_LOSS_PER_SIGNAL_SHORT = 3.0 # signal short 停損百分比(%)
 
