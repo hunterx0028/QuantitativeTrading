@@ -81,8 +81,8 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
-LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 67.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 30.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
 LOWER_EXIT_PERCENT_THRESHOLD = 30.0 # 相對 LOWER 模式成立時比例 N 的下降百分點；每分鐘比例 <= N - 此值時全平倉且當日不再入場
 
 
