@@ -21,6 +21,7 @@ import argparse
 import ast
 import configparser
 import json
+import math
 import re
 import sys
 import time
@@ -697,16 +698,27 @@ def parse_bars(raw_data: list) -> dict:
     bar_dict = {dt, open, high, low, close, volume, average}
     """
     bars_by_date: dict[str, list] = {}
+    invalid_count = 0
+    invalid_example = None
     for item in raw_data:
-        date_raw = item['date'][:19]  # '2026-04-02T09:00:00'
-        dt = datetime.strptime(date_raw, '%Y-%m-%dT%H:%M:%S')
+        # API 可能回傳缺少 OHLC 的資料列；不補造價格，也不讓單筆異常中斷整批。
+        try:
+            date_raw = item['date'][:19]  # '2026-04-02T09:00:00'
+            dt = datetime.strptime(date_raw, '%Y-%m-%dT%H:%M:%S')
+            prices = {key: float(item[key]) for key in ('open', 'high', 'low', 'close')}
+            if any(not math.isfinite(value) or value <= 0 for value in prices.values()):
+                raise ValueError('OHLC 必須為有限正數')
+            if prices['low'] > min(prices['open'], prices['close']) or prices['high'] < max(prices['open'], prices['close']):
+                raise ValueError('OHLC 高低價範圍不一致')
+        except (KeyError, TypeError, ValueError) as exc:
+            invalid_count += 1
+            if invalid_example is None:
+                invalid_example = f'{item!r}；原因={exc}'
+            continue
         date_key = dt.strftime('%Y-%m-%d')
         bar = {
             'dt': dt,
-            'open': float(item['open']),
-            'high': float(item['high']),
-            'low': float(item['low']),
-            'close': float(item['close']),
+            **prices,
             'volume': float(item.get('volume', 0) or 0),
             'average': float(item['average']) if item.get('average') is not None else (
                 float(item['turnover']) / float(item['volume'])
@@ -715,6 +727,9 @@ def parse_bars(raw_data: list) -> dict:
             ),
         }
         bars_by_date.setdefault(date_key, []).append(bar)
+
+    if invalid_count:
+        print(f'[WARN] 分 K 解析略過 {invalid_count}/{len(raw_data)} 筆無效資料（未補價）；首筆={invalid_example}', file=sys.stderr)
 
     # 每個日期內按時間升序
     for key in bars_by_date:
