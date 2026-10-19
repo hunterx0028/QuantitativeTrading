@@ -846,7 +846,7 @@ def build_market_index_daily_low_summary(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
 ) -> list[str]:
-    """建立每日彙總用的 IX0001/IX0043 前日低點與啟動低點文字。"""
+    """建立每日指數摘要；跌幅採截止棒及決策前一棒 close，相對昨收計算。"""
     rows = []
     for index_key, label in (
         ('TWSE:MARKET', 'IX0001'),
@@ -856,68 +856,37 @@ def build_market_index_daily_low_summary(
         previous_low = get_previous_trading_day_low(bars_by_date, target_date)
         previous_close = get_previous_trading_day_last_close(bars_by_date, target_date)
         drop_percent = get_strategy_decision_drop_percent(index_key)
-        rebound_percent = get_strategy_decision_rebound_percent(index_key)
         previous_low_text = f'{previous_low:.2f}' if previous_low is not None else 'N/A'
         previous_close_text = f'{previous_close:.2f}' if previous_close is not None else 'N/A'
-        if previous_close is None or drop_percent is None or rebound_percent is None:
+        decline_texts = []
+        today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
+        for time_hm, exclude_time in (
+            (LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE, False),
+            (LOWER_STRATEGY_DECISION, True),
+        ):
+            bar_dt = datetime.combine(target_date, datetime.min.time()).replace(
+                hour=time_hm[0], minute=time_hm[1],
+            )
+            if exclude_time:
+                bar_dt -= timedelta(minutes=1)
+            time_bar = next((bar for bar in today_bars if bar.get('dt') == bar_dt), None)
+            close = time_bar.get('close') if time_bar is not None else None
+            decline_texts.append(
+                f'{(previous_close - float(close)) / previous_close * 100:.2f}%'
+                if previous_close is not None and previous_close > 0 and close is not None
+                else 'N/A'
+            )
+        if previous_close is None or drop_percent is None:
             threshold_text = 'N/A'
-            break_low_text = 'N/A'
-            break_percent_text = 'N/A'
-            break_time_text = '--:--:--'
-            rebound_threshold_text = 'N/A'
-            rebound_high_text = 'N/A'
-            rebound_percent_text = 'N/A'
-            rebound_time_text = '--:--:--'
         else:
             threshold = previous_close * (1 - drop_percent / 100.0)
-            rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
             threshold_text = f'{threshold:.2f}'
-            rebound_threshold_text = f'{rebound_threshold:.2f}'
-            break_low = find_strategy_decision_threshold_break(
-                bars_by_date,
-                target_date,
-                threshold,
-            )
-            if break_low is None:
-                break_low_text = 'N/A'
-                break_percent_text = 'N/A'
-                break_time_text = '--:--:--'
-                rebound_high_text = 'N/A'
-                rebound_percent_text = 'N/A'
-                rebound_time_text = '--:--:--'
-            else:
-                break_low_value, break_low_dt = break_low
-                break_percent = ((previous_close - break_low_value) / previous_close) * 100.0
-                break_low_text = f'{break_low_value:.2f}'
-                break_percent_text = f'{break_percent:.2f}%'
-                break_time_text = break_low_dt.strftime('%H:%M:%S')
-                rebound = find_strategy_decision_rebound_to_threshold(
-                    bars_by_date,
-                    target_date,
-                    break_low_dt,
-                    rebound_threshold,
-                )
-                if rebound is None:
-                    rebound_high_text = 'N/A'
-                    rebound_percent_text = 'N/A'
-                    rebound_time_text = '--:--:--'
-                else:
-                    rebound_high, rebound_dt = rebound
-                    rebound_percent_value = ((rebound_high - break_low_value) / break_low_value) * 100.0
-                    rebound_high_text = f'{rebound_high:.2f}'
-                    rebound_percent_text = f'{rebound_percent_value:.2f}%'
-                    rebound_time_text = rebound_dt.strftime('%H:%M:%S')
         rows.append(
             f'{label} 昨低={previous_low_text}  '
             f'昨收={previous_close_text}  '
             f'門檻={threshold_text}  '
-            f'跌破low={break_low_text}  '
-            f'跌幅={break_percent_text}  '
-            f'時間={break_time_text}  '
-            f'反彈門檻={rebound_threshold_text}  '
-            f'反彈high={rebound_high_text}  '
-            f'反彈漲幅={rebound_percent_text}  '
-            f'反彈時間={rebound_time_text}'
+            f'跌幅1={decline_texts[0]}  '
+            f'跌幅2={decline_texts[1]}'
         )
     return rows
 
@@ -1702,6 +1671,17 @@ def print_daily_optimization_results(
                 and gate_status_by_date_key.get(date_key) == GATE_LOWER_PERCENT_REJECTED
             )
             if strategy_type == STRATEGY_LOWER or percent_rejected:
+                early_decision_dt = datetime.combine(target_date, datetime.min.time()).replace(
+                    hour=LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0],
+                    minute=LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1],
+                )
+                early_candidate_count, early_decline_count = summarize_lower_strategy_decision_candidates(
+                    lower_decision_stocks,
+                    target_date,
+                    minute_bars_by_symbol,
+                    decision_dt=early_decision_dt,
+                )
+                early_decline_percent = calculate_percent(early_decline_count, early_candidate_count)
                 candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
                     lower_decision_stocks,
                     target_date,
@@ -1710,8 +1690,8 @@ def print_daily_optimization_results(
                 decline_percent = calculate_percent(decline_count, candidate_count)
                 lower_decision_text = (
                     f'候選={candidate_count}  '
-                    f'下降={decline_count}  '
-                    f'{decline_percent:.2f}%  '
+                    f'時間1:[下降={early_decline_count}  {early_decline_percent:.2f}%]  '
+                    f'時間2:[下降={decline_count}  {decline_percent:.2f}%]  '
                 )
                 if strategy_type == STRATEGY_LOWER:
                     lower_decision_text += lower_percent_exit_text_by_date.get(date_key, '')
