@@ -18,7 +18,7 @@ from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 from esun_marketdata import EsunMarketdata
 
 import stock_data
-from stock_data import selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks, market_previous_close_indices, total_stocks
+from stock_data import selected_stocks, market_previous_close_indices, total_stocks
 
 
 class TeeStream:
@@ -43,8 +43,7 @@ class TeeStream:
 # ============ 參數/常數 ============
 # 已知對齊原則與刻意差異：
 # 1. 回測版以分 K 模擬策略，實機版以 REST 即時 quote 執行；資料粒度差異不視為策略不一致。
-# 2. LOWER 實機多了 best bid/ask 可成交性保護；回測分 K 無足夠委買委賣資料。
-# 3. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
+# 2. 保本與逐步獲利為實機版特有風控；回測維持固定停損/停利/收盤結算模型。
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
@@ -55,8 +54,6 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 # 單日策略前提：LOWER 每檔股票在當日只會有一個固定交易方向。
 STRATEGY_LOWER = 'LOWER'
-STRATEGY_SIGNAL_LONG = 'SIGNAL_LONG'
-STRATEGY_SIGNAL_SHORT = 'SIGNAL_SHORT'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
@@ -78,28 +75,9 @@ FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-LONG_ENTRY_START_TIME = (9, 55)  # signal long 進場檢核開始時間（含）
-LONG_ENTRY_END_TIME = (10, 30)  # signal long 進場檢核截止時間（含）
-LONG_EARLY_BREAKOUT_POINT = 1  # signal long 開始進場前曾突破：0 昨收、1 昨高、9 不須突破
-LONG_EARLY_BREAKOUT_PERCENT = 2.5  # 早盤門檻上方幅度；3 代表須突破基準價的 103%，選項 9 時不作用
-LONG_BREAKOUT_POINT = 1  # signal long 突破點：0 昨收、1 昨高
-LONG_FORCE_EXIT_TIME = (12, 50)  # signal long 收盤前強制平倉時間
-OPTIMIZE_PROFIT_PER_SIGNAL_LONG = 5.0 # signal long 停利百分比(%)
-OPTIMIZE_LOSS_PER_SIGNAL_LONG = 3.0 # signal long 停損百分比(%)
-
-SHORT_ENTRY_START_TIME = (9, 40)  # signal short 進場檢核開始時間（含）
-SHORT_ENTRY_END_TIME = (10, 15)  # signal short 進場檢核截止時間（含）
-SHORT_EARLY_BREAKOUT_POINT = 9  # signal short 開始進場前曾跌破：0 昨收、-1 昨低、9 不須跌破
-SHORT_EARLY_BREAKOUT_PERCENT = 0.0  # 早盤門檻下方幅度；3 代表須跌破基準價的 97%，選項 9 時不作用
-SHORT_BREAKOUT_POINT = -1  # signal short 突破點：0 昨收、-1 昨低
-SHORT_FORCE_EXIT_TIME = (11, 50)  # signal short 收盤前強制平倉時間
-OPTIMIZE_PROFIT_PER_SIGNAL_SHORT = 5.0 # signal short 停利百分比(%)
-OPTIMIZE_LOSS_PER_SIGNAL_SHORT = 3.0 # signal short 停損百分比(%)
-
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
-ENTRY_ORDER_QUANTITY_SIGNAL = 1 # signal long/short 每次進場下單數量
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
@@ -639,59 +617,10 @@ def validate_market_reversal_time_config() -> None:
         )
     if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
         raise ValueError("INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0")
-    lower_entry_start_hm = time_tuple_to_minutes(
+    time_tuple_to_minutes(
         ENTRY_CHECK_START_TIME_LOWER,
         "ENTRY_CHECK_START_TIME_LOWER",
     )
-    for strategy_name, start_time, end_time, force_time, breakout_point, early_breakout_point, early_breakout_percent in (
-        (
-            "SIGNAL_LONG",
-            LONG_ENTRY_START_TIME,
-            LONG_ENTRY_END_TIME,
-            LONG_FORCE_EXIT_TIME,
-            LONG_BREAKOUT_POINT,
-            LONG_EARLY_BREAKOUT_POINT,
-            LONG_EARLY_BREAKOUT_PERCENT,
-        ),
-        (
-            "SIGNAL_SHORT",
-            SHORT_ENTRY_START_TIME,
-            SHORT_ENTRY_END_TIME,
-            SHORT_FORCE_EXIT_TIME,
-            SHORT_BREAKOUT_POINT,
-            SHORT_EARLY_BREAKOUT_POINT,
-            SHORT_EARLY_BREAKOUT_PERCENT,
-        ),
-    ):
-        start_hm = time_tuple_to_minutes(start_time, f"{strategy_name}_ENTRY_START_TIME")
-        end_hm = time_tuple_to_minutes(end_time, f"{strategy_name}_ENTRY_END_TIME")
-        force_hm = time_tuple_to_minutes(force_time, f"{strategy_name}_FORCE_EXIT_TIME")
-        if start_hm <= lower_entry_start_hm:
-            raise ValueError(f"{strategy_name} 開始時間必須晚於 ENTRY_CHECK_START_TIME_LOWER")
-        if not (start_hm <= end_hm < force_hm):
-            raise ValueError(f"{strategy_name} 須符合開始時間 <= 截止時間 < 強制平倉時間")
-        valid_breakout_points = (0, 1) if strategy_name == "SIGNAL_LONG" else (0, -1)
-        valid_early_breakout_points = (0, 1, 9) if strategy_name == "SIGNAL_LONG" else (0, -1, 9)
-        if breakout_point not in valid_breakout_points:
-            raise ValueError(f"{strategy_name} 突破點設定不合法: {breakout_point!r}")
-        if early_breakout_point not in valid_early_breakout_points:
-            raise ValueError(f"{strategy_name} 早盤突破點設定不合法: {early_breakout_point!r}")
-        if early_breakout_point != 9 and (
-            type(early_breakout_percent) not in (int, float)
-            or not math.isfinite(early_breakout_percent)
-            or not 0 <= early_breakout_percent < 100
-        ):
-            raise ValueError(f"{strategy_name} 早盤突破百分比須大於等於 0 且小於 100")
-    if any(
-        not math.isfinite(value) or not 0 < value < 100
-        for value in (
-            OPTIMIZE_PROFIT_PER_SIGNAL_LONG,
-            OPTIMIZE_LOSS_PER_SIGNAL_LONG,
-            OPTIMIZE_PROFIT_PER_SIGNAL_SHORT,
-            OPTIMIZE_LOSS_PER_SIGNAL_SHORT,
-        )
-    ):
-        raise ValueError("signal 停損停利百分比須大於 0 且小於 100")
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -1442,8 +1371,7 @@ def check_lower_percent_exit(
             state["symbol_code_with_suf"]: state.get("exit_reason") == "profit"
             for state in states.values()
             if (
-                not is_independent_strategy(state)
-                and state.get("exit_fully_filled")
+                state.get("exit_fully_filled")
                 and state.get("exit_fill_confirmed")
                 and state.get("exit_reason") in ("profit", "stop")
             )
@@ -1481,7 +1409,7 @@ def handle_lower_percent_exit(
 ) -> None:
     """封鎖當日 LOWER 新進場，待入場成交確認後平倉並持續重試失敗委託。"""
     for state in states.values():
-        if is_independent_strategy(state) or state.get("traded"):
+        if state.get("traded"):
             continue
         try:
             state.update({
@@ -1773,8 +1701,6 @@ def print_entry_mode_decision(
 def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: int) -> None:
     persist_entry_mode_to_stock_data(entry_mode)
     for st in states.values():
-        if is_independent_strategy(st):
-            continue
         st["qty"] = get_entry_order_quantity()
         st["entry_time"] = now_tpe().isoformat()
         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
@@ -1878,7 +1804,6 @@ def get_required_industry_index_keys(states: Dict[str, Dict[str, Any]]) -> list[
             and not state.get("in_position")
             and not state.get("entry_order_pending")
             and not state.get("exit_order_pending")
-            and not is_signal_strategy(state)
             and state.get("market_index_key")
         )
     } - set(MARKET_GATE_INDEX_KEYS))
@@ -1899,10 +1824,7 @@ def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> N
 
     lower_pool_count = len({get_pure_symbol(stock[0])[1] for stock in total_stocks})
     lower_exit_checks_per_minute = 60 / (LOWER_EXIT_CHECK_QUOTE_ROUNDS * QUOTE_ROUND_INTERVAL_SECONDS)
-    lower_exit_quotes_per_minute = (
-        0 if states and all(is_signal_strategy(state) for state in states.values())
-        else math.ceil(lower_pool_count * lower_exit_checks_per_minute)
-    )
+    lower_exit_quotes_per_minute = math.ceil(lower_pool_count * lower_exit_checks_per_minute)
     total_per_minute = stock_and_industry_per_minute + market_indices_per_minute + lower_exit_quotes_per_minute
     usage_percent = total_per_minute / INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE * 100
 
@@ -2309,11 +2231,6 @@ def build_initial_state(
         "avg_price": None,
         "best_bid_price": None,
         "best_ask_price": None,
-        "signal_early_breakout_passed": False,
-        "signal_early_breakout_time": None,
-        "signal_early_breakout_price": 0.0,
-        "signal_early_breakout_threshold": 0.0,
-        "signal_early_breakout_backfilled": False,
         "traded": False,
         "in_position": False,
         "strategy_type": strategy_type,
@@ -2407,31 +2324,7 @@ def is_lower_mode() -> bool:
     return get_current_entry_mode() == ENTRY_MODE_LOWER
 
 
-def is_signal_long_strategy(state: Dict[str, Any] | None) -> bool:
-    if not state:
-        return False
-    return state.get("strategy_type") == STRATEGY_SIGNAL_LONG
-
-
-def is_signal_short_strategy(state: Dict[str, Any] | None) -> bool:
-    if not state:
-        return False
-    return state.get("strategy_type") == STRATEGY_SIGNAL_SHORT
-
-
-def is_signal_strategy(state: Dict[str, Any] | None) -> bool:
-    return is_signal_long_strategy(state) or is_signal_short_strategy(state)
-
-
-def is_independent_strategy(state: Dict[str, Any] | None) -> bool:
-    return is_signal_strategy(state)
-
-
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
-    if is_signal_long_strategy(state):
-        return OPTIMIZE_LOSS_PER_SIGNAL_LONG, OPTIMIZE_PROFIT_PER_SIGNAL_LONG
-    if is_signal_short_strategy(state):
-        return OPTIMIZE_LOSS_PER_SIGNAL_SHORT, OPTIMIZE_PROFIT_PER_SIGNAL_SHORT
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
     return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
@@ -2446,18 +2339,12 @@ def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
-    if is_signal_long_strategy(state):
-        return LONG_FORCE_EXIT_TIME
-    if is_signal_short_strategy(state):
-        return SHORT_FORCE_EXIT_TIME
     if is_lower_mode():
         return FORCE_CLOSE_TIME_LOWER
     return FORCE_CLOSE_TIME_LOWER
 
 
 def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
-    if is_signal_strategy(state):
-        return ENTRY_ORDER_QUANTITY_SIGNAL
     if is_lower_mode():
         return ENTRY_ORDER_QUANTITY_LOWER
     return 0
@@ -2493,10 +2380,6 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
-    if is_signal_long_strategy(state):
-        return LONG_ENTRY_END_TIME
-    if is_signal_short_strategy(state):
-        return SHORT_ENTRY_END_TIME
     if is_lower_mode():
         return ENTRY_CHECK_END_TIME_LOWER
     return LOWER_STRATEGY_DECISION
@@ -2564,172 +2447,10 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
     return True
 
 
-def get_signal_entry_settings(state: Dict[str, Any]) -> tuple[tuple[int, int], tuple[int, int], int, int, str, str]:
-    if is_signal_long_strategy(state):
-        return (
-            LONG_ENTRY_START_TIME,
-            LONG_ENTRY_END_TIME,
-            LONG_BREAKOUT_POINT,
-            LONG_EARLY_BREAKOUT_POINT,
-            TRADE_SIDE_LONG,
-            "SIGNAL_LONG",
-        )
-    if is_signal_short_strategy(state):
-        return (
-            SHORT_ENTRY_START_TIME,
-            SHORT_ENTRY_END_TIME,
-            SHORT_BREAKOUT_POINT,
-            SHORT_EARLY_BREAKOUT_POINT,
-            TRADE_SIDE_SHORT,
-            "SIGNAL_SHORT",
-        )
-    raise ValueError(f"未知 signal strategy_type: {state.get('strategy_type')!r}")
-
-
-def get_signal_threshold_price(state: Dict[str, Any], point: int, side: str) -> float:
-    if point == 0:
-        value = state.get("yesterday_close_price")
-    elif side == TRADE_SIDE_LONG and point == 1:
-        value = state.get("yesterday_high_price")
-    elif side == TRADE_SIDE_SHORT and point == -1:
-        value = state.get("yesterday_low_price")
-    else:
-        return 0.0
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return price if price > 0 else 0.0
-
-
-def get_signal_early_threshold_price(state: Dict[str, Any], early_point: int, side: str) -> float:
-    """只調整早盤資格門檻；選項 9 不使用突破百分比。"""
-    if early_point == 9:
-        return 0.0
-    threshold = get_signal_threshold_price(state, early_point, side)
-    if threshold <= 0:
-        return 0.0
-    early_percent = LONG_EARLY_BREAKOUT_PERCENT if side == TRADE_SIDE_LONG else SHORT_EARLY_BREAKOUT_PERCENT
-    return threshold * (1 + (1 if side == TRADE_SIDE_LONG else -1) * early_percent / 100)
-
-
-def signal_early_breakout_pass(state: Dict[str, Any], early_point: int, _side: str) -> bool:
-    if early_point == 9:
-        return True
-    return bool(state.get("signal_early_breakout_passed"))
-
-
-def update_signal_early_breakout_state(
-    state: Dict[str, Any],
-    now_hm: tuple[int, int],
-    allow_initial_backfill: bool = False,
-) -> None:
-    if not is_signal_strategy(state):
-        return
-    start_time, _end_time, _breakout_point, early_point, side, _label = get_signal_entry_settings(state)
-    if early_point == 9 or state.get("signal_early_breakout_passed"):
-        return
-    backfill_after_start = now_hm >= start_time and allow_initial_backfill
-    if now_hm >= start_time and not backfill_after_start:
-        return
-    threshold = get_signal_early_threshold_price(state, early_point, side)
-    if threshold <= 0:
-        return
-    try:
-        high_price = float(state.get("high_price"))
-        low_price = float(state.get("low_price"))
-    except (TypeError, ValueError):
-        return
-    if side == TRADE_SIDE_LONG:
-        passed = high_price > threshold
-        breakout_price = high_price
-    else:
-        passed = low_price < threshold
-        breakout_price = low_price
-    if not passed:
-        return
-
-    state["signal_early_breakout_passed"] = True
-    state["signal_early_breakout_time"] = now_tpe().isoformat()
-    state["signal_early_breakout_price"] = breakout_price
-    state["signal_early_breakout_threshold"] = threshold
-    state["signal_early_breakout_backfilled"] = backfill_after_start
-
-
-def format_signal_no_entry_reason(state: Dict[str, Any]) -> str:
-    start, end, point, early_point, side, label = get_signal_entry_settings(state)
-    direction = "突破" if side == TRADE_SIDE_LONG else "跌破"
-    if not signal_early_breakout_pass(state, early_point, side):
-        threshold = get_signal_early_threshold_price(state, early_point, side)
-        reason = (
-            f"開始進場時間 {start[0]:02d}:{start[1]:02d} 前未曾{direction}"
-            f"早盤門檻 {threshold:g}（選項={early_point}）"
-            if threshold > 0 else "早盤門檻資料不足，無法確認早盤突破資格"
-        )
-    else:
-        threshold = get_signal_threshold_price(state, point, side)
-        reason = state.get("signal_crossed_no_entry_reason") or state.get("signal_last_entry_check_reason") or (
-            f"進場區間內未取得有效的即時價格穿越檢核（門檻={threshold:g}）"
-        )
-    return f"{label} 未進場原因：{reason}；進場區間={start[0]:02d}:{start[1]:02d}~{end[0]:02d}:{end[1]:02d}，不追蹤"
-
-
-def entry_signal_price_check(state: Dict[str, Any]) -> bool | str:
-    """
-    signal long/short 實機進場條件。
-    回測用分 K 的門檻下一 tick 模擬成交；實機用 15 秒 quote 的 last_price 穿越門檻觸發，
-    實際成交價由成交回報 / get_order_results 校正。
-    """
-    now_local = now_tpe()
-    now_hm = (now_local.hour, now_local.minute)
-    start_time, end_time, breakout_point, early_point, side, label = get_signal_entry_settings(state)
-    if now_hm < start_time:
-        return False
-    if now_hm > end_time:
-        state["exit_reason"] = "signal_entry_window_expired"
-        return 'BLOCKED'
-    if not signal_early_breakout_pass(state, early_point, side):
-        return False
-
-    threshold = get_signal_threshold_price(state, breakout_point, side)
-    if threshold <= 0:
-        state["signal_last_entry_check_reason"] = "進場門檻資料不足或價位無效"
-        return False
-
-    try:
-        pre_last_px = float(state.get("pre_last_price"))
-        last_px = float(state.get("last_price"))
-    except (TypeError, ValueError):
-        state["signal_last_entry_check_reason"] = "前次或本次即時成交價資料不足，無法判斷穿越門檻"
-        return False
-    if pre_last_px <= 0 or last_px <= 0:
-        state["signal_last_entry_check_reason"] = "前次或本次即時成交價無效，無法判斷穿越門檻"
-        return False
-
-    if side == TRADE_SIDE_LONG:
-        crossed = pre_last_px <= threshold < last_px
-    else:
-        crossed = pre_last_px >= threshold > last_px
-    if not crossed:
-        state["signal_last_entry_check_reason"] = (
-            f"進場區間內未出現再次{'突破' if side == TRADE_SIDE_LONG else '跌破'}入場點 "
-            f"{threshold:g}；最後檢核前價={pre_last_px:g} 現價={last_px:g}"
-        )
-        return False
-
-    state["signal_last_entry_check_reason"] = "價格條件已通過，但未完成進場，請查閱前述委託或入場安全檢核紀錄"
-    state["signal_crossed_no_entry_reason"] = state["signal_last_entry_check_reason"]
-    state["entry_trigger_price"] = last_px
-    state["side"] = side
-    return True
-
-
 def entry_price_check(state: Dict[str, Any]) -> bool | str:
     """
     依 entry_mode 分派進場條件判斷。
     """
-    if is_signal_strategy(state):
-        return entry_signal_price_check(state)
     if MARKET_INDEX_REST_FATAL_EVENT.is_set():
         return 'BLOCKED'
     if get_current_entry_mode() == ENTRY_MODE_NO_TRADE:
@@ -2744,7 +2465,7 @@ def entry_price_check(state: Dict[str, Any]) -> bool | str:
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
-    if MARKET_INDEX_REST_FATAL_EVENT.is_set() and not is_signal_strategy(state):
+    if MARKET_INDEX_REST_FATAL_EVENT.is_set():
         state["traded"] = True
         state["exit_reason"] = "market_index_rest_fatal"
         state["entry_time"] = now_tpe().isoformat()
@@ -2835,11 +2556,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
             state["dealt_report_filled_shares"] = 0
             state["dealt_report_filled_value"] = 0.0
 
-            industry_filter_text = (
-                ""
-                if is_independent_strategy(state) or is_signal_strategy(state)
-                else format_industry_market_filter_pass_text(state)
-            )
+            industry_filter_text = format_industry_market_filter_pass_text(state)
             recalc_entry_position_prices(state)
             if side == TRADE_SIDE_SHORT:
                 print(f"[{state['symbol_name']}] 作空 已至入場時機，下單成功{industry_filter_text}")
@@ -3299,25 +3016,17 @@ def all_traded(states: Dict[str, Dict[str, Any]]) -> bool:
     return bool(states) and all(s.get("traded", False) for s in states.values())
 
 
-def has_unfinished_independent_states(states: Dict[str, Dict[str, Any]]) -> bool:
+def has_unfinished_lower_states(states: Dict[str, Dict[str, Any]]) -> bool:
     return any(
-        is_independent_strategy(state) and not state.get("traded")
+        not state.get("traded")
         for state in states.values()
     )
 
 
-def has_unfinished_non_independent_states(states: Dict[str, Dict[str, Any]]) -> bool:
-    return any(
-        (not is_independent_strategy(state)) and not state.get("traded")
-        for state in states.values()
-    )
-
-
-def mark_non_independent_states_blocked(states: Dict[str, Dict[str, Any]], reason: str) -> None:
+def mark_unentered_lower_states_blocked(states: Dict[str, Dict[str, Any]], reason: str) -> None:
     for state in states.values():
         if (
-            is_independent_strategy(state)
-            or state.get("traded")
+            state.get("traded")
             or state.get("in_position")
             or state.get("entry_order_pending")
             or state.get("exit_order_pending")
@@ -3336,7 +3045,6 @@ def mark_unentered_states_blocked_after_market_index_rest_fatal(
     for state in states.values():
         if (
             state.get("traded")
-            or is_signal_strategy(state)
             or state.get("in_position")
             or state.get("entry_order_pending")
             or state.get("exit_order_pending")
@@ -3350,24 +3058,6 @@ def mark_unentered_states_blocked_after_market_index_rest_fatal(
     return blocked_count
 
 
-def block_non_independent_states_for_disabled_entry_mode(
-    states: Dict[str, Dict[str, Any]],
-    entry_mode_name: str,
-) -> bool:
-    mark_non_independent_states_blocked(states, "entry_mode_disabled")
-    if has_unfinished_independent_states(states):
-        print(
-            f"[MODE] {entry_mode_name} 已停用，非獨立策略今日不執行，"
-            "獨立策略繼續監控"
-        )
-        return False
-    print(
-        f"[MODE] {entry_mode_name} 已停用，且無未完成獨立策略，"
-        "結束監控"
-    )
-    return True
-
-
 def initialize_states(
     stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]],
     realtime_sdk: EsunMarketdata,
@@ -3377,10 +3067,6 @@ def initialize_states(
     # 讀檔或初始化（程式啟動時先完成）
     states: Dict[str, Dict[str, Any]] = {}
     filtered_stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]] = []
-    is_signal_type = strategy_type in (
-        STRATEGY_SIGNAL_LONG,
-        STRATEGY_SIGNAL_SHORT,
-    )
     for symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple in stocks:
         if MARKET_REVERSAL_STOP_EVENT.is_set() and not strategy_type:
             print("[MODE] 市場模式已封鎖，停止初始化一般策略個股資料")
@@ -3390,12 +3076,8 @@ def initialize_states(
         normalized_industry_code = str(industry_code).zfill(2)
         market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
         if not market_index_config.get("symbol"):
-            if is_signal_type:
-                market_index_key = ""
-                market_index_config = {}
-            else:
-                print(f"[{symbolStr}] ⚠️ 無對應之產業別指數代碼，排除")
-                continue
+            print(f"[{symbolStr}] ⚠️ 無對應之產業別指數代碼，排除")
+            continue
 
         up_streak_days, down_streak_days = streak_tuple
 
@@ -3430,7 +3112,7 @@ def initialize_states(
             print(f"[{symbolStr}] ⚠️ 處置股，排除")
             continue
 
-        quantity = ENTRY_ORDER_QUANTITY_SIGNAL if is_signal_type else get_entry_order_quantity()
+        quantity = get_entry_order_quantity()
 
         st = load_or_init_state(
             symbolStr,
@@ -3448,14 +3130,6 @@ def initialize_states(
             strategy_type,
             force_rebuild=force_rebuild_state,
         )
-        if strategy_type == STRATEGY_SIGNAL_LONG:
-            st["side"] = TRADE_SIDE_LONG
-            st["qty"] = ENTRY_ORDER_QUANTITY_SIGNAL
-            st["entry_order_qty"] = ENTRY_ORDER_QUANTITY_SIGNAL
-        elif strategy_type == STRATEGY_SIGNAL_SHORT:
-            st["side"] = TRADE_SIDE_SHORT
-            st["qty"] = ENTRY_ORDER_QUANTITY_SIGNAL
-            st["entry_order_qty"] = ENTRY_ORDER_QUANTITY_SIGNAL
         st["industry_name"] = market_index_config.get("industry_name")
         st["market_index_symbol"] = market_index_config.get("symbol")
         st["market_index_name"] = market_index_config.get("name")
@@ -3470,58 +3144,6 @@ def initialize_states(
     return states
 
 
-def initialize_signal_states(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-) -> bool:
-    long_symbols = list(selected_limit_up_stocks)
-    short_symbols = list(selected_limit_down_stocks)
-    long_codes = {get_pure_symbol(symbol_tuple[0])[1] for symbol_tuple in long_symbols}
-    short_codes = {get_pure_symbol(symbol_tuple[0])[1] for symbol_tuple in short_symbols}
-    overlap_codes = sorted(long_codes & short_codes)
-    if overlap_codes:
-        raise ValueError(
-            "selected_limit_up_stocks 與 selected_limit_down_stocks 不可重複: "
-            + ", ".join(overlap_codes)
-        )
-
-    if not long_symbols and not short_symbols:
-        print("[SIGNAL] LOWER 未成立，且 signal long/short 無候選標的，結束監控")
-        return False
-
-    signal_states: Dict[str, Dict[str, Any]] = {}
-    if long_symbols:
-        signal_states.update(
-            initialize_states(
-                long_symbols,
-                realtime_sdk,
-                strategy_type=STRATEGY_SIGNAL_LONG,
-                force_rebuild_state=True,
-            )
-        )
-    if short_symbols:
-        signal_states.update(
-            initialize_states(
-                short_symbols,
-                realtime_sdk,
-                strategy_type=STRATEGY_SIGNAL_SHORT,
-                force_rebuild_state=True,
-            )
-        )
-
-    states.clear()
-    states.update(signal_states)
-    ACTIVE_ORDER_STATES.clear()
-    ACTIVE_ORDER_STATES.update(states)
-    print(
-        "[SIGNAL] LOWER 未成立，切換 signal_long_short 監控："
-        f"LONG={sum(1 for state in states.values() if is_signal_long_strategy(state))} "
-        f"SHORT={sum(1 for state in states.values() if is_signal_short_strategy(state))}"
-    )
-    print_rest_quote_rate_limit_estimate(states)
-    return bool(states)
-
-
 def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata):
     update_status = False
     realtime_quote_start_announced = False
@@ -3531,7 +3153,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     entry_check_end_announced = False
     entry_mode_decided = False
     market_index_rest_fatal_announced = False
-    market_mode_blocked_waiting_signal_announced = False
     last_order_results_update_monotonic = 0.0
     lower_entry_percent = None
     lower_percent_monitor_started = False
@@ -3557,14 +3178,9 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 )
 
         if MARKET_REVERSAL_STOP_EVENT.is_set():
-            mark_non_independent_states_blocked(states, "market_mode_blocked")
-            if not entry_mode_decided:
-                if not market_mode_blocked_waiting_signal_announced:
-                    market_mode_blocked_waiting_signal_announced = True
-                    print("[MODE] LOWER 市場模式已封鎖，等待 LOWER_STRATEGY_DECISION 後切換 signal")
-            elif not has_unfinished_independent_states(states):
-                print("[MODE] 市場模式已封鎖，維持 NO_TRADE 並結束監控")
-                return
+            mark_unentered_lower_states_blocked(states, "market_mode_blocked")
+            print("[MODE] 市場模式已封鎖，維持 NO_TRADE 並結束監控")
+            return
 
         now_local = now_tpe()
         log_market_index_rest_watchdog_once(now_local)
@@ -3617,23 +3233,22 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     )
                 entry_mode_decided = True
                 if entry_mode == ENTRY_MODE_NO_TRADE:
-                    # LOWER 已確定不成立；signal 不依賴大盤，停止後續背景取價。
+                    # LOWER 已確定不成立，停止後續背景取價並結束監控。
                     MARKET_INDEX_REST_STOP_EVENT.set()
                     trade_log(
                         "MARKET_INDEX_REST_POLLING_STOP_REQUESTED",
                         reason="lower_not_established",
-                        action="stop_market_index_polling_continue_signal",
+                        action="stop_market_index_polling_end_monitoring",
                     )
-                    entry_check_start_announced = False
-                    if not initialize_signal_states(states, realtime_sdk):
-                        return
+                    print("[MODE] LOWER 未成立，維持 NO_TRADE 並結束監控")
+                    return
         entry_check_start_time = get_entry_check_start_time()
         current_entry_mode = get_current_entry_mode()
         if (
             entry_mode_decided
             and current_entry_mode != ENTRY_MODE_NO_TRADE
             and is_entry_mode_enabled(current_entry_mode)
-            and has_unfinished_non_independent_states(states)
+            and has_unfinished_lower_states(states)
             and not entry_check_start_announced
             and (now_local.hour, now_local.minute) >= entry_check_start_time
         ):
@@ -3696,7 +3311,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
             try:
                 need_persist_at_end = False
-                if lower_percent_exit_summary is not None and not is_independent_strategy(st):
+                if lower_percent_exit_summary is not None:
                     continue
 
                 if force_close_time_reached(st) and st.get("in_position") and not st.get("traded"):
@@ -3738,17 +3353,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["avg_price"] = avg_price # 均價(即時API avgPrice)
                     st["best_bid_price"] = best_bid_price # 買一價
                     st["best_ask_price"] = best_ask_price # 賣一價
-                    signal_initial_quote = is_signal_strategy(st) and not st.get("last_price_time")
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["pre_last_price_time"] = st.get("last_price_time")
                     st["last_price"] = px  # 最新價格
                     st["last_price_time"] = now_tpe().isoformat()
                     current_round_prices[st["symbol_code_with_suf"]] = px
-                    update_signal_early_breakout_state(
-                        st,
-                        (now_local.hour, now_local.minute),
-                        allow_initial_backfill=signal_initial_quote,
-                    )
                     entry_check_end_time = get_entry_check_end_time(st)
                     if (
                         ((now_local.hour, now_local.minute) > entry_check_end_time)
@@ -3759,10 +3368,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         st["traded"] = True
                         st["entry_time"] = now_tpe().isoformat()
                         atomic_write_json(state_path(st.get("symbol_code_with_suf", "")), st)
-                        reason = (
-                            format_signal_no_entry_reason(st) if is_signal_strategy(st)
-                            else "檢核時間結束仍未進場，不追蹤"
-                        )
+                        reason = "檢核時間結束仍未進場，不追蹤"
                         print(f"[{st['symbol_name']}] {now_tpe().strftime('%H:%M:%S')} {reason}")
                         continue
 
@@ -3814,7 +3420,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     if lower_percent_exit_summary is not None:
                         handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
             elif any(
-                not is_independent_strategy(state) and state.get("entry_order_no")
+                state.get("entry_order_no")
                 for state in states.values()
             ):
                 lower_percent_monitor_started = True
@@ -3828,9 +3434,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         now = now_tpe()
         nxt = ceil_next_interval(now, 5) # 秒數在5的倍數輪巡
         sleep_sec = max(0.2, (nxt - now).total_seconds())
-        if MARKET_REVERSAL_STOP_EVENT.is_set() and has_unfinished_independent_states(states):
-            time.sleep(sleep_sec)
-        elif MARKET_REVERSAL_STOP_EVENT.wait(timeout=sleep_sec):
+        if MARKET_REVERSAL_STOP_EVENT.wait(timeout=sleep_sec):
             continue
         # print(f"========= 開始下一輪 {nxt.strftime('%Y-%m-%d %H:%M:%S')} =========")
 
