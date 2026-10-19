@@ -3,7 +3,7 @@ LOWER 回測策略
 
 回測以分 K 模擬策略，使用固定停損、停利與結算時間。
 市場條件：IX0001、IX0043 須通過早盤突破、昨收兩側檢查與反彈失效門檻；
-LOWER 候選股票比例固定使用 stock_data.py 的 total_stocks 判斷。
+LOWER 依序在四個決策時點檢核；啟動後每十分鐘比較股票池相對啟動價格的漲跌家數。
 時間及百分比門檻以本檔常數設定為準。
 
 個股入場條件
@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from esun_marketdata import EsunMarketdata
 # 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "20260810"
 
 if not HISTORICAL_CACHE_DATE:
     from Z_ORB_ONE.stock_data import (
@@ -82,16 +82,16 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比，可以為 0
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 30.0 # LOWER_STRATEGY_DECISION 時落入 lower 入場區間股票比例需嚴格大於此值，才成立 lower 模式
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 30.0 # 各啟動檢核時點的區間股票比例須嚴格大於此值
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
-LOWER_EXIT_PERCENT_THRESHOLD = 30.0 # 相對 LOWER 模式成立時比例 N 的下降百分點；每分鐘比例 <= N - 此值時全平倉且當日不再入場
+LOWER_EXIT_PERCENT_THRESHOLD = 30.0 # 啟動後每十分鐘的上漲家數比例嚴格超過此值時全平倉，當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
 LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE = (9, 21) # IX0001/IX0043 早盤須先向下突破各自 LOWER 門檻的截止分K棒，包含此時間
 LOWER_STRATEGY_DECISION = (9, 31) # LOWER 市場模式判斷截止分K棒的(時, 分)，不包含此時間
 STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_END_LOWER = (10, 1) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
+STRATEGY_END_LOWER = (10, 31) # lower 策略可進場截止分k棒的(時, 分)，包含此時間
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)  # lower 盤中停損/停利比對截止(時, 分)
 
@@ -863,6 +863,9 @@ def build_market_index_daily_low_summary(
         for time_hm, exclude_time in (
             (LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE, False),
             (LOWER_STRATEGY_DECISION, True),
+            ((9, 41), True),
+            ((9, 51), True),
+            ((10, 1), True),
         ):
             bar_dt = datetime.combine(target_date, datetime.min.time()).replace(
                 hour=time_hm[0], minute=time_hm[1],
@@ -886,7 +889,10 @@ def build_market_index_daily_low_summary(
             f'昨收={previous_close_text}  '
             f'門檻={threshold_text}  '
             f'跌幅1={decline_texts[0]}  '
-            f'跌幅2={decline_texts[1]}'
+            f'跌幅2={decline_texts[1]}  '
+            f'跌幅3={decline_texts[2]}  '
+            f'跌幅4={decline_texts[3]}  '
+            f'跌幅5={decline_texts[4]}'
         )
     return rows
 
@@ -945,6 +951,7 @@ def has_market_index_crossed_both_sides_of_previous_close(
     index_key: str,
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
+    decision_dt: datetime | None = None,
 ) -> bool:
     """指定起始時間至決策時間前，指數若曾嚴格位於昨收上下兩側即視為反轉。"""
     bars_by_date = index_minute_bars_by_key.get(index_key, {})
@@ -956,7 +963,9 @@ def has_market_index_crossed_both_sides_of_previous_close(
         LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
         + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
     )
-    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    decision_hm = (decision_dt.hour * 60 + decision_dt.minute) if decision_dt else (
+        LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    )
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
     has_traded_above = False
     has_traded_below = False
@@ -984,9 +993,12 @@ def has_market_index_crossed_both_sides_of_previous_close(
 def has_complete_market_decision_data(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
+    decision_dt: datetime | None = None,
 ) -> bool:
     """兩個市場指數在模式判斷區間內都需具備完整 OHLC 分 K，否則本日不交易。"""
-    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    decision_hm = (decision_dt.hour * 60 + decision_dt.minute) if decision_dt else (
+        LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    )
     for index_key in ('TWSE:MARKET', 'TPEX:MARKET'):
         bars_by_date = index_minute_bars_by_key.get(index_key, {})
         if get_previous_trading_day_last_close(bars_by_date, target_date) is None:
@@ -1015,8 +1027,9 @@ def is_market_index_rebound_level_maintained_at_strategy_decision(
     index_key: str,
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
+    decision_dt: datetime | None = None,
 ) -> bool:
-    """決策時間前最後 close 仍低於指數的反彈失效門檻時回傳 True。"""
+    """早盤跌破後至指定決策前，曾觸及反彈門檻即永久失效。"""
     rebound_percent = get_strategy_decision_rebound_percent(index_key)
     if rebound_percent is None:
         return False
@@ -1031,7 +1044,9 @@ def is_market_index_rebound_level_maintained_at_strategy_decision(
 
     rebound_threshold = previous_close * (1 - rebound_percent / 100.0)
     today_bars = bars_by_date.get(target_date.strftime('%Y-%m-%d'), [])
-    decision_hm = LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    decision_hm = (decision_dt.hour * 60 + decision_dt.minute) if decision_dt else (
+        LOWER_STRATEGY_DECISION[0] * 60 + LOWER_STRATEGY_DECISION[1]
+    )
     valid_bars = [
         bar
         for bar in today_bars
@@ -1043,6 +1058,25 @@ def is_market_index_rebound_level_maintained_at_strategy_decision(
     if not close_bars:
         return False
 
+    start_hm = (
+        LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
+        + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
+    )
+    drop_percent = get_strategy_decision_drop_percent(index_key)
+    if drop_percent is None:
+        return False
+    drop_threshold = previous_close * (1 - drop_percent / 100.0)
+    breakout_dt = next((
+        bar['dt'] for bar in sorted_bars
+        if bar['dt'].hour * 60 + bar['dt'].minute >= start_hm
+        and bar.get('low') is not None and float(bar['low']) < drop_threshold
+    ), None)
+    if breakout_dt is None or any(
+        bar['dt'] > breakout_dt and bar.get('high') is not None
+        and float(bar['high']) >= rebound_threshold
+        for bar in sorted_bars
+    ):
+        return False
     final_close = float(close_bars[-1]['close'])
     return final_close < rebound_threshold
 
@@ -1091,11 +1125,13 @@ def get_strategy_market_decision_gate_status(
     index_minute_bars_by_key: dict[str, dict[str, list]],
     minute_bars_by_symbol: dict[str, dict[str, list]],
     stock_list: list[tuple],
+    decision_dt: datetime | None = None,
 ) -> str:
     """依兩指數早盤跌破與 LOWER_STRATEGY_DECISION 前反彈水準決定最終模式。"""
     if not has_complete_market_decision_data(
         target_date,
         index_minute_bars_by_key,
+        decision_dt,
     ):
         return GATE_DATA_INCOMPLETE
 
@@ -1114,6 +1150,7 @@ def get_strategy_market_decision_gate_status(
             index_key,
             target_date,
             index_minute_bars_by_key,
+            decision_dt,
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ):
@@ -1124,6 +1161,7 @@ def get_strategy_market_decision_gate_status(
             index_key,
             target_date,
             index_minute_bars_by_key,
+            decision_dt,
         )
         for index_key in ('TWSE:MARKET', 'TPEX:MARKET')
     ):
@@ -1133,6 +1171,7 @@ def get_strategy_market_decision_gate_status(
         lower_decision_stocks,
         target_date,
         minute_bars_by_symbol,
+        decision_dt=decision_dt,
     )
     decline_percent = calculate_percent(decline_count, candidate_count)
     if not (
@@ -1142,6 +1181,33 @@ def get_strategy_market_decision_gate_status(
     ):
         return GATE_LOWER_PERCENT_REJECTED
     return GATE_LOWER_PASSED
+
+
+def get_lower_decision_times(target_date: date) -> list[datetime]:
+    """時間2至時間5的四次啟動機會，相隔十分鐘。"""
+    first_dt = datetime.combine(target_date, datetime.min.time()).replace(
+        hour=LOWER_STRATEGY_DECISION[0], minute=LOWER_STRATEGY_DECISION[1],
+    )
+    return [first_dt + timedelta(minutes=10 * offset) for offset in range(4)]
+
+
+def get_strategy_market_activation(
+    target_date: date,
+    index_minute_bars_by_key: dict[str, dict[str, list]],
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+    stock_list: list[tuple],
+) -> tuple[str, datetime | None]:
+    """依序檢核四次，只有股票比例不符時才保留下一次機會。"""
+    for decision_dt in get_lower_decision_times(target_date):
+        gate_status = get_strategy_market_decision_gate_status(
+            target_date, index_minute_bars_by_key, minute_bars_by_symbol,
+            stock_list, decision_dt,
+        )
+        if gate_status == GATE_LOWER_PASSED:
+            return gate_status, decision_dt
+        if gate_status != GATE_LOWER_PERCENT_REJECTED:
+            return gate_status, None
+    return GATE_LOWER_PERCENT_REJECTED, None
 
 
 def is_industry_market_filter_passed(
@@ -1301,6 +1367,7 @@ def has_enough_minute_bars_before_0930(today_bars: list) -> bool:
 def iter_entry_signal_lower_candidates(
     today_bars: list,
     ystats: dict,
+    activation_dt: datetime | None = None,
 ):
     """
     作空進場候選訊號：
@@ -1342,6 +1409,8 @@ def iter_entry_signal_lower_candidates(
         if sorted_idx + 1 >= len(indexed_bars):
             continue
         _next_original_idx, entry_bar, _entry_hm = indexed_bars[sorted_idx + 1]
+        if _entry_hm > end_hm or (activation_dt is not None and bar['dt'] <= activation_dt):
+            continue
         if entry_bar.get('low') is None:
             continue
 
@@ -1518,6 +1587,16 @@ def format_date_with_weekday(date_key: str) -> str:
     return f'{date_key}({weekday_labels[dt.weekday()]})'
 
 
+def get_completed_trade_matches(day_results: list, check_dt: datetime) -> dict[str, bool]:
+    """只採計指定分鐘前已實際停利或停損的交易。"""
+    return {
+        signal['name']: result['exit_reason'] == 'target'
+        for signal, result in day_results
+        if signal['entry_dt'] <= result['exit_dt'] <= check_dt
+        and result.get('exit_reason') in ('target', 'stop')
+    }
+
+
 def summarize_lower_strategy_decision_candidates(
     stock_list: list[tuple],
     target_date: date,
@@ -1525,7 +1604,8 @@ def summarize_lower_strategy_decision_candidates(
     decision_dt: datetime | None = None,
     completed_trade_matches: dict[str, bool] | None = None,
 ) -> tuple[int, int]:
-    """分母固定；已停利算符合、已停損算不符，其餘依指定分鐘 close 判斷區間。"""
+    """缺資料不計分母；已停利算符合、已停損算不符，其餘依指定分鐘 close 判斷。"""
+    candidate_count = 0
     decline_count = 0
     decision_dt = decision_dt or datetime(
         target_date.year,
@@ -1538,6 +1618,7 @@ def summarize_lower_strategy_decision_candidates(
     for stock_item in stock_list:
         stock_name = stock_item[0]
         if completed_trade_matches is not None and stock_name in completed_trade_matches:
+            candidate_count += 1
             decline_count += int(completed_trade_matches[stock_name])
             continue
         bars_by_date = minute_bars_by_symbol.get(stock_name, {})
@@ -1562,10 +1643,11 @@ def summarize_lower_strategy_decision_candidates(
             LOWER_ENTRY_RANGE_START_PERCENT,
             LOWER_ENTRY_RANGE_END_PERCENT,
         )
+        candidate_count += 1
         if is_price_in_entry_range(decision_close, entry_lower_bound, entry_upper_bound):
             decline_count += 1
 
-    return len(stock_list), decline_count
+    return candidate_count, decline_count
 
 
 def calculate_percent(numerator: int, denominator: int) -> float:
@@ -1575,12 +1657,95 @@ def calculate_percent(numerator: int, denominator: int) -> float:
     return (numerator / denominator) * 100.0
 
 
+def get_stock_close_at(
+    stock_name: str,
+    check_dt: datetime,
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+) -> float | None:
+    """取得該分鐘或之前最後一根有效收盤價。"""
+    bars_by_date = minute_bars_by_symbol.get(stock_name, {})
+    today_bars, yesterday_bars = get_target_and_yesterday(bars_by_date, check_dt.date())
+    if not today_bars or not yesterday_bars:
+        return None
+    time_bar = find_bar_at_or_before(today_bars, check_dt)
+    try:
+        close = float(time_bar['close']) if time_bar is not None else None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return close if close is not None and math.isfinite(close) and close > 0 else None
+
+
+def summarize_lower_price_movements(
+    baseline_prices: dict[str, float],
+    check_dt: datetime,
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+    completed_trade_matches: dict[str, bool],
+) -> tuple[int, int, int, int]:
+    """回傳有效母數、上漲、持平、下跌家數；停利排除，停損固定算上漲。"""
+    up_count = flat_count = down_count = 0
+    for stock_name, baseline_price in baseline_prices.items():
+        if stock_name in completed_trade_matches:
+            if not completed_trade_matches[stock_name]:
+                up_count += 1
+            continue
+        close = get_stock_close_at(stock_name, check_dt, minute_bars_by_symbol)
+        if close is None:
+            continue
+        if close > baseline_price:
+            up_count += 1
+        elif close < baseline_price:
+            down_count += 1
+        else:
+            flat_count += 1
+    return up_count + flat_count + down_count, up_count, flat_count, down_count
+
+
+def build_lower_tracking_snapshots(
+    activation_dt: datetime,
+    day_results: list,
+    minute_bars_by_symbol: dict[str, dict[str, list]],
+) -> list[dict]:
+    """建立啟動後每十分鐘的統計，於觸發全平倉或最後一筆交易平倉時停止。"""
+    if not day_results:
+        return []
+    baseline_prices = {}
+    for stock_item in lower_decision_stocks:
+        close = get_stock_close_at(stock_item[0], activation_dt, minute_bars_by_symbol)
+        if close is not None:
+            baseline_prices[stock_item[0]] = close
+    final_exit_dt = max(result['exit_dt'] for _, result in day_results)
+    settlement_dt = activation_dt.replace(
+        hour=INTRADAY_COMPARE_END_LOWER[0], minute=INTRADAY_COMPARE_END_LOWER[1],
+    )
+    snapshots = []
+    check_dt = activation_dt + timedelta(minutes=10)
+    while check_dt < settlement_dt and check_dt < final_exit_dt:
+        total, up_count, flat_count, down_count = summarize_lower_price_movements(
+            baseline_prices, check_dt, minute_bars_by_symbol,
+            get_completed_trade_matches(day_results, check_dt),
+        )
+        up_percent = calculate_percent(up_count, total)
+        snapshots.append({
+            'dt': check_dt,
+            'total': total,
+            'up_percent': up_percent,
+            'flat_percent': calculate_percent(flat_count, total),
+            'down_percent': calculate_percent(down_count, total),
+            'triggered': total > 0 and up_percent > LOWER_EXIT_PERCENT_THRESHOLD,
+        })
+        if snapshots[-1]['triggered']:
+            break
+        check_dt += timedelta(minutes=10)
+    return snapshots
+
+
 def print_daily_optimization_results(
     all_results: list,
     index_minute_bars_by_key: dict[str, dict[str, list]],
     minute_bars_by_symbol: dict[str, dict[str, list]],
     stock_list: list[tuple],
-    market_start_gate_cache: dict[date, str],
+    market_start_gate_cache: dict[date, tuple[str, datetime | None]],
+    tracking_snapshots_by_date: dict[str, list[dict]] | None = None,
 ) -> None:
     """印出固定參數下依日期彙總的進出場明細。"""
     print_results = filter_results_for_print_stats(all_results)
@@ -1593,7 +1758,7 @@ def print_daily_optimization_results(
     summary = summarize_results(print_results)
     gate_status_by_date_key = {
         current_date.strftime('%Y-%m-%d'): gate_status
-        for current_date, gate_status in market_start_gate_cache.items()
+        for current_date, (gate_status, _) in market_start_gate_cache.items()
     }
     strategy_type_by_gate_status = {
         GATE_LOWER_PASSED: STRATEGY_LOWER,
@@ -1603,7 +1768,7 @@ def print_daily_optimization_results(
     }
     lower_gate_date_keys = {
         current_date.strftime('%Y-%m-%d')
-        for current_date, gate_status in market_start_gate_cache.items()
+        for current_date, (gate_status, _) in market_start_gate_cache.items()
         if gate_status in (GATE_LOWER_PASSED, GATE_LOWER_PERCENT_REJECTED)
         and INCLUDE_LOWER_IN_PRINT_STATS
     }
@@ -1611,19 +1776,11 @@ def print_daily_optimization_results(
         print('固定參數下沒有交易結果。')
         return
 
-    lower_percent_exit_text_by_date: dict[str, str] = {}
     grouped_results: dict[tuple[str, str], list[tuple[str, str, datetime | None, datetime | None, float, float, float, bool]]] = {}
     for signal, result in print_results:
         if not signal or not result:
             continue
         date_key = signal['date_str']
-        if result.get('exit_reason') == 'lower_percent':
-            trigger_dt = result.get('lower_percent_trigger_dt')
-            trigger_percent = result.get('lower_percent_trigger_percent')
-            if trigger_dt is not None and trigger_percent is not None:
-                lower_percent_exit_text_by_date[date_key] = (
-                    f'{trigger_percent:.2f}%({trigger_dt:%H:%M})  '
-                )
         strategy_type = signal.get('strategy_type', STRATEGY_NO_TRADE)
         grouped_results.setdefault((date_key, strategy_type), []).append((
             signal['name'],
@@ -1653,6 +1810,11 @@ def print_daily_optimization_results(
         STRATEGY_NO_TRADE: 2,
     }
     for date_key in sorted(daily_date_keys, reverse=True):
+        day_results = [
+            (signal, result)
+            for signal, result in all_results
+            if signal and result and signal['date_str'] == date_key
+        ]
         date_group_keys = sorted(
             (key for key in daily_group_keys if key[0] == date_key),
             key=lambda key: (strategy_order.get(key[1], 99), key[1]),
@@ -1671,30 +1833,43 @@ def print_daily_optimization_results(
                 and gate_status_by_date_key.get(date_key) == GATE_LOWER_PERCENT_REJECTED
             )
             if strategy_type == STRATEGY_LOWER or percent_rejected:
-                early_decision_dt = datetime.combine(target_date, datetime.min.time()).replace(
+                _, activation_dt = market_start_gate_cache.get(target_date, (GATE_NO_TRADE, None))
+                decision_times = get_lower_decision_times(target_date)
+                early_dt = datetime.combine(target_date, datetime.min.time()).replace(
                     hour=LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0],
                     minute=LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1],
                 )
-                early_candidate_count, early_decline_count = summarize_lower_strategy_decision_candidates(
-                    lower_decision_stocks,
-                    target_date,
-                    minute_bars_by_symbol,
-                    decision_dt=early_decision_dt,
-                )
-                early_decline_percent = calculate_percent(early_decline_count, early_candidate_count)
-                candidate_count, decline_count = summarize_lower_strategy_decision_candidates(
-                    lower_decision_stocks,
-                    target_date,
-                    minute_bars_by_symbol,
-                )
-                decline_percent = calculate_percent(decline_count, candidate_count)
-                lower_decision_text = (
-                    f'候選={candidate_count}  '
-                    f'時間1:[下降={early_decline_count}  {early_decline_percent:.2f}%]  '
-                    f'時間2:[下降={decline_count}  {decline_percent:.2f}%]  '
-                )
-                if strategy_type == STRATEGY_LOWER:
-                    lower_decision_text += lower_percent_exit_text_by_date.get(date_key, '')
+                for time_number, snapshot_dt in enumerate([early_dt] + decision_times, start=1):
+                    if activation_dt is not None and snapshot_dt > activation_dt:
+                        break
+                    snapshot_candidate_count, snapshot_decline_count = summarize_lower_strategy_decision_candidates(
+                        lower_decision_stocks,
+                        target_date,
+                        minute_bars_by_symbol,
+                        decision_dt=snapshot_dt,
+                        completed_trade_matches=get_completed_trade_matches(day_results, snapshot_dt),
+                    )
+                    snapshot_decline_percent = calculate_percent(snapshot_decline_count, snapshot_candidate_count)
+                    lower_decision_text += (
+                        f'時間{time_number}:[下降={snapshot_decline_count}  '
+                        f'母數={snapshot_candidate_count}  {snapshot_decline_percent:.2f}%]'
+                    )
+                    lower_decision_text += '-進場  ' if snapshot_dt == activation_dt else '  '
+                if activation_dt is not None:
+                    snapshots = (
+                        tracking_snapshots_by_date.get(date_key, [])
+                        if tracking_snapshots_by_date is not None
+                        else build_lower_tracking_snapshots(activation_dt, day_results, minute_bars_by_symbol)
+                    )
+                    for snapshot in snapshots:
+                        time_number = 2 + int((snapshot['dt'] - decision_times[0]).total_seconds() // 600)
+                        lower_decision_text += (
+                            f'時間{time_number}:[母數={snapshot["total"]}  '
+                            f'+{snapshot["up_percent"]:.2f}% '
+                            f'{snapshot["flat_percent"]:.2f}% '
+                            f'-{snapshot["down_percent"]:.2f}%]'
+                        )
+                        lower_decision_text += '-平倉  ' if snapshot['triggered'] else '  '
                 if percent_rejected:
                     lower_decision_text += (
                         '原因=LOWER 股票比例不符 '
@@ -1780,6 +1955,7 @@ def find_trade_candidate_on_date(
     bars_by_date: dict,
     index_minute_bars_by_key: dict[str, dict[str, list]],
     strategy_type: str,
+    activation_dt: datetime | None = None,
 ):
     """找出單日候選交易；無訊號則回傳 None。"""
     stock_name = stock_item[0]
@@ -1799,7 +1975,7 @@ def find_trade_candidate_on_date(
     )
 
     if strategy_type == STRATEGY_LOWER:
-        entry_candidates = iter_entry_signal_lower_candidates(today_ordered, ystats)
+        entry_candidates = iter_entry_signal_lower_candidates(today_ordered, ystats, activation_dt)
         intraday_compare_end = INTRADAY_COMPARE_END_LOWER
     else:
         return None
@@ -1814,7 +1990,7 @@ def find_trade_candidate_on_date(
         ):
             continue
 
-        return build_trade_candidate(
+        candidate = build_trade_candidate(
             stock_name,
             get_stock_industry_code(stock_item),
             target_date,
@@ -1826,6 +2002,8 @@ def find_trade_candidate_on_date(
             strategy_type,
             intraday_compare_end,
         )
+        candidate['activation_dt'] = activation_dt
+        return candidate
 
     return None
 
@@ -1836,7 +2014,7 @@ def collect_trade_candidates(
     target_date: date,
     minute_bars_by_symbol: dict[str, dict[str, list]],
     index_minute_bars_by_key: dict[str, dict[str, list]],
-    market_start_gate_cache: dict[date, str],
+    market_start_gate_cache: dict[date, tuple[str, datetime | None]],
 ) -> list:
     """逐日依 LOWER 市場條件尋找候選交易。"""
     stock_name = stock_item[0]
@@ -1855,13 +2033,13 @@ def collect_trade_candidates(
     candidates = []
     for current_date in available_dates:
         if current_date not in market_start_gate_cache:
-            market_start_gate_cache[current_date] = get_strategy_market_decision_gate_status(
+            market_start_gate_cache[current_date] = get_strategy_market_activation(
                 current_date,
                 index_minute_bars_by_key,
                 minute_bars_by_symbol,
                 stock_list,
             )
-        gate_status = market_start_gate_cache[current_date]
+        gate_status, activation_dt = market_start_gate_cache[current_date]
         if gate_status != GATE_LOWER_PASSED:
             continue
         strategy_type = STRATEGY_LOWER
@@ -1872,6 +2050,7 @@ def collect_trade_candidates(
             bars_by_date,
             index_minute_bars_by_key,
             strategy_type,
+            activation_dt,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -1975,6 +2154,7 @@ def evaluate_candidates(
 
         signal = {
             'name': name,
+            'activation_dt': candidate.get('activation_dt'),
             'industry_code': industry_code,
             'date_str': date_str,
             'entry_dt': entry_dt,
@@ -2044,51 +2224,31 @@ def evaluate_candidates(
 def apply_lower_percent_exit(
     all_results: list,
     minute_bars_by_symbol: dict[str, dict[str, list]],
+    tracking_snapshots_by_date: dict[str, list[dict]] | None = None,
 ) -> list:
-    """以 LOWER 模式成立時比例為固定基準，首筆入場後逐分鐘檢查下降百分點。"""
+    """啟動後每十分鐘檢核上漲家數比例，超標則下一根 open 全平倉。"""
     results_by_date: dict[str, list] = {}
     for signal, result in all_results:
         results_by_date.setdefault(signal['date_str'], []).append((signal, result))
     adjusted_results = []
     for date_key, day_results in results_by_date.items():
         first_entry = min(signal['entry_dt'] for signal, _ in day_results)
-        entry_total, entry_decline = summarize_lower_strategy_decision_candidates(
-            lower_decision_stocks, first_entry.date(), minute_bars_by_symbol,
+        activation_dt = day_results[0][0].get('activation_dt') or first_entry.replace(
+            hour=LOWER_STRATEGY_DECISION[0], minute=LOWER_STRATEGY_DECISION[1],
+            second=0, microsecond=0,
         )
-        entry_percent = calculate_percent(entry_decline, entry_total)
-        exit_percent = entry_percent - LOWER_EXIT_PERCENT_THRESHOLD
-        settlement_dt = first_entry.replace(
-            hour=INTRADAY_COMPARE_END_LOWER[0],
-            minute=INTRADAY_COMPARE_END_LOWER[1], second=0, microsecond=0,
-        )
-        trigger_dt = None
-        check_dt = first_entry.replace(second=0, microsecond=0)
-        # 即使已全部停損停利，仍檢查完整股票池，避免稍後重新入場。
-        while check_dt < settlement_dt:
-            # 只採計截至該分鐘已實際停利／停損的交易，避免使用未來結果。
-            completed_trade_matches = {
-                signal['name']: result['exit_reason'] == 'target'
-                for signal, result in day_results
-                if signal['entry_dt'] <= result['exit_dt'] <= check_dt
-                and result.get('exit_reason') in ('target', 'stop')
-            }
-            total, decline = summarize_lower_strategy_decision_candidates(
-                lower_decision_stocks, first_entry.date(),
-                minute_bars_by_symbol, decision_dt=check_dt,
-                completed_trade_matches=completed_trade_matches,
+        snapshots = build_lower_tracking_snapshots(activation_dt, day_results, minute_bars_by_symbol)
+        if tracking_snapshots_by_date is not None:
+            tracking_snapshots_by_date[date_key] = snapshots
+        trigger_snapshot = next((snapshot for snapshot in snapshots if snapshot['triggered']), None)
+        trigger_dt = trigger_snapshot['dt'] if trigger_snapshot is not None else None
+        if trigger_snapshot is not None:
+            print(
+                f'{date_key} LOWER 比例出場觸發={trigger_dt:%H:%M} '
+                f'上漲比例=+{trigger_snapshot["up_percent"]:.2f}% '
+                f'> 平倉門檻={LOWER_EXIT_PERCENT_THRESHOLD:g}% '
+                '（該分鐘收完後，下一根個股 K 的 open 平倉；當日不再入場）'
             )
-            percent = calculate_percent(decline, total)
-            if percent <= exit_percent:
-                trigger_dt = check_dt
-                print(
-                    f'{date_key} LOWER 比例出場觸發={check_dt:%H:%M} '
-                    f'入場基準={entry_percent:.2f}% '
-                    f'下降門檻={LOWER_EXIT_PERCENT_THRESHOLD:g}個百分點 '
-                    f'比例={percent:.2f}% <= 平倉門檻={exit_percent:.2f}% '
-                    '（該分鐘收完後，下一根個股 K 的 open 平倉；當日不再入場）'
-                )
-                break
-            check_dt += timedelta(minutes=1)
         for signal, result in day_results:
             if trigger_dt is None:
                 adjusted_results.append((signal, result))
@@ -2108,9 +2268,8 @@ def apply_lower_percent_exit(
                     )
                     result['exit_dt'] = exit_bar['dt']
                     result['lower_percent_trigger_dt'] = trigger_dt
-                    result['lower_percent_trigger_percent'] = percent
-                    result['lower_percent_entry_percent'] = entry_percent
-                    result['lower_percent_exit_threshold'] = exit_percent
+                    result['lower_percent_trigger_percent'] = trigger_snapshot['up_percent']
+                    result['lower_percent_exit_threshold'] = LOWER_EXIT_PERCENT_THRESHOLD
                 # 無後續 K 時保留原結算，不虛構可成交價格。
             adjusted_results.append((signal, result))
     return adjusted_results
@@ -2239,7 +2398,7 @@ def main() -> None:
 
         def evaluate_one_window() -> dict:
             all_candidates: list = []
-            market_start_gate_cache: dict[date, str] = {}
+            market_start_gate_cache: dict[date, tuple[str, datetime | None]] = {}
             progress_idx = 0
             for stock_item in analysis_stock_list:
                 progress_idx += 1
@@ -2260,10 +2419,12 @@ def main() -> None:
                 all_candidates,
                 print_results=False,
             )
-            results = apply_lower_percent_exit(results, minute_bars_by_symbol)
+            tracking_snapshots_by_date: dict[str, list[dict]] = {}
+            results = apply_lower_percent_exit(results, minute_bars_by_symbol, tracking_snapshots_by_date)
             return {
                 'best_results': results,
                 'market_start_gate_cache': market_start_gate_cache,
+                'tracking_snapshots_by_date': tracking_snapshots_by_date,
             }
 
         lower_market_previous_close_reversal_start_hm = (
@@ -2363,6 +2524,7 @@ def main() -> None:
             minute_bars_by_symbol,
             analysis_stock_list,
             market_start_gate_cache,
+            best_window_result['tracking_snapshots_by_date'],
         )
     finally:
         builtins.print(f'結束時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
