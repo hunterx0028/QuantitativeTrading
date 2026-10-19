@@ -2514,54 +2514,9 @@ def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = N
     return ENTRY_CHECK_END_TIME_LOWER
 
 
-def entry_order_book_liquidity_pass(
-    state: Dict[str, Any],
-    side: str,
-    last_px: float,
-    strategy_label: str,
-) -> bool:
-    """確認市價進場方向的最佳一檔已跟上最新成交價；相等時允許進場。"""
-    now_text = now_tpe().strftime('%H:%M:%S')
-    if side == TRADE_SIDE_SHORT:
-        best_price_value = state.get("best_bid_price")
-        best_price_name = "best_bid"
-        blocked_comparison = "<"
-    elif side == TRADE_SIDE_LONG:
-        best_price_value = state.get("best_ask_price")
-        best_price_name = "best_ask"
-        blocked_comparison = ">"
-    else:
-        return False
-
-    try:
-        best_price = float(best_price_value)
-    except (TypeError, ValueError):
-        print(
-            f"[{state['symbol_name']}] {now_text} {strategy_label} "
-            f"無有效 {best_price_name}，暫不進場"
-        )
-        return False
-    if best_price <= 0:
-        return False
-
-    # 作空市價賣出會吃委買，買一低於最新成交價代表承接未跟上；
-    # 作多市價買進會吃委賣，賣一高於最新成交價代表供給未跟上。
-    blocked = best_price < last_px if side == TRADE_SIDE_SHORT else best_price > last_px
-    if blocked:
-        print(
-            f"[{state['symbol_name']}] {now_text} {strategy_label} 現價已落入入場區間但"
-            f"{best_price_name} 未跟上，暫不進場 "
-            f"last_price={last_px} {best_price_name}={best_price} "
-            f"blocked_when={best_price_name}{blocked_comparison}last_price"
-        )
-        return False
-    return True
-
-
 def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
     """
     lower 模式進場條件判斷；成立時以當下 last_price 寫入 entry_trigger_price。
-    實機特有：best_bid 檢查用於降低即時價已觸發但委買未跟上的成交風險，回測分 K 不具備此資料。
 
     回傳值：
       True      — 條件成立，應進場（side 由呼叫端設定）
@@ -2600,9 +2555,6 @@ def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
         LOWER_ENTRY_RANGE_END_PERCENT,
     )
     if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        return False
-
-    if not entry_order_book_liquidity_pass(state, TRADE_SIDE_SHORT, last_px, "LOWER"):
         return False
 
     if not lower_industry_market_filter_pass(state):
@@ -2765,16 +2717,7 @@ def entry_signal_price_check(state: Dict[str, Any]) -> bool | str:
         )
         return False
 
-    if not entry_order_book_liquidity_pass(state, side, last_px, label):
-        book_field = "best_ask_price" if side == TRADE_SIDE_LONG else "best_bid_price"
-        state["signal_last_entry_check_reason"] = (
-            f"已穿越入場門檻 {threshold:g}，但買賣一檔條件未通過；"
-            f"現價={last_px:g} {book_field}={state.get(book_field)}"
-        )
-        state["signal_crossed_no_entry_reason"] = state["signal_last_entry_check_reason"]
-        return False
-
-    state["signal_last_entry_check_reason"] = "價格與買賣一檔條件已通過，但未完成進場，請查閱前述委託或入場安全檢核紀錄"
+    state["signal_last_entry_check_reason"] = "價格條件已通過，但未完成進場，請查閱前述委託或入場安全檢核紀錄"
     state["signal_crossed_no_entry_reason"] = state["signal_last_entry_check_reason"]
     state["entry_trigger_price"] = last_px
     state["side"] = side
