@@ -31,16 +31,18 @@ from Z_ORB_ONE.stock_data import (
     selected_limit_down_stocks,
     selected_limit_up_stocks,
     selected_stocks,
+    total_stocks,
 )
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
+STOCK_LIST_SOURCE = "T"
 SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
-STRATEGY_START_LOWER = (9, 32) # lower 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_FOLLOW = (9, 32) # follow 個股進場開始分K棒的(時, 分)，包含此時間
-STRATEGY_START_CHANCE = (9, 32) # chance 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_LOWER = (9, 0) # lower 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_FOLLOW = (9, 0) # follow 個股進場開始分K棒的(時, 分)，包含此時間
+STRATEGY_START_CHANCE = (9, 0) # chance 個股進場開始分K棒的(時, 分)，包含此時間
 
 def normalize_config_paths(config: ConfigParser):
     cert_path = config.get("Cert", "Path", fallback="")
@@ -551,6 +553,11 @@ def build_report_items() -> list[dict]:
         )
         return report_items
 
+    stock_list_source = STOCK_LIST_SOURCE.strip().upper()
+    if stock_list_source not in {"S", "T"}:
+        raise ValueError("STOCK_LIST_SOURCE 須為 S（selected_stocks）或 T（total_stocks）")
+    stock_items = selected_stocks if stock_list_source == "S" else total_stocks
+
     report_items.extend(
         {
             "code": extract_stock_code(item[0]),
@@ -559,8 +566,11 @@ def build_report_items() -> list[dict]:
             "is_index": False,
             "strategy_start_times": default_strategy_start_times,
         }
-        for item in selected_stocks
+        for item in stock_items
     )
+    if stock_list_source == "T":
+        return report_items
+
     report_items.extend(
         {
             "code": extract_stock_code(item[0]),
