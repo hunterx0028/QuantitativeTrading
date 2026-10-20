@@ -18,7 +18,8 @@ SHORT_LIMIT_DOWN_DAYS = [99] # 分入 selected_limit_down_stocks 的實際連續
 
 TOP_RANK = 30 # 出現次數的排名，僅是打印用，和寫入 stock_data.py 無關
 
-MIN_REPEAT_COUNT = 4 # 從快取最新交易日起，股票不中斷出現的最少交易日數；設為 0 時取消此條件，供擴大測試樣本使用
+REPEAT_COUNT_MODE = "S" # S：從快取最新交易日起連續出現的交易日數；D：快取中累計出現的交易日數（不必連續）
+MIN_REPEAT_COUNT = 3 # 依 REPEAT_COUNT_MODE 篩選的最少天數；設為 0 時取消此條件，供擴大測試樣本使用
 
 EXCLUDED_INDUSTRY_CODES: list[str] = ["17"] # 排除 17-金融保險, 20-其他, 36-數位雲端, 31-其他電子業, 25-電腦及週邊設備業
 # "17", "20", "36", "31", "25"
@@ -336,7 +337,7 @@ def select_records_for_rank(ranked: list[tuple[tuple, int]]) -> tuple[list[tuple
 
 def select_records_for_repeat_count(ranked: list[tuple[tuple, int]]) -> tuple[list[tuple], str]:
     records = select_by_min_repeat_count(ranked, MIN_REPEAT_COUNT)
-    header_suffix = f"MIN_REPEAT_COUNT={MIN_REPEAT_COUNT}"
+    header_suffix = f"REPEAT_COUNT_MODE={REPEAT_COUNT_MODE}, MIN_REPEAT_COUNT={MIN_REPEAT_COUNT}"
     return records, header_suffix
 
 
@@ -528,6 +529,9 @@ def main() -> None:
     execution_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log(f"[INFO] 執行開始時間: {execution_start_time}")
 
+    if REPEAT_COUNT_MODE not in ("S", "D"):
+        raise ValueError(f"REPEAT_COUNT_MODE 必須是 S 或 D: {REPEAT_COUNT_MODE}")
+
     for setting_name, allowed_days in (
         ("LONG_LIMIT_UP_DAYS", LONG_LIMIT_UP_DAYS),
         ("SHORT_LIMIT_DOWN_DAYS", SHORT_LIMIT_DOWN_DAYS),
@@ -561,7 +565,10 @@ def main() -> None:
     consecutive_atr_filtered = filter_records_by_min_atr(consecutive_price_filtered)
     consecutive_filtered = filter_records_by_excluded_industries(consecutive_atr_filtered)
     rank_records, rank_header = select_records_for_rank(filtered_ranked_records)
-    repeat_records, repeat_header = select_records_for_repeat_count(consecutive_filtered)
+    repeat_ranked_records = (
+        consecutive_filtered if REPEAT_COUNT_MODE == "S" else filtered_ranked_records
+    )
+    repeat_records, repeat_header = select_records_for_repeat_count(repeat_ranked_records)
     # 額外輸出取消連續出現天數門檻的清單，供產業指數更新使用最大候選範圍。
     total_stock_records = select_by_min_repeat_count(consecutive_filtered, 0)
     updated_lines = build_result_lines(
