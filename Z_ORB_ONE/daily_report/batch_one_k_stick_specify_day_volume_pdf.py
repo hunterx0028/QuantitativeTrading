@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import math
 import sys
@@ -37,8 +38,9 @@ from Z_ORB_ONE.stock_data import (
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
-STOCK_LIST_SOURCE = "T"
-SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
+STOCK_LIST_SOURCE = "T"  # S：selected_stocks；T：total_stocks；C：指定日期快取 JSON 的 stock_names
+STOCK_LIST_CACHE_DATE = ""  # C 模式的股票清單檔案日期 YYYYMMDD，與 SPECIFIED_DATE 無關
+SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 STOCK_LIST_SOURCE；例如 ["5055", "2377"]
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
 STRATEGY_START_LOWER = (9, 0) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 0) # follow 個股進場開始分K棒的(時, 分)，包含此時間
@@ -554,8 +556,37 @@ def build_report_items() -> list[dict]:
         return report_items
 
     stock_list_source = STOCK_LIST_SOURCE.strip().upper()
-    if stock_list_source not in {"S", "T"}:
-        raise ValueError("STOCK_LIST_SOURCE 須為 S（selected_stocks）或 T（total_stocks）")
+    if stock_list_source not in {"S", "T", "C"}:
+        raise ValueError("STOCK_LIST_SOURCE 須為 S（selected_stocks）、T（total_stocks）或 C（快取 JSON）")
+    if stock_list_source == "C":
+        cache_date = STOCK_LIST_CACHE_DATE.strip()
+        if not re.fullmatch(r"[0-9]{8}", cache_date):
+            raise ValueError("STOCK_LIST_CACHE_DATE 需為 YYYYMMDD")
+        datetime.strptime(cache_date, "%Y%m%d")
+        cache_path = os.path.join(
+            BASE_DIR,
+            "analysis_strategy",
+            "analysis_json_cache",
+            f"analysis_strategy_broken_each_stock_special_short_api_cache_{cache_date}.json",
+        )
+        with open(cache_path, encoding="utf-8-sig") as cache_file:
+            cache_data = json.load(cache_file)
+        stock_names = cache_data.get("stock_names") if isinstance(cache_data, dict) else None
+        if not isinstance(stock_names, list) or not all(
+            isinstance(label, str) and label.strip() for label in stock_names
+        ):
+            raise ValueError(f"快取 JSON 的 stock_names 須為股票名稱字串清單: {cache_path}")
+        report_items.extend(
+            {
+                "code": extract_stock_code(label),
+                "label": label,
+                "atr_value": None,
+                "is_index": False,
+                "strategy_start_times": default_strategy_start_times,
+            }
+            for label in stock_names
+        )
+        return report_items
     stock_items = selected_stocks if stock_list_source == "S" else total_stocks
 
     report_items.extend(
