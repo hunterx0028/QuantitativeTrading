@@ -57,7 +57,7 @@ STRATEGY_LOWER = 'LOWER'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-PROTECT_PROFIT_SWITCH = False # 所有策略共用：False 不啟動獲利保護；True 啟動獲利保護
+PROTECT_PROFIT_SWITCH = True # 所有策略共用：False 不啟動獲利保護；True 啟動獲利保護
 PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
 PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
 
