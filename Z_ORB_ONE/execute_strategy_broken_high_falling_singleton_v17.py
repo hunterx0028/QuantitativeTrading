@@ -7,7 +7,8 @@ import math
 import shutil
 import io
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from concurrent.futures import Future, ThreadPoolExecutor
 from decimal import Decimal
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -105,8 +106,10 @@ AVG_MAX_NORMALIZED_SLOPE = 0.06  # 相對昨收 %／分鐘，須嚴格小於此�
 AVG_ENTRY_START_TIME = (10, 0)
 AVG_ENTRY_DEADLINE = (11, 0)
 AVG_MAX_ENTRY_DELAY_SECONDS = 10.0
-AVG_CANDLE_POLL_INTERVAL_SECONDS = 10.0  # total_stocks 93 檔約 558 次分K請求／分鐘
+AVG_CANDLE_POLL_SECOND = 15  # 每分鐘於此秒數取一次完整分K，例如 09:33:15
 AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS = 0.105  # 最多約 9.5 次請求／秒
+AVG_CANDLE_CONNECT_TIMEOUT_SECONDS = 3.0
+AVG_CANDLE_READ_TIMEOUT_SECONDS = 5.0
 AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
 AVG_MIN_MINUTE_BARS_BEFORE_0930 = 20
 AVG_STOP_LOSS_PERCENT = 2.0
@@ -181,11 +184,13 @@ LOWER_SESSION_STATE: Dict[str, Any] = {
 }
 AVG_SESSION_STATE: Dict[str, Any] = {
     "active": False,
-    "last_scan_started_monotonic": 0.0,
+    "last_scan_minute_key": None,
     "candidate_count": 0,
 }
 AVG_CANDLE_REQUEST_SCHEDULE_LOCK = threading.Lock()
 AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
+AVG_CANDLE_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="avg-candles")
+AVG_CANDLE_PENDING_FUTURES: Dict[Future, Dict[str, Any]] = {}
 
 
 def _log_value(value: Any) -> str:
@@ -765,16 +770,22 @@ def validate_avg_config() -> None:
         raise ValueError("AVG 目前每檔只允許一張")
     if not math.isfinite(AVG_MAX_ENTRY_DELAY_SECONDS) or AVG_MAX_ENTRY_DELAY_SECONDS <= 0:
         raise ValueError("AVG 下單最大延遲必須為有限正數")
-    if not math.isfinite(AVG_CANDLE_POLL_INTERVAL_SECONDS) or AVG_CANDLE_POLL_INTERVAL_SECONDS <= 0:
-        raise ValueError("AVG 分K輪詢間隔必須為有限正數")
+    if type(AVG_CANDLE_POLL_SECOND) is not int or not 0 <= AVG_CANDLE_POLL_SECOND <= 59:
+        raise ValueError("AVG_CANDLE_POLL_SECOND 必須介於 0~59")
+    for name, value in (
+        ("AVG_CANDLE_CONNECT_TIMEOUT_SECONDS", AVG_CANDLE_CONNECT_TIMEOUT_SECONDS),
+        ("AVG_CANDLE_READ_TIMEOUT_SECONDS", AVG_CANDLE_READ_TIMEOUT_SECONDS),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} 必須為有限正數")
     if (
         not math.isfinite(AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS)
         or AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS <= 0
         or len(get_avg_candidate_stocks()) * AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
-        >= AVG_CANDLE_POLL_INTERVAL_SECONDS
+        >= 60.0
     ):
-        raise ValueError("AVG 股票池無法在分K輪詢間隔內完成一次節流查詢")
-    projected_candle_requests = len(get_avg_candidate_stocks()) * 60.0 / AVG_CANDLE_POLL_INTERVAL_SECONDS
+        raise ValueError("AVG 股票池無法在 60 秒輪詢週期內完成一次節流查詢")
+    projected_candle_requests = len(get_avg_candidate_stocks())
     if projected_candle_requests > INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - 20:
         raise ValueError(
             f"AVG 分K輪詢預估 {projected_candle_requests:.0f} 次／分鐘，"
@@ -926,14 +937,33 @@ def fetch_avg_candle_response(state: Dict[str, Any], realtime_sdk: EsunMarketdat
         if delay > 0:
             time.sleep(delay)
         AVG_CANDLE_NEXT_REQUEST_MONOTONIC = time.monotonic() + AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
-    return get_stock_rest_client(realtime_sdk).intraday.candles(
-        symbol=state["symbol_code"], timeframe="1", sort="asc",
+
+    # esun_marketdata 2.2.0 的 BaseRest.request 使用 requests.get 且未提供 timeout，
+    # 因此這個 AVG 呼叫沿用 SDK REST client 的 URL／認證設定，直接加上有限的連線與讀取逾時。
+    rest_config = get_stock_rest_client(realtime_sdk).config
+    headers = {}
+    if rest_config.get("api_key"):
+        headers["X-API-KEY"] = rest_config["api_key"]
+    if rest_config.get("bearer_token"):
+        headers["Authorization"] = f"Bearer {rest_config['bearer_token']}"
+    if rest_config.get("sdk_token"):
+        headers["X-SDK-TOKEN"] = rest_config["sdk_token"]
+    response = requests.get(
+        f"{rest_config['base_url'].rstrip('/')}/intraday/candles/{state['symbol_code']}",
+        headers=headers,
+        params={"timeframe": "1", "sort": "asc"},
+        timeout=(AVG_CANDLE_CONNECT_TIMEOUT_SECONDS, AVG_CANDLE_READ_TIMEOUT_SECONDS),
     )
+    response.raise_for_status()
+    return response.json()
 
 
 def process_avg_candle_state(
     state: Dict[str, Any], response: Dict[str, Any], mysdk: SDK, now_local: datetime,
 ) -> None:
+    # AVG 進場委託送出後，成交及持倉風控交由主監控迴圈的即時報價處理。
+    if state.get("in_position") or state.get("entry_order_pending") or state.get("exit_order_pending"):
+        return
     if state.get("traded") and not (state.get("in_position") or state.get("entry_order_pending")):
         return
     try:
@@ -961,27 +991,6 @@ def process_avg_candle_state(
     state["minute_bars_before_0930"] = before_0930
     state["minute_bars_checked"] = True
     state["minute_bars_eligible"] = before_0930 >= AVG_MIN_MINUTE_BARS_BEFORE_0930
-
-    if state.get("in_position"):
-        # 分 K 高低價也納入觸發判斷；同一根K同時碰到停損與停利時，先按停損處理。
-        latest_bar = bars[-1]
-        state["last_price"] = latest_bar["high"]
-        if reached_stop_to_flat(state) or reached_stop_to_profit(state):
-            try_close_position(state, mysdk)
-        elif latest_bar["low"] <= state.get("profit_price", 0):
-            state["last_price"] = latest_bar["low"]
-            try_close_position(state, mysdk)
-            state["last_price"] = latest_bar["high"]
-            if state.get("in_position") and not state.get("exit_order_pending") and reached_stop_to_profit(state):
-                try_close_position(state, mysdk)
-        else:
-            state["last_price"] = latest_bar["close"]
-            try_close_position(state, mysdk)
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        return
-    if state.get("entry_order_pending"):
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        return
 
     if not state["minute_bars_eligible"]:
         mark_avg_state_traded(state, "insufficient_minute_bars_before_0930", count=before_0930)
@@ -1052,28 +1061,48 @@ def process_avg_candle_state(
 
 
 def process_avg_candle_round(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, mysdk: SDK) -> None:
+    # 先處理已完成的請求；未完成請求留在背景執行，不阻塞即時報價與持倉風控。
+    for future, state in list(AVG_CANDLE_PENDING_FUTURES.items()):
+        if not future.done():
+            continue
+        AVG_CANDLE_PENDING_FUTURES.pop(future, None)
+        try:
+            process_avg_candle_state(state, future.result(), mysdk, now_tpe())
+        except requests.RequestException as exc:
+            trade_log(
+                "AVG_CANDLES_REQUEST_RETRY",
+                error=True,
+                **state_symbol_fields(state),
+                error_msg=repr(exc),
+                action="keep_candidate_for_next_poll",
+            )
+        except Exception as exc:
+            trade_log("AVG_CANDIDATE_PROCESS_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
+            if not state.get("in_position") and not state.get("entry_order_pending"):
+                mark_avg_state_traded(state, "avg_candidate_processing_error", error=True, error_msg=repr(exc))
+
+    if AVG_CANDLE_PENDING_FUTURES:
+        return
+
     now_local = now_tpe()
     if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
         return
-    now_monotonic = time.monotonic()
-    if now_monotonic - AVG_SESSION_STATE["last_scan_started_monotonic"] < AVG_CANDLE_POLL_INTERVAL_SECONDS:
+    if now_local.second < AVG_CANDLE_POLL_SECOND:
         return
-    AVG_SESSION_STATE["last_scan_started_monotonic"] = now_monotonic
+    scan_minute_key = now_local.strftime("%Y-%m-%d %H:%M")
+    if AVG_SESSION_STATE["last_scan_minute_key"] == scan_minute_key:
+        return
+    AVG_SESSION_STATE["last_scan_minute_key"] = scan_minute_key
     pending_states = [
         state for state in states.values()
-        if not state.get("traded") or state.get("in_position") or state.get("entry_order_pending")
+        if not state.get("traded")
+        and not state.get("in_position")
+        and not state.get("entry_order_pending")
+        and not state.get("exit_order_pending")
     ]
-    with ThreadPoolExecutor(max_workers=12, thread_name_prefix="avg-candles") as pool:
-        futures = {pool.submit(fetch_avg_candle_response, state, realtime_sdk): state for state in pending_states}
-        for future in as_completed(futures):
-            state = futures[future]
-            try:
-                response = future.result()
-                process_avg_candle_state(state, response, mysdk, now_tpe())
-            except Exception as exc:
-                trade_log("AVG_CANDIDATE_PROCESS_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
-                if not state.get("in_position") and not state.get("entry_order_pending"):
-                    mark_avg_state_traded(state, "avg_candidate_processing_error", error=True, error_msg=repr(exc))
+    for state in pending_states:
+        future = AVG_CANDLE_EXECUTOR.submit(fetch_avg_candle_response, state, realtime_sdk)
+        AVG_CANDLE_PENDING_FUTURES[future] = state
 
 
 def print_entry_position_prices(state: Dict[str, Any]) -> None:
@@ -3895,9 +3924,14 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 states.update(avg_states)
                 ACTIVE_ORDER_STATES.clear()
                 ACTIVE_ORDER_STATES.update(states)
+                avg_mode_started_at = now_tpe()
                 AVG_SESSION_STATE.update({
                     "active": True,
-                    "last_scan_started_monotonic": 0.0,
+                    "last_scan_minute_key": (
+                        avg_mode_started_at.strftime("%Y-%m-%d %H:%M")
+                        if avg_mode_started_at.second >= AVG_CANDLE_POLL_SECOND
+                        else None
+                    ),
                     "candidate_count": len(states),
                 })
                 trade_log(
@@ -3912,10 +3946,10 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 print(
                     f"[MODE] 已切換 AVG，股票池={AVG_STOCK_DATA_SOURCE}、可監控={len(states)} 檔；"
                     f"初始化限價／當沖資格查詢最多 {len(avg_candidates)} 次；"
-                    f"分K輪詢間隔 {AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 秒，約 "
-                    f"{len(states) * 60 / AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 次／分鐘；"
+                    f"每分鐘第 {AVG_CANDLE_POLL_SECOND} 秒取分K，約 "
+                    f"{len(states)} 次／分鐘；"
                     f"行情額度 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE}/分鐘，另保留約 "
-                    f"{INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - len(states) * 60 / AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 次餘裕"
+                    f"{INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - len(states)} 次餘裕"
                 )
             if final_mode == ENTRY_MODE_NO_TRADE:
                 persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
@@ -4000,10 +4034,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
         # 輪詢
         for st in states.values():
-            if is_avg_strategy(st):
-                continue
             if st.get("traded"):
                 # print(f"[{st['symbol_name']}] | 已完成交易，跳過")
+                continue
+            if is_avg_strategy(st) and not st.get("in_position"):
+                # AVG 未成交持倉的入場訊號由分K輪詢處理；持倉則走下方即時報價風控。
                 continue
 
             try:
@@ -4138,7 +4173,7 @@ if __name__ == "__main__":
             "activation_dt": None, "window_number": None, "baseline_prices": {},
             "next_exit_check_dt": None, "stopped": False,
         })
-        AVG_SESSION_STATE.update({"active": False, "last_scan_started_monotonic": 0.0, "candidate_count": 0})
+        AVG_SESSION_STATE.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})
         AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
         LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         with MARKET_INDEX_ROUND_CONDITION:
