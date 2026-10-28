@@ -7,6 +7,8 @@ import math
 import shutil
 import io
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime, timedelta
 import pytz
@@ -52,8 +54,9 @@ STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
 MAIN_START_TIME = (8, 50)  # 主程序開始執行時間
 FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
-# 單日策略前提：LOWER 每檔股票在當日只會有一個固定交易方向。
+# 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_LOWER = 'LOWER'
+STRATEGY_AVG = 'AVG'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
@@ -77,9 +80,6 @@ STRATEGY_END_LOWER_2 = (10, 11)
 LOWER_STRATEGY_DECISION_3 = (9, 51)
 STRATEGY_START_LOWER_3 = (9, 52)
 STRATEGY_END_LOWER_3 = (10, 21)
-LOWER_STRATEGY_DECISION_4 = (10, 1)
-STRATEGY_START_LOWER_4 = (10, 2)
-STRATEGY_END_LOWER_4 = (10, 31)
 MIN_MINUTE_BARS_BEFORE_0930 = 20
 FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
@@ -88,6 +88,36 @@ OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入�
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
 ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
+
+# AVG 參數獨立於 LOWER。
+AVG_STOCK_DATA_SOURCE = "T"  # T: total_stocks；S: selected_stocks，均使用獨立副本
+AVG_CANDLES_START_TIME = STRATEGY_START_LOWER_3
+AVG_STAGE_1_START_TIME = (9, 0)
+AVG_STAGE_1_MIN_BARS = 8
+AVG_STAGE_2_MIN_BARS = 8
+AVG_STAGE_3_MIN_BARS = 5
+AVG_STAGE_4_MIN_BARS = 2
+AVG_STAGE_1_AMPLITUDE_PERCENT = 1.0
+AVG_STAGE_2_AMPLITUDE_PERCENT = 1.0
+AVG_STAGE_3_AMPLITUDE_PERCENT = 1.0
+AVG_SLOPE_CUTOFF_TIME = (9, 20)
+AVG_MAX_NORMALIZED_SLOPE = 0.06  # 相對昨收 %／分鐘，須嚴格小於此值
+AVG_ENTRY_START_TIME = (10, 0)
+AVG_ENTRY_DEADLINE = (11, 0)
+AVG_MAX_ENTRY_DELAY_SECONDS = 10.0
+AVG_CANDLE_POLL_INTERVAL_SECONDS = 10.0  # total_stocks 93 檔約 558 次分K請求／分鐘
+AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS = 0.105  # 最多約 9.5 次請求／秒
+AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
+AVG_MIN_MINUTE_BARS_BEFORE_0930 = 20
+AVG_STOP_LOSS_PERCENT = 2.0
+AVG_TAKE_PROFIT_PERCENT = 5.0
+AVG_FORCE_CLOSE_TIME = (12, 50)
+AVG_ENTRY_ORDER_QUANTITY = 1
+AVG_PROTECT_PROFIT_SWITCH = True
+AVG_PROTECT_PROFIT_PER = 2.5
+AVG_PROTECT_LOSS_PER = 1.5
+AVG_PROFIT_BACK_PERCENT = 0.5
+AVG_PROFIT_TARGET_PERCENT = 1.0
 
 LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
@@ -115,7 +145,7 @@ MARKET_INDEX_CRITICAL_WAIT_SECONDS = 13.0  # 關鍵判斷資料逾時時，最�
 INDUSTRY_INDEX_STALE_SECONDS = 20.0  # 產業指數配合每分鐘四輪 REST 查詢
 QUOTE_ROUND_INTERVAL_SECONDS = 15.0
 LOWER_EXIT_CHECK_INTERVAL_MINUTES = 10
-INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 2000
+INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 600  # 玉山行情官方日內行情額度
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
@@ -140,6 +170,7 @@ MARKET_REVERSAL_STOP_EVENT = threading.Event()
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_LOWER = 2
+ENTRY_MODE_AVG = 3
 stock_data.entry_mode = ENTRY_MODE_NO_TRADE
 LOWER_SESSION_STATE: Dict[str, Any] = {
     "activation_dt": None,
@@ -148,6 +179,13 @@ LOWER_SESSION_STATE: Dict[str, Any] = {
     "next_exit_check_dt": None,
     "stopped": False,
 }
+AVG_SESSION_STATE: Dict[str, Any] = {
+    "active": False,
+    "last_scan_started_monotonic": 0.0,
+    "candidate_count": 0,
+}
+AVG_CANDLE_REQUEST_SCHEDULE_LOCK = threading.Lock()
+AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
 
 
 def _log_value(value: Any) -> str:
@@ -596,7 +634,6 @@ def get_lower_strategy_windows() -> list[tuple[tuple[int, int], tuple[int, int],
         (LOWER_STRATEGY_DECISION_1, STRATEGY_START_LOWER_1, STRATEGY_END_LOWER_1),
         (LOWER_STRATEGY_DECISION_2, STRATEGY_START_LOWER_2, STRATEGY_END_LOWER_2),
         (LOWER_STRATEGY_DECISION_3, STRATEGY_START_LOWER_3, STRATEGY_END_LOWER_3),
-        (LOWER_STRATEGY_DECISION_4, STRATEGY_START_LOWER_4, STRATEGY_END_LOWER_4),
     ]
 
 
@@ -687,7 +724,356 @@ def get_entry_mode_text(entry_mode: int | None = None) -> str:
         return "NO_TRADE"
     if mode == ENTRY_MODE_LOWER:
         return "LOWER"
+    if mode == ENTRY_MODE_AVG:
+        return "AVG"
     return "UNKNOWN"
+
+
+def get_avg_candidate_stocks() -> list:
+    """不可將 LOWER 初始化過濾後的清單作為 AVG 股票池。"""
+    if AVG_STOCK_DATA_SOURCE == "T":
+        return list(total_stocks)
+    if AVG_STOCK_DATA_SOURCE == "S":
+        return list(selected_stocks)
+    raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
+
+
+def validate_avg_config() -> None:
+    if AVG_STOCK_DATA_SOURCE not in ("T", "S"):
+        raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
+    for name in ("AVG_STAGE_1_START_TIME", "AVG_CANDLES_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
+                 "AVG_ENTRY_START_TIME", "AVG_ENTRY_DEADLINE", "AVG_FORCE_CLOSE_TIME"):
+        time_tuple_to_minutes(globals()[name], name)
+    entry_start_minutes = time_tuple_to_minutes(AVG_ENTRY_START_TIME, "AVG_ENTRY_START_TIME")
+    entry_deadline_minutes = time_tuple_to_minutes(AVG_ENTRY_DEADLINE, "AVG_ENTRY_DEADLINE")
+    force_close_minutes = time_tuple_to_minutes(AVG_FORCE_CLOSE_TIME, "AVG_FORCE_CLOSE_TIME")
+    candles_start_minutes = time_tuple_to_minutes(AVG_CANDLES_START_TIME, "AVG_CANDLES_START_TIME")
+    lower_3_start_minutes = time_tuple_to_minutes(STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3")
+    stage_1_start_minutes = time_tuple_to_minutes(AVG_STAGE_1_START_TIME, "AVG_STAGE_1_START_TIME")
+    slope_cutoff_minutes = time_tuple_to_minutes(AVG_SLOPE_CUTOFF_TIME, "AVG_SLOPE_CUTOFF_TIME")
+    if not entry_start_minutes <= entry_deadline_minutes < force_close_minutes:
+        raise ValueError("AVG 需符合最早入場 <= 截止入場 < 強制平倉")
+    if not lower_3_start_minutes <= candles_start_minutes <= entry_start_minutes:
+        raise ValueError("AVG 分K開始時間須介於第三組 LOWER 開始時間與 AVG 最早入場時間之間")
+    if stage_1_start_minutes > entry_deadline_minutes or slope_cutoff_minutes > entry_deadline_minutes:
+        raise ValueError("AVG 階段起算及斜率檢核時間不可晚於入場截止")
+    for value in (AVG_STAGE_1_MIN_BARS, AVG_STAGE_2_MIN_BARS, AVG_STAGE_3_MIN_BARS,
+                  AVG_STAGE_4_MIN_BARS, AVG_MIN_MINUTE_BARS_BEFORE_0930):
+        if type(value) is not int or value <= 0:
+            raise ValueError("AVG 分K根數必須為正整數")
+    if AVG_ENTRY_ORDER_QUANTITY != 1:
+        raise ValueError("AVG 目前每檔只允許一張")
+    if not math.isfinite(AVG_MAX_ENTRY_DELAY_SECONDS) or AVG_MAX_ENTRY_DELAY_SECONDS <= 0:
+        raise ValueError("AVG 下單最大延遲必須為有限正數")
+    if not math.isfinite(AVG_CANDLE_POLL_INTERVAL_SECONDS) or AVG_CANDLE_POLL_INTERVAL_SECONDS <= 0:
+        raise ValueError("AVG 分K輪詢間隔必須為有限正數")
+    if (
+        not math.isfinite(AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS)
+        or AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS <= 0
+        or len(get_avg_candidate_stocks()) * AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
+        >= AVG_CANDLE_POLL_INTERVAL_SECONDS
+    ):
+        raise ValueError("AVG 股票池無法在分K輪詢間隔內完成一次節流查詢")
+    projected_candle_requests = len(get_avg_candidate_stocks()) * 60.0 / AVG_CANDLE_POLL_INTERVAL_SECONDS
+    if projected_candle_requests > INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - 20:
+        raise ValueError(
+            f"AVG 分K輪詢預估 {projected_candle_requests:.0f} 次／分鐘，"
+            f"須低於行情 API 額度並保留 20 次／分鐘餘裕"
+        )
+    if not math.isfinite(AVG_MAX_NORMALIZED_SLOPE):
+        raise ValueError("AVG 斜率門檻必須為有限數值")
+    for value in (AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT, AVG_PROTECT_PROFIT_PER,
+                  AVG_PROTECT_LOSS_PER, AVG_PROFIT_BACK_PERCENT, AVG_PROFIT_TARGET_PERCENT):
+        if not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError("AVG 風控百分比必須介於 0 與 100")
+    for value in (AVG_STAGE_1_AMPLITUDE_PERCENT, AVG_STAGE_2_AMPLITUDE_PERCENT,
+                  AVG_STAGE_3_AMPLITUDE_PERCENT, AVG_MIN_PRE_ENTRY_RANGE_PERCENT):
+        if not math.isfinite(value) or not 0 <= value < 100:
+            raise ValueError("AVG 振幅百分比必須介於 0（含）與 100（不含）")
+
+
+def resolve_session_entry_mode(now_local: datetime) -> Optional[int]:
+    """LOWER 一旦啟動即固定；否則第三組開始時才最後分流。"""
+    if LOWER_SESSION_STATE.get("activation_dt") is not None:
+        return ENTRY_MODE_LOWER
+    if (now_local.hour, now_local.minute) < STRATEGY_START_LOWER_3:
+        return None
+    if MARKET_INDEX_REST_FATAL_EVENT.is_set():
+        return ENTRY_MODE_NO_TRADE
+    return ENTRY_MODE_AVG
+
+
+def is_avg_strategy(state: Dict[str, Any] | None) -> bool:
+    return bool(state and state.get("strategy_type") == STRATEGY_AVG)
+
+
+def parse_avg_candles(raw_candles: Any, now_local: datetime) -> list[Dict[str, Any]]:
+    """解析當日 1 分K；策略階段只使用已完成 K 棒，下一根 open 僅用來確認入場時點。"""
+    if not isinstance(raw_candles, list):
+        raise ValueError("intraday.candles 回應缺少 data 陣列")
+    bars = []
+    for raw in raw_candles:
+        try:
+            candle_dt = datetime.fromisoformat(str(raw["date"]).replace("Z", "+00:00"))
+            candle_dt = TZ.localize(candle_dt) if candle_dt.tzinfo is None else candle_dt.astimezone(TZ)
+            if candle_dt.date() != now_local.date():
+                continue
+            prices = {key: float(raw[key]) for key in ("open", "high", "low", "close")}
+            try:
+                average = float(raw.get("average"))
+                if not math.isfinite(average) or average <= 0:
+                    average = None
+            except (TypeError, ValueError, OverflowError):
+                average = None
+            if (
+                any(not math.isfinite(value) or value <= 0 for value in prices.values())
+                or prices["low"] > min(prices["open"], prices["close"])
+                or prices["high"] < max(prices["open"], prices["close"])
+            ):
+                continue
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        bars.append({"dt": candle_dt, **prices, "average": average})
+    bars.sort(key=lambda bar: bar["dt"])
+    return bars
+
+
+def calculate_avg_normalized_slope(bars: list[Dict[str, Any]], previous_close: float) -> Optional[float]:
+    samples = []
+    for bar in bars:
+        dt = bar["dt"]
+        if bar["average"] is None:
+            continue
+        if not (9 * 60 <= dt.hour * 60 + dt.minute < AVG_SLOPE_CUTOFF_TIME[0] * 60 + AVG_SLOPE_CUTOFF_TIME[1]):
+            continue
+        samples.append((dt.hour * 60 + dt.minute + dt.second / 60.0, bar["average"]))
+    if len(samples) < 2 or not math.isfinite(previous_close) or previous_close <= 0:
+        return None
+    x_mean = sum(x for x, _ in samples) / len(samples)
+    y_mean = sum(y for _, y in samples) / len(samples)
+    denominator = sum((x - x_mean) ** 2 for x, _ in samples)
+    if denominator <= 0:
+        return None
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in samples) / denominator
+    return slope / previous_close * 100.0
+
+
+def find_avg_entry_signal(bars: list[Dict[str, Any]], now_local: datetime) -> Optional[Dict[str, Any]]:
+    """與 v18 find_entry 對齊：low>avg、high<avg、low>avg，之後連續 low<avg。"""
+    current_minute = now_local.replace(second=0, microsecond=0)
+    completed = [bar for bar in bars if bar["dt"] < current_minute]
+    requirements = (AVG_STAGE_1_MIN_BARS, AVG_STAGE_2_MIN_BARS, AVG_STAGE_3_MIN_BARS)
+    amplitudes = (AVG_STAGE_1_AMPLITUDE_PERCENT, AVG_STAGE_2_AMPLITUDE_PERCENT,
+                  AVG_STAGE_3_AMPLITUDE_PERCENT)
+    stage = count = 0
+    amplitude_reached = False
+    for index, bar in enumerate(completed):
+        minute = (bar["dt"].hour, bar["dt"].minute)
+        if minute < AVG_STAGE_1_START_TIME:
+            continue
+        if minute > AVG_ENTRY_DEADLINE:
+            break
+        average = bar["average"]
+        if average is None:
+            count = 0
+            amplitude_reached = False
+            continue
+        if stage == 3:
+            if minute < AVG_SLOPE_CUTOFF_TIME:
+                continue
+            count = count + 1 if bar["low"] < average else 0
+            if count >= AVG_STAGE_4_MIN_BARS:
+                if index + 1 >= len(bars):
+                    return None
+                entry_bar = bars[index + 1]
+                entry_time = (entry_bar["dt"].hour, entry_bar["dt"].minute)
+                if not AVG_ENTRY_START_TIME <= entry_time <= AVG_ENTRY_DEADLINE:
+                    return {"rejected": "first_signal_outside_entry_window", "signal_bar": bar}
+                return {"entry_bar": entry_bar, "signal_bar": bar}
+            continue
+        matched = bar["high"] < average if stage == 1 else bar["low"] > average
+        if not matched:
+            count = 0
+            amplitude_reached = False
+            continue
+        count += 1
+        avg_dec = Decimal(str(average))
+        percent = Decimal(str(amplitudes[stage])) / Decimal("100")
+        if stage == 1:
+            reached = Decimal(str(bar["low"])) < avg_dec * (1 - percent)
+        else:
+            reached = Decimal(str(bar["high"])) > avg_dec * (1 + percent)
+        amplitude_reached = amplitude_reached or reached
+        if count >= requirements[stage] and amplitude_reached:
+            stage += 1
+            count = 0
+            amplitude_reached = False
+    return None
+
+
+def mark_avg_state_traded(state: Dict[str, Any], reason: str, *, error: bool = False, **fields: Any) -> None:
+    state["traded"] = True
+    state["entry_time"] = now_tpe().isoformat()
+    state["exit_reason"] = reason
+    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+    trade_log("AVG_CANDIDATE_SKIPPED", error=error, **state_symbol_fields(state), reason=reason, **fields)
+
+
+def fetch_avg_candle_response(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> Dict[str, Any]:
+    global AVG_CANDLE_NEXT_REQUEST_MONOTONIC
+    with AVG_CANDLE_REQUEST_SCHEDULE_LOCK:
+        delay = AVG_CANDLE_NEXT_REQUEST_MONOTONIC - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        AVG_CANDLE_NEXT_REQUEST_MONOTONIC = time.monotonic() + AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
+    return get_stock_rest_client(realtime_sdk).intraday.candles(
+        symbol=state["symbol_code"], timeframe="1", sort="asc",
+    )
+
+
+def process_avg_candle_state(
+    state: Dict[str, Any], response: Dict[str, Any], mysdk: SDK, now_local: datetime,
+) -> None:
+    if state.get("traded") and not (state.get("in_position") or state.get("entry_order_pending")):
+        return
+    try:
+        bars = parse_avg_candles(response.get("data"), now_local)
+        if not bars:
+            raise ValueError("API 未回傳當日有效分K")
+    except Exception as exc:
+        trade_log("AVG_CANDLES_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
+        if not state.get("in_position") and not state.get("entry_order_pending"):
+            mark_avg_state_traded(state, "avg_candles_unavailable", error=True, error_msg=repr(exc))
+        return
+
+    current = bars[-1]
+    state["open_price"] = bars[0]["open"]
+    state["high_price"] = max(bar["high"] for bar in bars)
+    state["low_price"] = min(bar["low"] for bar in bars)
+    state["close_price"] = current["close"]
+    state["avg_price"] = current["average"]
+    state["pre_last_price"] = state.get("last_price", 0)
+    state["pre_last_price_time"] = state.get("last_price_time")
+    state["last_price"] = current["close"]
+    state["last_price_time"] = now_local.isoformat()
+
+    before_0930 = sum(1 for bar in bars if (bar["dt"].hour, bar["dt"].minute) < (9, 30))
+    state["minute_bars_before_0930"] = before_0930
+    state["minute_bars_checked"] = True
+    state["minute_bars_eligible"] = before_0930 >= AVG_MIN_MINUTE_BARS_BEFORE_0930
+
+    if state.get("in_position"):
+        # 分 K 高低價也納入觸發判斷；同一根K同時碰到停損與停利時，先按停損處理。
+        latest_bar = bars[-1]
+        state["last_price"] = latest_bar["high"]
+        if reached_stop_to_flat(state) or reached_stop_to_profit(state):
+            try_close_position(state, mysdk)
+        elif latest_bar["low"] <= state.get("profit_price", 0):
+            state["last_price"] = latest_bar["low"]
+            try_close_position(state, mysdk)
+            state["last_price"] = latest_bar["high"]
+            if state.get("in_position") and not state.get("exit_order_pending") and reached_stop_to_profit(state):
+                try_close_position(state, mysdk)
+        else:
+            state["last_price"] = latest_bar["close"]
+            try_close_position(state, mysdk)
+        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        return
+    if state.get("entry_order_pending"):
+        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+        return
+
+    if not state["minute_bars_eligible"]:
+        mark_avg_state_traded(state, "insufficient_minute_bars_before_0930", count=before_0930)
+        return
+    slope = calculate_avg_normalized_slope(bars, float(state.get("yesterday_close_price", 0) or 0))
+    if slope is None or not slope < AVG_MAX_NORMALIZED_SLOPE:
+        mark_avg_state_traded(state, "avg_slope_rejected", normalized_slope=slope)
+        return
+    signal = find_avg_entry_signal(bars, now_local)
+    if signal and signal.get("rejected"):
+        mark_avg_state_traded(state, signal["rejected"])
+        return
+    if signal:
+        if MARKET_INDEX_REST_FATAL_EVENT.is_set():
+            mark_avg_state_traded(state, "market_index_rest_fatal")
+            return
+        entry_bar = signal["entry_bar"]
+        signal_bar = signal["signal_bar"]
+        entry_dt = entry_bar["dt"]
+        delay = (now_local - entry_dt).total_seconds()
+        entry_hm = (entry_dt.hour, entry_dt.minute)
+        if not AVG_ENTRY_START_TIME <= entry_hm <= AVG_ENTRY_DEADLINE:
+            mark_avg_state_traded(state, "first_signal_outside_entry_window", entry_time=entry_dt.isoformat())
+            return
+        if delay < 0 or delay > AVG_MAX_ENTRY_DELAY_SECONDS:
+            mark_avg_state_traded(state, "avg_entry_signal_stale", delay_seconds=round(delay, 3))
+            return
+        entry_price = float(entry_bar["open"])
+        prior_bars = [bar for bar in bars if bar["dt"] < entry_dt]
+        previous_close = float(state.get("yesterday_close_price", 0) or 0)
+        if not prior_bars or previous_close <= 0:
+            mark_avg_state_traded(state, "avg_pre_entry_data_missing")
+            return
+        pre_entry_range_dec = Decimal(str(max(bar["high"] for bar in prior_bars))) - Decimal(
+            str(min(bar["low"] for bar in prior_bars))
+        )
+        pre_entry_range = float(pre_entry_range_dec)
+        if pre_entry_range_dec <= Decimal(str(previous_close)) * Decimal(str(AVG_MIN_PRE_ENTRY_RANGE_PERCENT)) / 100:
+            mark_avg_state_traded(state, "avg_pre_entry_range_rejected", range=pre_entry_range)
+            return
+        limit_up = float(state.get("limit_up_price", 0) or 0)
+        limit_down = float(state.get("limit_down_price", 0) or 0)
+        if any(bar["high"] >= limit_up or bar["low"] <= limit_down for bar in prior_bars):
+            mark_avg_state_traded(state, "limit_price_touched_before_entry")
+            return
+        raw_stop = entry_price * (1 + AVG_STOP_LOSS_PERCENT / 100.0)
+        stop_price = min(ceil_price_to_tick_value(raw_stop), limit_up)
+        if entry_price + entry_price * AVG_STOP_LOSS_PERCENT / 100.0 >= limit_up:
+            mark_avg_state_traded(state, "avg_stop_loss_too_close_to_limit_up")
+            return
+        take_profit = max(floor_price_to_tick_value(entry_price * (1 - AVG_TAKE_PROFIT_PERCENT / 100.0)), limit_down)
+        state["side"] = TRADE_SIDE_SHORT
+        state["entry_signal_time"] = entry_dt.isoformat()
+        state["entry_signal_price"] = entry_price
+        state["entry_trigger_price"] = current["close"]
+        state["last_price"] = current["close"]
+        state["avg_signal_bar_time"] = signal_bar["dt"].isoformat()
+        state["avg_normalized_slope"] = slope
+        state["avg_pre_entry_range"] = pre_entry_range
+        state["avg_initial_stop_price"] = stop_price
+        state["avg_initial_take_profit_price"] = take_profit
+        try_open_position(state, mysdk)
+        return
+    if (now_local.hour, now_local.minute) > AVG_ENTRY_DEADLINE:
+        mark_avg_state_traded(state, "avg_entry_deadline_passed")
+        return
+    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+
+
+def process_avg_candle_round(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, mysdk: SDK) -> None:
+    now_local = now_tpe()
+    if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
+        return
+    now_monotonic = time.monotonic()
+    if now_monotonic - AVG_SESSION_STATE["last_scan_started_monotonic"] < AVG_CANDLE_POLL_INTERVAL_SECONDS:
+        return
+    AVG_SESSION_STATE["last_scan_started_monotonic"] = now_monotonic
+    pending_states = [
+        state for state in states.values()
+        if not state.get("traded") or state.get("in_position") or state.get("entry_order_pending")
+    ]
+    with ThreadPoolExecutor(max_workers=12, thread_name_prefix="avg-candles") as pool:
+        futures = {pool.submit(fetch_avg_candle_response, state, realtime_sdk): state for state in pending_states}
+        for future in as_completed(futures):
+            state = futures[future]
+            try:
+                response = future.result()
+                process_avg_candle_state(state, response, mysdk, now_tpe())
+            except Exception as exc:
+                trade_log("AVG_CANDIDATE_PROCESS_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
+                if not state.get("in_position") and not state.get("entry_order_pending"):
+                    mark_avg_state_traded(state, "avg_candidate_processing_error", error=True, error_msg=repr(exc))
 
 
 def print_entry_position_prices(state: Dict[str, Any]) -> None:
@@ -727,14 +1113,18 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        state["profit_price"] = max(
-            entry_price - open_profit_target,
-            state.get("limit_down_price", 0)
-        )
-        state["flat_price"] = min(
-            entry_price + open_stop_loss,
-            state.get("limit_up_price", 0)
-        )
+        if is_avg_strategy(state):
+            state["profit_price"] = max(
+                floor_price_to_tick_value(entry_price - open_profit_target),
+                state.get("limit_down_price", 0),
+            )
+            state["flat_price"] = min(
+                ceil_price_to_tick_value(entry_price + open_stop_loss),
+                state.get("limit_up_price", 0),
+            )
+        else:
+            state["profit_price"] = max(entry_price - open_profit_target, state.get("limit_down_price", 0))
+            state["flat_price"] = min(entry_price + open_stop_loss, state.get("limit_up_price", 0))
     else:
         state["profit_price"] = min(
             entry_price + open_profit_target,
@@ -2464,7 +2854,7 @@ def get_current_entry_mode() -> int:
         entry_mode = int(getattr(stock_data, "entry_mode", ENTRY_MODE_NO_TRADE))
     except (TypeError, ValueError):
         return ENTRY_MODE_NO_TRADE
-    if entry_mode in (ENTRY_MODE_NO_TRADE, ENTRY_MODE_LOWER):
+    if entry_mode in (ENTRY_MODE_NO_TRADE, ENTRY_MODE_LOWER, ENTRY_MODE_AVG):
         return entry_mode
     return ENTRY_MODE_NO_TRADE
 
@@ -2478,26 +2868,36 @@ def is_lower_mode() -> bool:
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
+    if is_avg_strategy(state):
+        return AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT
     if is_lower_mode():
         return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
     return OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
+    if is_avg_strategy(state):
+        return AVG_PROTECT_LOSS_PER, AVG_PROTECT_PROFIT_PER
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
 
 
 def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
+    if is_avg_strategy(state):
+        return AVG_PROTECT_PROFIT_SWITCH
     return PROTECT_PROFIT_SWITCH
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if is_avg_strategy(state):
+        return AVG_FORCE_CLOSE_TIME
     if is_lower_mode():
         return FORCE_CLOSE_TIME_LOWER
     return FORCE_CLOSE_TIME_LOWER
 
 
-def get_entry_order_quantity(state: Dict[str, Any] | None = None) -> int:
+def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
+    if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
+        return AVG_ENTRY_ORDER_QUANTITY
     if is_lower_mode():
         return ENTRY_ORDER_QUANTITY_LOWER
     return 0
@@ -2578,12 +2978,16 @@ def check_lower_minute_bar_eligibility(
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
+    if is_avg_strategy(state):
+        return AVG_ENTRY_DEADLINE
     if LOWER_SESSION_STATE.get("activation_dt") is not None:
         return get_active_lower_window()[2]
     return get_lower_strategy_windows()[-1][2]
 
 
-def get_entry_check_start_time() -> tuple[int, int]:
+def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
+        return AVG_ENTRY_START_TIME
     if LOWER_SESSION_STATE.get("activation_dt") is not None:
         return get_active_lower_window()[1]
     return STRATEGY_START_LOWER_1
@@ -2669,12 +3073,17 @@ def entry_price_check(state: Dict[str, Any]) -> bool | str:
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
-    if LOWER_SESSION_STATE.get("stopped") or LOWER_SESSION_STATE.get("activation_dt") is None:
+    if is_avg_strategy(state):
+        if not AVG_SESSION_STATE.get("active"):
+            return
+    elif LOWER_SESSION_STATE.get("stopped") or LOWER_SESSION_STATE.get("activation_dt") is None:
         return
     now_local = now_tpe()
-    if not get_entry_check_start_time() <= (now_local.hour, now_local.minute) <= get_entry_check_end_time(state):
+    if not get_entry_check_start_time(state) <= (now_local.hour, now_local.minute) <= get_entry_check_end_time(state):
         return
-    if not state.get("minute_bars_eligible") or state.get("symbol_code_with_suf") not in LOWER_SESSION_STATE["baseline_prices"]:
+    if not state.get("minute_bars_eligible"):
+        return
+    if not is_avg_strategy(state) and state.get("symbol_code_with_suf") not in LOWER_SESSION_STATE["baseline_prices"]:
         return
     if MARKET_INDEX_REST_FATAL_EVENT.is_set():
         state["traded"] = True
@@ -2708,7 +3117,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
         print(f"[{state['symbol_name']}] 當日高低價或漲跌停價無效，暫不進場")
         return
 
-    if high_price >= limit_up_price or low_price <= limit_down_price:
+    if not is_avg_strategy(state) and (high_price >= limit_up_price or low_price <= limit_down_price):
         state["traded"] = True
         state["entry_time"] = now_tpe().isoformat()
         state["exit_reason"] = "limit_price_touched_before_entry"
@@ -2995,8 +3404,10 @@ def _advance_profit_trail(state: Dict[str, Any]):
         return
 
     side = state.get("side")
-    target_step = calculate_profit_trail_step(px, PROFIT_TARGET_PERCENT)
-    back_step = calculate_profit_trail_step(px, PROFIT_BACK_PERCENT)
+    target_percent = AVG_PROFIT_TARGET_PERCENT if is_avg_strategy(state) else PROFIT_TARGET_PERCENT
+    back_percent = AVG_PROFIT_BACK_PERCENT if is_avg_strategy(state) else PROFIT_BACK_PERCENT
+    target_step = calculate_profit_trail_step(px, target_percent)
+    back_step = calculate_profit_trail_step(px, back_percent)
     if side == TRADE_SIDE_LONG:
         new_profit_price = ceil_price_to_tick_value(px + target_step)
         new_stop_profit_price = floor_price_to_tick_value(px - back_step)
@@ -3285,8 +3696,11 @@ def initialize_states(
 
         _, code_with_suf = get_pure_symbol(symbolStr)
         normalized_industry_code = str(industry_code).zfill(2)
-        market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
-        if not market_index_config.get("symbol"):
+        if strategy_type == STRATEGY_AVG:
+            market_index_key, market_index_config = "", {}
+        else:
+            market_index_key, market_index_config = get_industry_index_config(code_with_suf, normalized_industry_code)
+        if not market_index_config.get("symbol") and strategy_type != STRATEGY_AVG:
             print(f"[{symbolStr}] ⚠️ 無對應之產業別指數代碼，排除")
             continue
 
@@ -3323,7 +3737,7 @@ def initialize_states(
             print(f"[{symbolStr}] ⚠️ 處置股，排除")
             continue
 
-        quantity = get_entry_order_quantity()
+        quantity = get_entry_order_quantity(strategy_type=strategy_type)
 
         st = load_or_init_state(
             symbolStr,
@@ -3386,9 +3800,15 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 )
 
         if MARKET_REVERSAL_STOP_EVENT.is_set():
-            mark_unentered_lower_states_blocked(states, "market_mode_blocked")
-            print("[MODE] 市場模式已封鎖，維持 NO_TRADE 並結束監控")
-            return
+            if get_current_entry_mode() == ENTRY_MODE_AVG:
+                print("[MODE] AVG 已切換，忽略 LOWER 專屬市場模式停止事件")
+            else:
+                mark_unentered_lower_states_blocked(states, "market_mode_blocked")
+                LOWER_SESSION_STATE["stopped"] = True
+                MARKET_INDEX_REST_STOP_EVENT.set()
+            MARKET_REVERSAL_STOP_EVENT.clear()
+            if get_current_entry_mode() != ENTRY_MODE_AVG:
+                print("[MODE] LOWER 已封鎖，等待第三組開始時間再決定 AVG；不結束整個監控")
 
         now_local = now_tpe()
         log_market_index_rest_watchdog_once(now_local)
@@ -3422,10 +3842,13 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             )
             lower_strategy_early_breakout_deadline_announced = True
 
-        check_lower_minute_bar_eligibility(states, realtime_sdk)
+        if get_current_entry_mode() != ENTRY_MODE_AVG:
+            check_lower_minute_bar_eligibility(states, realtime_sdk)
         decision_windows = get_lower_strategy_windows()
         if (
-            not entry_mode_decided
+            not LOWER_SESSION_STATE.get("stopped")
+            and not MARKET_INDEX_REST_FATAL_EVENT.is_set()
+            and not entry_mode_decided
             and next_decision_index < len(decision_windows)
             and (now_tpe().hour, now_tpe().minute) >= decision_windows[next_decision_index][0]
         ):
@@ -3448,9 +3871,56 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 LOWER_SESSION_STATE["stopped"] = True
                 mark_unentered_lower_states_blocked(states, "market_mode_blocked")
                 MARKET_INDEX_REST_STOP_EVENT.set()
-                print("[MODE] LOWER 當日停止，不再檢核後續時間")
-                return
+                print("[MODE] LOWER 當日停止，不再檢核後續時間；等待第三組開始時間切換 AVG")
             now_local = now_tpe()
+        if not entry_mode_decided:
+            final_mode = resolve_session_entry_mode(now_tpe())
+            if final_mode == ENTRY_MODE_AVG:
+                try:
+                    validate_avg_config()
+                except (TypeError, ValueError) as exc:
+                    persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
+                    trade_log("AVG_CONFIG_INVALID", error=True, error_msg=repr(exc), action="no_new_entries")
+                    print(f"[MODE] AVG 設定無效，當日不交易：{exc}")
+                    return
+                persist_entry_mode_to_stock_data(ENTRY_MODE_AVG)
+                LOWER_SESSION_STATE["stopped"] = True
+                MARKET_INDEX_REST_STOP_EVENT.set()
+                avg_candidates = get_avg_candidate_stocks()
+                avg_states = initialize_states(
+                    avg_candidates, realtime_sdk, strategy_type=STRATEGY_AVG,
+                    force_rebuild_state=True,
+                )
+                states.clear()
+                states.update(avg_states)
+                ACTIVE_ORDER_STATES.clear()
+                ACTIVE_ORDER_STATES.update(states)
+                AVG_SESSION_STATE.update({
+                    "active": True,
+                    "last_scan_started_monotonic": 0.0,
+                    "candidate_count": len(states),
+                })
+                trade_log(
+                    "AVG_MODE_SELECTED", source=AVG_STOCK_DATA_SOURCE,
+                    candidate_count=len(states),
+                    action="avg_candle_monitor_started",
+                )
+                if not states:
+                    print("[MODE] AVG 股票池初始化後沒有可交易標的，結束監控")
+                    return
+                entry_mode_decided = True
+                print(
+                    f"[MODE] 已切換 AVG，股票池={AVG_STOCK_DATA_SOURCE}、可監控={len(states)} 檔；"
+                    f"初始化限價／當沖資格查詢最多 {len(avg_candidates)} 次；"
+                    f"分K輪詢間隔 {AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 秒，約 "
+                    f"{len(states) * 60 / AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 次／分鐘；"
+                    f"行情額度 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE}/分鐘，另保留約 "
+                    f"{INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - len(states) * 60 / AVG_CANDLE_POLL_INTERVAL_SECONDS:.0f} 次餘裕"
+                )
+            if final_mode == ENTRY_MODE_NO_TRADE:
+                persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
+                print("[MODE] 行情服務異常，LOWER／AVG 均禁止新入場，結束監控")
+                return
         entry_check_start_time = get_entry_check_start_time()
         current_entry_mode = get_current_entry_mode()
         if (
@@ -3500,14 +3970,18 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
 
         # 已全數完成交易則收工
-        if all_traded(states):
+        if entry_mode_decided and all_traded(states):
             if all_force_close_time_reached:
                 print("=== 已達停止時間，今日所有標的已收工 ===")
             else:
                 print("=== 已全部交易，今日所有標的已收工 ===")
             break
 
-        if LOWER_SESSION_STATE.get("activation_dt") is not None and lower_percent_exit_summary is None:
+        if (
+            current_entry_mode != ENTRY_MODE_AVG
+            and LOWER_SESSION_STATE.get("activation_dt") is not None
+            and lower_percent_exit_summary is None
+        ):
             check_dt = get_due_lower_exit_check(now_tpe())
             if check_dt is not None:
                 try:
@@ -3518,11 +3992,16 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
 
         # 每分鐘四輪：先更新去重後的候選產業指數，再更新個股。
-        if round_should_update_realtime:
+        if round_should_update_realtime and current_entry_mode != ENTRY_MODE_AVG:
             update_required_industry_indices(states, realtime_sdk)
+
+        if current_entry_mode == ENTRY_MODE_AVG:
+            process_avg_candle_round(states, realtime_sdk, mysdk)
 
         # 輪詢
         for st in states.values():
+            if is_avg_strategy(st):
+                continue
             if st.get("traded"):
                 # print(f"[{st['symbol_name']}] | 已完成交易，跳過")
                 continue
@@ -3659,6 +4138,8 @@ if __name__ == "__main__":
             "activation_dt": None, "window_number": None, "baseline_prices": {},
             "next_exit_check_dt": None, "stopped": False,
         })
+        AVG_SESSION_STATE.update({"active": False, "last_scan_started_monotonic": 0.0, "candidate_count": 0})
+        AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
         LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         with MARKET_INDEX_ROUND_CONDITION:
             MARKET_INDEX_ROUND_STATE["completed_round"] = 0
@@ -3690,7 +4171,7 @@ if __name__ == "__main__":
             raise
 
         # stock_data.py 的 selected_stocks 為 LOWER 候選名單。
-        candidate_symbols = selected_stocks
+        candidate_symbols = list(selected_stocks)  # initialize_states 會原地過濾，勿修改股票池來源
         states = initialize_states(candidate_symbols, realtime_sdk)
         ACTIVE_ORDER_STATES.clear()
         ACTIVE_ORDER_STATES.update(states)

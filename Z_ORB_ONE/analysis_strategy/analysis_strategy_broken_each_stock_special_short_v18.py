@@ -30,7 +30,7 @@ MAX_NORMALIZED_SLOPE = 0.06  # %／分鐘；昨收正規化斜率須嚴格小於
 STAGE_1_START_TIME = (9, 0)  # STAGE_1 起算時間，包含此分鐘
 STAGE_1_MIN_BARS = 8
 STAGE_2_MIN_BARS = 8
-STAGE_3_MIN_BARS = 8
+STAGE_3_MIN_BARS = 5
 STAGE_4_MIN_BARS = 2  # 第三階段完成後連續 low < average，下一根 open 入場
 
 STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
@@ -38,6 +38,7 @@ STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1
 STAGE_3_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
 MIN_PRE_ENTRY_RANGE_PERCENT = 5.0  # 入場前當日高低價差須嚴格大於昨收的此百分比
 
+ENTRY_START_TIME = (10, 0)  # 包含此分鐘；首次入場時間不在區間內，當日直接排除
 ENTRY_DEADLINE = (11, 0)  # 包含此分鐘
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
@@ -50,7 +51,7 @@ STOCK_LIST = []  # 非空時優先
 # 空字串：使用 stock_data.py；YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
-HISTORICAL_CACHE_DATE = "xxxxxxxx"
+HISTORICAL_CACHE_DATE = ""
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -523,7 +524,7 @@ def find_entry(today_bars):
                 if index + 1 >= len(today_bars):
                     return None
                 entry_bar = today_bars[index + 1]
-                if (entry_bar['dt'].hour, entry_bar['dt'].minute) > ENTRY_DEADLINE:
+                if not ENTRY_START_TIME <= (entry_bar['dt'].hour, entry_bar['dt'].minute) <= ENTRY_DEADLINE:
                     return None
                 return entry_bar, float(entry_bar['open'])
             continue
@@ -681,12 +682,14 @@ def validate_settings():
                   MIN_MINUTE_BARS_BEFORE_0930):
         if type(value) is not int or value <= 0:
             raise ValueError('連續根數及早盤最低根數必須為正整數')
-    for value in (STAGE_1_START_TIME, SLOPE_CUTOFF_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
+    for value in (STAGE_1_START_TIME, SLOPE_CUTOFF_TIME, ENTRY_START_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
         if (len(value) != 2 or any(type(part) is not int for part in value)
                 or not 0 <= value[0] <= 23 or not 0 <= value[1] <= 59):
             raise ValueError('時間需為合法的 (時, 分)')
     if ENTRY_DEADLINE >= INTRADAY_COMPARE_END_LOWER:
         raise ValueError('入場截止時間必須早於強制平倉時間')
+    if ENTRY_START_TIME > ENTRY_DEADLINE:
+        raise ValueError('最早入場時間不可晚於入場截止時間')
     if STAGE_1_START_TIME > ENTRY_DEADLINE:
         raise ValueError('STAGE_1 起算時間不可晚於入場截止時間')
     if SLOPE_CUTOFF_TIME > ENTRY_DEADLINE:
@@ -758,6 +761,7 @@ def main():
              f'根數={STAGE_1_MIN_BARS}/{STAGE_2_MIN_BARS}/{STAGE_3_MIN_BARS} '
              f'階段振幅門檻={STAGE_1_AMPLITUDE_PERCENT:g}%/'
              f'{STAGE_2_AMPLITUDE_PERCENT:g}%/{STAGE_3_AMPLITUDE_PERCENT:g}% '
+             f'最早入場={ENTRY_START_TIME[0]:02d}:{ENTRY_START_TIME[1]:02d} '
              f'入場截止={ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} '
              f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 停利={OPTIMIZE_PROFIT_PER_LOWER:g}% '
              f'入場前高低價差須大於昨收的{MIN_PRE_ENTRY_RANGE_PERCENT:g}% '
