@@ -3,7 +3,7 @@ LOWER 回測策略
 
 回測以分 K 模擬策略，使用固定停損、停利與結算時間。
 市場條件：IX0001、IX0043 須通過早盤突破、昨收兩側檢查與反彈失效門檻；
-LOWER 依序在四個決策時點檢核；啟動後每十分鐘比較股票池相對啟動價格的漲跌家數。
+LOWER 依序在三個決策時點檢核；啟動後每十分鐘比較股票池相對啟動價格的漲跌家數。
 時間及百分比門檻以本檔常數設定為準。
 
 個股入場條件
@@ -101,10 +101,6 @@ STRATEGY_END_LOWER_2 = (10, 11)
 LOWER_STRATEGY_DECISION_3 = (9, 51)
 STRATEGY_START_LOWER_3 = (9, 52)
 STRATEGY_END_LOWER_3 = (10, 21)
-
-LOWER_STRATEGY_DECISION_4 = (10, 1)
-STRATEGY_START_LOWER_4 = (10, 2)
-STRATEGY_END_LOWER_4 = (10, 31)
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)  # lower 盤中停損/停利比對截止(時, 分)
 
@@ -858,7 +854,7 @@ def find_strategy_decision_rebound_to_threshold(
 def build_market_index_daily_low_summary(
     target_date: date,
     index_minute_bars_by_key: dict[str, dict[str, list]],
-    decision_count: int = 4,
+    decision_count: int = 3,
 ) -> list[str]:
     """建立每日指數摘要；跌幅採截止棒及決策前一棒 close，相對昨收計算。"""
     rows = []
@@ -1176,12 +1172,11 @@ def get_strategy_market_decision_gate_status(
 
 
 def get_lower_strategy_windows() -> list[tuple[tuple[int, int], tuple[int, int], tuple[int, int]]]:
-    """依序回傳四組獨立的決策、訊號開始與實際進場截止時間。"""
+    """依序回傳三組獨立的決策、訊號開始與實際進場截止時間。"""
     return [
         (LOWER_STRATEGY_DECISION_1, STRATEGY_START_LOWER_1, STRATEGY_END_LOWER_1),
         (LOWER_STRATEGY_DECISION_2, STRATEGY_START_LOWER_2, STRATEGY_END_LOWER_2),
         (LOWER_STRATEGY_DECISION_3, STRATEGY_START_LOWER_3, STRATEGY_END_LOWER_3),
-        (LOWER_STRATEGY_DECISION_4, STRATEGY_START_LOWER_4, STRATEGY_END_LOWER_4),
     ]
 
 
@@ -1194,7 +1189,7 @@ def get_lower_entry_window(activation_dt: datetime | None) -> tuple[tuple[int, i
 
 
 def validate_lower_strategy_windows() -> None:
-    """檢查四組時間有效、決策依序遞增，且每組決策早於進場區間。"""
+    """檢查三組時間有效、決策依序遞增，且每組決策早於進場區間。"""
     previous_decision_hm = -1
     settlement_hm = INTRADAY_COMPARE_END_LOWER[0] * 60 + INTRADAY_COMPARE_END_LOWER[1]
     for window_number, window in enumerate(get_lower_strategy_windows(), start=1):
@@ -1212,7 +1207,7 @@ def validate_lower_strategy_windows() -> None:
 
 
 def get_lower_decision_times(target_date: date) -> list[datetime]:
-    """時間1至時間4分別採用四組設定的決策時點。"""
+    """依序回傳三組設定的決策時點。"""
     return [
         datetime.combine(target_date, datetime.min.time()).replace(hour=decision_hm[0], minute=decision_hm[1])
         for decision_hm, _, _ in get_lower_strategy_windows()
@@ -1865,7 +1860,7 @@ def print_daily_optimization_results(
             market_open_text = ''
             lower_decision_text = ''
             candidate_range_rejected = gate_status_by_date_key.get(date_key) == GATE_LOWER_CANDIDATE_RANGE_REJECTED
-            checked_decision_count = 4
+            checked_decision_count = 3
             percent_rejected = (
                 strategy_type == STRATEGY_NO_TRADE
                 and gate_status_by_date_key.get(date_key) in (
