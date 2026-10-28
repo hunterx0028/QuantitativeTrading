@@ -9,7 +9,7 @@ import io
 import threading
 import uuid
 import requests
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from decimal import Decimal
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -153,6 +153,13 @@ INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 600  # 玉山行情官方日內行�
 REST_CONNECT_TIMEOUT_SECONDS = 3.0
 REST_READ_TIMEOUT_SECONDS = 5.0
 ORDER_UNKNOWN_ALERT_SECONDS = 30.0
+ORDER_SUBMIT_WAIT_SECONDS = 5.0  # 主迴圈最多等待送單結果；逾時不代表拒單。
+STOCK_QUOTE_STALE_SECONDS = 30.0
+TRADE_API_DEGRADED_EVENT = threading.Event()  # 當日停止新進場；既有委託仍須對帳。
+TRADE_CALL_STATE_LOCK = threading.Lock()
+TRADE_CALL_STATE: Dict[str, Any] = {}
+ORDER_SUBMISSION_FUTURES: Dict[str, Future] = {}
+ENTRY_CANCEL_FUTURES: Dict[str, tuple] = {}
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
@@ -256,6 +263,119 @@ def state_symbol_fields(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============ 下單函式 ============
+def start_serialized_trade_call(operation: str, callback, before_start=None) -> Future:
+    """只允許一個 native 呼叫在途；逾時不可釋放其鎖或另開 SDK 補單。"""
+    if not TRADE_API_LOCK.acquire(blocking=False):
+        raise TradeApiBusy("交易 SDK 忙碌，尚未執行此操作")
+    try:
+        if before_start is not None:
+            before_start()
+    except Exception:
+        TRADE_API_LOCK.release()
+        raise  # 尚未啟動 native 呼叫；禁止在意圖記錄失敗時送單。
+    future = Future()
+    with TRADE_CALL_STATE_LOCK:
+        TRADE_CALL_STATE.update(operation=operation, started=time.monotonic(), future=future, alerted=False)
+
+    def worker():
+        try:
+            result = callback()
+            # 送單、撤單共用節流，保持既有保守頻率。
+            if operation != "get_order_results":
+                time.sleep(0.1)
+        except Exception as exc:
+            TRADE_API_LOCK.release()
+            future.set_exception(exc)
+        else:
+            TRADE_API_LOCK.release()
+            future.set_result(result)
+
+    try:
+        threading.Thread(target=worker, name=f"trade-{operation}", daemon=True).start()
+    except Exception:
+        TRADE_API_LOCK.release()
+        future.set_exception(RuntimeError("Unable to start SDK worker"))
+        raise
+    return future
+
+
+def report_unsettled_trades(states: Dict[str, Dict[str, Any]], context: str) -> bool:
+    with ORDER_STATE_LOCK:
+        unsettled = [
+            {key: state.get(key) for key in (
+                "symbol_code_with_suf", "in_position", "qty", "entry_order_pending",
+                "entry_order_no", "entry_request_id", "exit_order_pending", "exit_order_no",
+                "exit_request_id", "exit_retry_reason", "entry_cancel_requested",
+            )}
+            for state in states.values()
+            if state.get("in_position") or state.get("entry_order_pending") or state.get("exit_order_pending")
+        ]
+    attention = bool(unsettled) or TRADE_API_DEGRADED_EVENT.is_set()
+    atomic_write_json(os.path.join(BASE_DIR, "trade_attention.json"), {
+        "time": now_tpe().isoformat(), "context": context,
+        "manual_attention_required": attention,
+        "sdk_degraded": TRADE_API_DEGRADED_EVENT.is_set(), "unsettled": unsettled,
+    })
+    trade_log("MANUAL_ATTENTION_REQUIRED" if attention else "TRADE_STATUS_CLEAR",
+              error=attention, context=context, unsettled=unsettled,
+              sdk_degraded=TRADE_API_DEGRADED_EVENT.is_set())
+    return attention
+
+
+def check_trade_api_watchdog(states: Dict[str, Dict[str, Any]]) -> None:
+    with TRADE_CALL_STATE_LOCK:
+        call = TRADE_CALL_STATE
+        if (not call or call["future"].done() or call["alerted"]
+                or time.monotonic() - call["started"] < ORDER_UNKNOWN_ALERT_SECONDS):
+            return
+        call["alerted"] = True
+        operation = call["operation"]
+    TRADE_API_DEGRADED_EVENT.set()
+    trade_log("TRADE_API_STALLED", error=True, operation=operation,
+              action="no_new_entries_keep_native_lock_manual_broker_check_required")
+    report_unsettled_trades(states, "trade_api_stalled")
+
+
+def consume_late_order_responses(states: Dict[str, Dict[str, Any]]) -> None:
+    for request_id, future in list(ORDER_SUBMISSION_FUTURES.items()):
+        if not future.done():
+            continue
+        ORDER_SUBMISSION_FUTURES.pop(request_id, None)
+        try:
+            response = future.result()
+        except Exception:
+            continue  # 仍保留 unknown，由委託明細對帳，不直接補單。
+        if not isinstance(response, dict):
+            continue
+        order_no = str(response.get("ord_no", "") or "").strip()
+        ret_code = str(response.get("ret_code", "") or "").strip()
+        rejected = bool(ret_code) and ret_code != "000000" and not order_no
+        if not rejected and (ret_code != "000000" or not order_no):
+            continue
+        for state in states.values():
+            for role in ("entry", "exit"):
+                with ORDER_STATE_LOCK:
+                    if state.get(f"{role}_request_id") != request_id or state.get(f"{role}_order_no"):
+                        continue
+                    if rejected:
+                        if state.get(f"{role}_fill_confirmed"):
+                            continue
+                        state[f"{role}_order_pending"] = False
+                        state[f"{role}_terminal_reason"] = "rejected"
+                        if role == "entry":
+                            state["traded"] = True
+                            state["exit_reason"] = "entry_order_terminated_unfilled"
+                        else:
+                            state["exit_retry_reason"] = state.get("exit_reason_pending") or "stop"
+                    else:
+                        state[f"{role}_order_no"] = order_no
+                    state[f"{role}_outcome_unknown"] = False
+                apply_pending_dealt_reports(state)
+                atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
+                trade_log("LATE_ORDER_RESPONSE_RESOLVED", request_id=request_id, ord_no=order_no,
+                          role=role, rejected=rejected)
+
+
 # symbol: '2330' '0050'
 # action_type: Action.Buy or Action.Sell
 # trade_type: Trade.Cash or Trade.DayTradingSell
@@ -288,11 +408,25 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
         trade=trade_type
     )
 
-    if not TRADE_API_LOCK.acquire(blocking=False):
-        raise TradeApiBusy("交易 SDK 查詢中，延後送單")
+    # Busy 表示尚未送出；與已開始執行後的例外／逾時必須區分。
+    def record_intent():
+        atomic_write_json(os.path.join(STATE_DIR, f"{request_id}.OrderIntent.json"), {
+            "time": now_tpe().isoformat(), "request_id": request_id,
+            "symbol": symbol_code_with_suf, "action": action_type,
+            "trade": trade_type, "qty": quantity, "status": "prepared_outcome_requires_reconciliation",
+        }, strict=True)
+        trade_log("ORDER_INTENT", request_id=request_id, symbol=symbol_code_with_suf,
+                  action=action_type, qty=quantity)
+
+    future = start_serialized_trade_call("place_order", lambda: mysdk.place_order(order), record_intent)
     try:
-        order_response = mysdk.place_order(order)
-        time.sleep(0.1) # 交易 API 限制每秒委託含取消不可超過 20 筆，保守控制在約 10 筆/秒
+        order_response = future.result(timeout=ORDER_SUBMIT_WAIT_SECONDS)
+    except FutureTimeoutError as e:
+        ORDER_SUBMISSION_FUTURES[request_id] = future
+        TRADE_API_DEGRADED_EVENT.set()
+        trade_log("ORDER_SUBMISSION_TIMEOUT", error=True, request_id=request_id,
+                  symbol=symbol_code_with_suf, action="keep_pending_no_resubmit_manual_check_required")
+        raise OrderOutcomeUnknown(request_id) from e
     except Exception as e:
         trade_log(
             "ORDER_OUTCOME_UNKNOWN",
@@ -308,8 +442,6 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
             error_msg=repr(e),
         )
         raise OrderOutcomeUnknown(request_id) from e
-    finally:
-        TRADE_API_LOCK.release()
 
     if not isinstance(order_response, dict):
         trade_log(
@@ -1205,18 +1337,33 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
 def get_realtime_price(stock_id: str, realtime_sdk):
     code_num = stock_id.split(".")[0]
     stock_intraday_quote = stock_rest_request(realtime_sdk, "quote", code_num)
-    last_price = stock_intraday_quote['lastPrice']
-    open_price = stock_intraday_quote['openPrice']
-    high_price = stock_intraday_quote['highPrice']
-    low_price = stock_intraday_quote['lowPrice']
-    close_price = stock_intraday_quote['closePrice']
-    avg_price = stock_intraday_quote['avgPrice']
+    received_at = now_tpe()
+    last_price, provider_time = validate_stock_quote(stock_intraday_quote, received_at)
+    values = [stock_intraday_quote.get(key) for key in
+              ('openPrice', 'highPrice', 'lowPrice', 'closePrice', 'avgPrice')]
+    if not all(finite_positive(value) for value in values):
+        raise ValueError("個股 quote 價格欄位必須為有限正數")
+    open_price, high_price, low_price, close_price, avg_price = map(float, values)
     bids = stock_intraday_quote.get('bids') or []
     asks = stock_intraday_quote.get('asks') or []
     best_bid_price = bids[0].get('price') if bids else None
     best_ask_price = asks[0].get('price') if asks else None
 
-    return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
+    return (last_price, open_price, high_price, low_price, close_price, avg_price,
+            best_bid_price, best_ask_price, provider_time.isoformat(), received_at.isoformat())
+
+
+def validate_stock_quote(quote: Dict[str, Any], now_local: datetime) -> tuple[float, datetime]:
+    price = quote.get("lastPrice")
+    if not finite_positive(price):
+        raise ValueError("個股 lastPrice 必須為有限正數")
+    provider_time = provider_timestamp_to_datetime(quote.get("lastUpdated"))
+    if provider_time is None:
+        raise ValueError("個股 quote 缺少有效 lastUpdated")
+    age = (now_local - provider_time).total_seconds()
+    if not -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS <= age <= STOCK_QUOTE_STALE_SECONDS:
+        raise ValueError(f"個股 quote 時間無效或已過期 age_seconds={age:.3f}")
+    return float(price), provider_time
 
 
 def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
@@ -1383,7 +1530,8 @@ def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk
     try:
         if query_error is not None:
             raise query_error
-        order_results = sdk.get_order_results() if results is None else results
+        # 此處只消費背景查詢結果；不得意外退回主執行緒同步查詢。
+        order_results = results
     except Exception as exc:
         trade_log(
             "ORDER_RESULTS_ERROR",
@@ -1522,21 +1670,75 @@ def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk
         for state in pending:
             reconcile_terminal_order(state, role, order_results)
 
+    # 撤單只能依券商最新原始明細進行，不能依本機猜測的欄位組裝。
+    if sdk is not None:
+        request_expired_entry_cancellations(states, sdk, order_results)
+
+
+def request_expired_entry_cancellations(states, sdk, order_results) -> None:
+    now_local = now_tpe()
+    for state in states.values():
+        with ORDER_STATE_LOCK:
+            if (not state.get("entry_order_pending") or state.get("entry_cancel_requested")
+                    or (now_local.hour, now_local.minute) <= get_entry_check_end_time(state)):
+                continue
+            order_no = str(state.get("entry_order_no", "") or "").strip()
+        rows = [row for row in order_results if str(row.get("ord_no", "") or "").strip() == order_no]
+        if not order_no or len(rows) != 1:
+            continue
+        if time.monotonic() < state.get("entry_cancel_retry_after", 0):
+            continue
+        try:
+            row = dict(rows[0])  # SDK recover_order_result 需使用完整原始欄位。
+            future = start_serialized_trade_call("cancel_order", lambda row=row: sdk.cancel_order(row))
+        except TradeApiBusy:
+            return  # 不排隊，下一次已完成的委託查詢再嘗試。
+        state["entry_cancel_requested"] = True
+        ENTRY_CANCEL_FUTURES[order_no] = (future, state)
+        atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
+        trade_log("ENTRY_CANCEL_REQUESTED", ord_no=order_no,
+                  action="past_entry_deadline_keep_pending_until_broker_confirmation")
+
+
+def maintain_pending_orders(states) -> None:
+    for order_no, (future, state) in list(ENTRY_CANCEL_FUTURES.items()):
+        if not future.done():
+            continue
+        ENTRY_CANCEL_FUTURES.pop(order_no, None)
+        try:
+            response = future.result()
+            if not isinstance(response, dict) or str(response.get("ret_code", "")) != "000000":
+                raise RuntimeError(f"cancel response not confirmed: {response!r}")
+            trade_log("ENTRY_CANCEL_ACKNOWLEDGED", ord_no=order_no,
+                      action="await_terminal_order_results_or_fill")
+        except Exception as exc:
+            # 取消失敗不解除 entry pending，也不允許另一筆入場單。
+            state["entry_cancel_requested"] = False
+            state["entry_cancel_retry_after"] = time.monotonic() + ORDER_RESULTS_UPDATE_SECONDS
+            trade_log("ENTRY_CANCEL_ERROR", error=True, ord_no=order_no, error_msg=repr(exc))
+    attention_changed = False
+    for state in states.values():
+        for role in ("entry", "exit"):
+            if not state.get(f"{role}_order_pending"):
+                continue
+            started = state.get(f"{role}_pending_since_monotonic", time.monotonic())
+            expired_entry = role == "entry" and (now_tpe().hour, now_tpe().minute) > get_entry_check_end_time(state)
+            if ((expired_entry or time.monotonic() - started >= ORDER_UNKNOWN_ALERT_SECONDS)
+                    and not state.get(f"{role}_pending_alerted")):
+                state[f"{role}_pending_alerted"] = True
+                attention_changed = True
+                trade_log("ORDER_PENDING_REQUIRES_ATTENTION", error=True,
+                          **state_symbol_fields(state), role=role,
+                          ord_no=state.get(f"{role}_order_no"),
+                          request_id=state.get(f"{role}_request_id"),
+                          action="keep_reconciling_no_blind_resubmit_manual_broker_check_required")
+    if attention_changed or (TRADE_API_DEGRADED_EVENT.is_set() and not getattr(maintain_pending_orders, "degraded_reported", False)):
+        maintain_pending_orders.degraded_reported = TRADE_API_DEGRADED_EVENT.is_set()
+        report_unsettled_trades(states, "pending_order_watchdog")
+
 
 def start_order_results_query(sdk) -> Future:
-    # SDK native 查詢沒有公開 timeout；只允許一個在途查詢，daemon 不阻擋收盤退出。
-    future = Future()
-
-    def query():
-        try:
-            with TRADE_API_LOCK:
-                result = sdk.get_order_results()
-            future.set_result(result)
-        except Exception as exc:
-            future.set_exception(exc)
-
-    threading.Thread(target=query, name="order-results-query", daemon=True).start()
-    return future
+    return start_serialized_trade_call("get_order_results", sdk.get_order_results)
 
 
 def get_exchange_key_for_symbol(symbol_code_with_suf: str) -> str:
@@ -1933,7 +2135,7 @@ def summarize_lower_strategy_decision_candidates(
             else:
                 quote_request_count += 1
                 quote = stock_rest_request(realtime_sdk, "quote", symbol_code.split(".")[0])
-                last_price = float(quote.get("lastPrice"))
+                last_price, _provider_time = validate_stock_quote(quote, now_tpe())
         except Exception as exc:
             data_missing_count += 1
             print(f"[LOWER_PERCENT] total_stocks {symbol_name} 取價資料不足：{exc!r}")
@@ -2008,7 +2210,7 @@ def summarize_lower_price_movements(
             else:
                 quote_request_count += 1
                 quote = stock_rest_request(realtime_sdk, "quote", symbol.split(".")[0])
-                price = float(quote.get("lastPrice"))
+                price, _provider_time = validate_stock_quote(quote, now_tpe())
             if not math.isfinite(price) or price <= 0:
                 raise ValueError("報價無效")
         except Exception as exc:
@@ -2122,16 +2324,24 @@ def decide_entry_mode_by_market_gate(
     realtime_sdk: Optional[EsunMarketdata] = None,
     window_number: int = 1,
 ) -> tuple[int, list[Dict[str, Any]]]:
-    market_snapshots = market_snapshots or {}
+    lower_decision_summary = summarize_lower_strategy_decision_candidates(states, realtime_sdk)
+    # 掃描可能跨越多個背景輪次；只使用掃描完成後的新鮮大盤條件。
+    market_snapshots = get_critical_market_gate_snapshots(f"lower_decision_{window_number}_after_scan")
     gate_results = [
         get_market_strategy_decision_gate_result(index_key, market_snapshots.get(index_key))
         for index_key in MARKET_GATE_INDEX_KEYS
     ]
-    lower_decision_summary = summarize_lower_strategy_decision_candidates(states, realtime_sdk)
     for result in gate_results:
         result["lower_decision_summary"] = lower_decision_summary
         result["window_number"] = window_number
         result["decision_status"] = "STOP"
+
+    now_local = now_tpe()
+    if (now_local.hour, now_local.minute) > get_lower_strategy_windows()[window_number - 1][2]:
+        for result in gate_results:
+            result["decision_status"] = "WAIT" if window_number < len(get_lower_strategy_windows()) else "STOP"
+            result["decision_reason"] = "股票池掃描完成時已超過本組進場截止時間"
+        return ENTRY_MODE_NO_TRADE, gate_results
 
     if lower_decision_summary["decline_percent"] > LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:
         for result in gate_results:
@@ -2422,7 +2632,7 @@ def provider_timestamp_to_datetime(value: Any) -> Optional[datetime]:
         elif timestamp > 10_000_000_000:
             timestamp /= 1_000
         return datetime.fromtimestamp(timestamp, TZ)
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, OverflowError):
         return None
 
 
@@ -2874,7 +3084,7 @@ def persist_entry_mode_to_stock_data(entry_mode: int) -> None:
     stock_data.entry_mode = entry_mode
 
 
-def atomic_write_json(path: str, data: Dict[str, Any]):
+def atomic_write_json(path: str, data: Dict[str, Any], *, strict: bool = False):
     """
     原子寫入：先寫到臨時檔，fsync 後再 os.replace 覆蓋目標檔，降低檔案損壞風險。
     改進：
@@ -2931,6 +3141,8 @@ def atomic_write_json(path: str, data: Dict[str, Any]):
                 os.remove(tmp_path)
         except Exception:
             pass
+        if strict:
+            raise
 
 
 def load_json_or_none(path: str) -> Optional[Dict[str, Any]]:
@@ -3274,6 +3486,8 @@ def entry_price_check(state: Dict[str, Any]) -> bool | str:
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
+    if TRADE_API_DEGRADED_EVENT.is_set():
+        return  # 當日停止新風險；保留已送出的委託與持倉對帳。
     if is_avg_strategy(state):
         if not AVG_SESSION_STATE.get("active"):
             return
@@ -3372,6 +3586,8 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
         if place_order_result or unknown_request_id:
             state["entry_order_pending"] = True
+            state["entry_pending_since_monotonic"] = time.monotonic()
+            state["entry_pending_alerted"] = False
             state["in_position"] = False
             state["entry_order_qty"] = qty
             state["entry_filled_qty"] = 0
@@ -3469,6 +3685,8 @@ def try_close_position(state: Dict[str, Any], mysdk):
 def mark_exit_order_pending(state: Dict[str, Any], order_no: str, exit_reason: str, request_id: str = "") -> None:
     with ORDER_STATE_LOCK:
         state["exit_order_pending"] = True
+        state["exit_pending_since_monotonic"] = time.monotonic()
+        state["exit_pending_alerted"] = False
         state["exit_order_qty"] = int(state.get("qty", 0) or 0)
         state["exit_filled_qty"] = 0
         state["exit_fully_filled"] = False
@@ -4011,6 +4229,9 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     order_query_started_monotonic = 0.0
     order_query_stall_announced = False
     while True:
+        consume_late_order_responses(states)
+        check_trade_api_watchdog(states)
+        maintain_pending_orders(states)
         if MARKET_INDEX_REST_FATAL_EVENT.is_set():
             blocked_count = mark_unentered_states_blocked_after_market_index_rest_fatal(states)
             if not market_index_rest_fatal_announced:
@@ -4204,9 +4425,9 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 results = completed_query.result()
             except Exception as exc:
                 # 沿用原有查詢失敗／AGR0005 冷卻處理，不在主執行緒重查 SDK。
-                update_entry_fills_from_order_results(states, None, query_error=exc)
+                update_entry_fills_from_order_results(states, mysdk, query_error=exc)
             else:
-                update_entry_fills_from_order_results(states, None, results=results)
+                update_entry_fills_from_order_results(states, mysdk, results=results)
         order_results_start_reached = (
             (now_local.hour, now_local.minute) >= ORDER_RESULTS_QUERY_START_TIME
         )
@@ -4220,16 +4441,22 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             and ORDER_RESULTS_PENDING_FUTURE is None
             and any(state_needs_entry_fill_update(st) or state_needs_exit_fill_update(st) for st in states.values())
         ):
-            ORDER_RESULTS_PENDING_FUTURE = start_order_results_query(mysdk)
-            order_query_started_monotonic = now_monotonic
-            order_query_stall_announced = False
-            last_order_results_update_monotonic = now_monotonic
+            try:
+                ORDER_RESULTS_PENDING_FUTURE = start_order_results_query(mysdk)
+            except TradeApiBusy:
+                pass  # 送單／撤單仍在途；不建立排隊查詢來佔用下一次平倉機會。
+            else:
+                order_query_started_monotonic = now_monotonic
+                order_query_stall_announced = False
+                last_order_results_update_monotonic = now_monotonic
 
         if lower_percent_exit_summary is not None:
             handle_lower_percent_exit(states, mysdk, lower_percent_exit_summary)
 
         # 已全數完成交易則收工
-        if entry_mode_decided and all_traded(states):
+        if (entry_mode_decided and all_traded(states)
+                and not any(st.get("in_position") or st.get("entry_order_pending") or st.get("exit_order_pending")
+                            for st in states.values())):
             if all_force_close_time_reached:
                 print("=== 已達停止時間，今日所有標的已收工 ===")
             else:
@@ -4296,7 +4523,12 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     QUOTE_PENDING_FUTURES.pop(st["symbol_code_with_suf"], None)
                     try:
                         # print("更新股價")
-                        px, open_px, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price = quote_future.result()
+                        (px, open_px, high_price, low_price, close_price, avg_price,
+                         best_bid_price, best_ask_price, provider_time, received_at) = quote_future.result()
+                        # 排隊／主迴圈延遲也可能讓原本新鮮的回應過期。
+                        quote_age = (now_tpe() - datetime.fromisoformat(provider_time)).total_seconds()
+                        if not -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS <= quote_age <= STOCK_QUOTE_STALE_SECONDS:
+                            raise ValueError(f"消費個股 quote 時已過期 age_seconds={quote_age:.3f}")
                     except Exception as e:
                         trade_log(
                             "QUOTE_ERROR",
@@ -4331,7 +4563,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["pre_last_price_time"] = st.get("last_price_time")
                     st["last_price"] = px  # 最新價格
-                    st["last_price_time"] = now_tpe().isoformat()
+                    st["last_price_time"] = provider_time
+                    st["quote_received_at"] = received_at
                     entry_check_end_time = get_entry_check_end_time(st)
                     if (
                         ((now_local.hour, now_local.minute) > entry_check_end_time)
@@ -4379,7 +4612,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         now_local = now_tpe()
         if (now_local.hour, now_local.minute) >= FORCE_EXIT_TIME:
             print(f"當前時間 {now_local.strftime('%Y-%m-%d %H:%M:%S')} >= {FORCE_EXIT_TIME[0]:02d}:{FORCE_EXIT_TIME[1]:02d}，程式結束。")
-            sys.exit(0)
+            sys.exit(2 if report_unsettled_trades(states, "force_exit_time") else 0)
 
         now = now_tpe()
         nxt = ceil_next_interval(now, 5) # 秒數在5的倍數輪巡
@@ -4404,11 +4637,13 @@ if __name__ == "__main__":
     original_stderr = sys.stderr
     sys.stdout = TeeStream(original_stdout, capture_buffer)
     sys.stderr = TeeStream(original_stderr, capture_buffer)
+    states = {}
     market_index_rest_thread = None
 
     try:
         validate_market_reversal_time_config()
         wait_until_main_start_time()
+        TRADE_API_DEGRADED_EVENT.clear()
         MARKET_REVERSAL_STOP_EVENT.clear()
         MARKET_INDEX_REST_STOP_EVENT.clear()
         MARKET_INDEX_REST_FATAL_EVENT.clear()
@@ -4475,6 +4710,10 @@ if __name__ == "__main__":
         # 開始正式作業
         monitor(states, sdk, realtime_sdk)
     finally:
+        try:
+            report_unsettled_trades(states, "shutdown")
+        except Exception as exc:
+            trade_log("SHUTDOWN_AUDIT_FAILED", error=True, error_msg=repr(exc))
         MARKETDATA_STOP_EVENT.set()
         MARKET_INDEX_REST_STOP_EVENT.set()
         for executor in (AVG_CANDLE_EXECUTOR, POSITION_QUOTE_EXECUTOR, CANDIDATE_QUOTE_EXECUTOR, MARKET_SCAN_EXECUTOR):
