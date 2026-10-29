@@ -358,20 +358,37 @@ def replace_once_required(source: str, old: str, new: str, description: str) -> 
     return source.replace(old, new, 1)
 
 
+def insert_main_runtime_setup(source: str) -> str:
+    """Locate the main try structurally, preserving all strategy resource initializers."""
+    tree = ast.parse(source)
+    main_test = ast.parse('__name__ == "__main__"', mode="eval").body
+    main_blocks = [node for node in tree.body
+                   if isinstance(node, ast.If)
+                   and ast.dump(node.test) == ast.dump(main_test)]
+    if len(main_blocks) != 1:
+        raise ValueError(f"Expected exactly one __main__ block, found {len(main_blocks)}")
+    main_tries = [node for node in main_blocks[0].body
+                  if isinstance(node, ast.Try) and node.finalbody]
+    if len(main_tries) != 1:
+        raise ValueError(f"Expected exactly one main try/finally, found {len(main_tries)}")
+    main_try = main_tries[0]
+    lines = source.splitlines(keepends=True)
+    start = main_try.lineno - 1
+    if lines[start].strip() != "try:":
+        raise ValueError("Expected a standalone main try header")
+    indent = " " * main_try.col_offset
+    initializers = f"{indent}realtime_sdk = None\n{indent}sdk = None\n"
+    setup = (
+        f'{indent}    print("===== Prepare runtime files =====")\n'
+        f"{indent}    download_runtime_files_from_s3()\n"
+        f"{indent}    load_stock_data_from_runtime_file()\n\n"
+    )
+    return "".join(lines[:start]) + initializers + lines[start] + setup + "".join(lines[start + 1:])
+
+
 def transform_main_for_docker(source: str) -> str:
     """Keep the singleton main flow and patch only container-specific operations."""
-    source = replace_once_required(
-        source,
-        "    market_index_rest_thread = None\n\n    try:\n",
-        "    realtime_sdk = None\n"
-        "    sdk = None\n"
-        "    market_index_rest_thread = None\n\n"
-        "    try:\n"
-        "        print(\"===== Prepare runtime files =====\")\n"
-        "        download_runtime_files_from_s3()\n"
-        "        load_stock_data_from_runtime_file()\n\n",
-        "main resource initialization",
-    )
+    source = insert_main_runtime_setup(source)
     source = replace_once_required(
         source,
         "        realtime_sdk = EsunMarketdata(config)\n"

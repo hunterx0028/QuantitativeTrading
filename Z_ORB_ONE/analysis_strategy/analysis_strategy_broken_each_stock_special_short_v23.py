@@ -14,8 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from Z_ORB_ONE.analysis_strategy import analysis_strategy_broken_each_stock_special_short_v18 as base
 
 SIGNAL_TIME = (10, 30)  # 統計包含此分鐘；下一分鐘 open 入場
-LONG_COUNT_RATIO = 2.0
-SHORT_COUNT_RATIO = 3.0
+LONG_COUNT_RATIO = 30.0
+SHORT_COUNT_RATIO = 20.0
 LONG_STOP_LOSS_PERCENT = 2.0
 LONG_TAKE_PROFIT_PERCENT = 5.0
 SHORT_STOP_LOSS_PERCENT = 2.0
@@ -26,7 +26,7 @@ INTRADAY_COMPARE_END_SHORT = (12, 50)
 MIN_MINUTE_BARS_BEFORE_0930 = 20
 STOCK_DATA_SOURCE = 'T'
 STOCK_LIST = []
-HISTORICAL_CACHE_DATE = 'xxxxxxxx'  # 空字串、YYYYMMDD 或 xxxxxxxx；同 v18
+HISTORICAL_CACHE_DATE = ''  # 空字串、YYYYMMDD 或 xxxxxxxx；同 v18
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 EACH_STOCK_OUTPUT_FILE = Path(__file__).with_name(
