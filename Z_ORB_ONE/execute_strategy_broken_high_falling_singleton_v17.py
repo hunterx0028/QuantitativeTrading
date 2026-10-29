@@ -109,8 +109,6 @@ AVG_ENTRY_DEADLINE = (11, 0)
 # 不設秒數期限；僅接受當分鐘的入場棒，避免追補歷史訊號。
 AVG_CANDLE_POLL_SECOND = 15  # 每分鐘於此秒數取一次完整分K，例如 09:33:15
 AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS = 0.105  # 最多約 9.5 次請求／秒
-AVG_CANDLE_CONNECT_TIMEOUT_SECONDS = 3.0
-AVG_CANDLE_READ_TIMEOUT_SECONDS = 5.0
 AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
 AVG_MIN_MINUTE_BARS_BEFORE_0930 = 20
 AVG_STOP_LOSS_PERCENT = 2.0
@@ -150,11 +148,8 @@ INDUSTRY_INDEX_STALE_SECONDS = 20.0  # 產業指數配合每分鐘四輪 REST �
 QUOTE_ROUND_INTERVAL_SECONDS = 15.0
 LOWER_EXIT_CHECK_INTERVAL_MINUTES = 10
 INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE = 600  # 玉山行情官方日內行情額度
-REST_CONNECT_TIMEOUT_SECONDS = 3.0
-REST_READ_TIMEOUT_SECONDS = 5.0
 ORDER_UNKNOWN_ALERT_SECONDS = 30.0
 ORDER_SUBMIT_WAIT_SECONDS = 5.0  # 主迴圈最多等待送單結果；逾時不代表拒單。
-STOCK_QUOTE_STALE_SECONDS = 30.0
 TRADE_API_DEGRADED_EVENT = threading.Event()  # 當日停止新進場；既有委託仍須對帳。
 TRADE_CALL_STATE_LOCK = threading.Lock()
 TRADE_CALL_STATE: Dict[str, Any] = {}
@@ -203,11 +198,9 @@ AVG_CANDLE_REQUEST_SCHEDULE_LOCK = threading.Lock()
 AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
 AVG_CANDLE_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="avg-candles")
 AVG_CANDLE_PENDING_FUTURES: Dict[Future, Dict[str, Any]] = {}
-POSITION_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="position-quote")
-CANDIDATE_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="candidate-quote")
+AVG_POSITION_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="avg-position-quote")
+AVG_POSITION_QUOTE_FUTURES: Dict[str, Future] = {}
 MARKET_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="market-scan")
-QUOTE_PENDING_FUTURES: Dict[str, Future] = {}
-INDUSTRY_PENDING_FUTURE: Optional[Future] = None
 ORDER_RESULTS_PENDING_FUTURE: Optional[Future] = None
 MARKETDATA_STOP_EVENT = threading.Event()
 
@@ -747,7 +740,8 @@ def get_tick_size(price: float) -> float:
 
 def get_up_down_price(stock_id: str, realtime_sdk):
     code_num = stock_id.split(".")[0]
-    stock_intra_ticker = stock_rest_request(realtime_sdk, "ticker", code_num)
+    stock = get_stock_rest_client(realtime_sdk)
+    stock_intra_ticker = stock.intraday.ticker(symbol=code_num)
     time.sleep(0.2)  # 避免短時間過量 request
     limit_up_price = round(stock_intra_ticker.get('limitUpPrice', 0), 2)
     limit_down_price = round(stock_intra_ticker.get('limitDownPrice', 0), 2)
@@ -950,12 +944,6 @@ def validate_avg_config() -> None:
         raise ValueError("AVG 目前每檔只允許一張")
     if type(AVG_CANDLE_POLL_SECOND) is not int or not 0 <= AVG_CANDLE_POLL_SECOND <= 59:
         raise ValueError("AVG_CANDLE_POLL_SECOND 必須介於 0~59")
-    for name, value in (
-        ("AVG_CANDLE_CONNECT_TIMEOUT_SECONDS", AVG_CANDLE_CONNECT_TIMEOUT_SECONDS),
-        ("AVG_CANDLE_READ_TIMEOUT_SECONDS", AVG_CANDLE_READ_TIMEOUT_SECONDS),
-    ):
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{name} 必須為有限正數")
     if (
         not math.isfinite(AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS)
         or AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS <= 0
@@ -1116,10 +1104,8 @@ def fetch_avg_candle_response(state: Dict[str, Any], realtime_sdk: EsunMarketdat
             time.sleep(delay)
         AVG_CANDLE_NEXT_REQUEST_MONOTONIC = time.monotonic() + AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
 
-    return stock_rest_request(
-        realtime_sdk, "candles", state["symbol_code"],
-        timeout=(AVG_CANDLE_CONNECT_TIMEOUT_SECONDS, AVG_CANDLE_READ_TIMEOUT_SECONDS),
-        timeframe="1", sort="asc",
+    return get_stock_rest_client(realtime_sdk).intraday.candles(
+        symbol=state["symbol_code"], timeframe="1", sort="asc",
     )
 
 
@@ -1226,6 +1212,7 @@ def process_avg_candle_state(
 
 def process_avg_candle_round(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, mysdk: SDK) -> None:
     # 先處理已完成的請求；未完成請求留在背景執行，不阻塞即時報價與持倉風控。
+    had_pending_requests = bool(AVG_CANDLE_PENDING_FUTURES)
     for future, state in list(AVG_CANDLE_PENDING_FUTURES.items()):
         if not future.done():
             continue
@@ -1250,6 +1237,21 @@ def process_avg_candle_round(states: Dict[str, Dict[str, Any]], realtime_sdk: Es
 
     if AVG_CANDLE_PENDING_FUTURES:
         return
+
+    # 整輪處理完才統計，讓本輪斜率剔除與其他候選狀態變化一併反映。
+    if had_pending_requests:
+        monitoring_count = sum(
+            1 for state in states.values()
+            if not state.get("traded")
+            and not state.get("in_position")
+            and not state.get("entry_order_pending")
+            and not state.get("exit_order_pending")
+        )
+        print(
+            f"[AVG_MONITORING_SUMMARY] time={now_tpe().strftime('%H:%M:%S')} "
+            f"本輪分K處理完成，目前每分鐘監看候選股票={monitoring_count} 檔；"
+            f"預估候選分K查詢約 {monitoring_count} 次／分鐘"
+        )
 
     now_local = now_tpe()
     if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
@@ -1336,34 +1338,39 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
 
 def get_realtime_price(stock_id: str, realtime_sdk):
     code_num = stock_id.split(".")[0]
-    stock_intraday_quote = stock_rest_request(realtime_sdk, "quote", code_num)
-    received_at = now_tpe()
-    last_price, provider_time = validate_stock_quote(stock_intraday_quote, received_at)
-    values = [stock_intraday_quote.get(key) for key in
-              ('openPrice', 'highPrice', 'lowPrice', 'closePrice', 'avgPrice')]
-    if not all(finite_positive(value) for value in values):
-        raise ValueError("個股 quote 價格欄位必須為有限正數")
-    open_price, high_price, low_price, close_price, avg_price = map(float, values)
+    stock = get_stock_rest_client(realtime_sdk)
+
+    stock_intraday_quote = stock.intraday.quote(symbol=code_num)
+    last_price = stock_intraday_quote['lastPrice']
+    open_price = stock_intraday_quote['openPrice']
+    high_price = stock_intraday_quote['highPrice']
+    low_price = stock_intraday_quote['lowPrice']
+    close_price = stock_intraday_quote['closePrice']
+    avg_price = stock_intraday_quote['avgPrice']
     bids = stock_intraday_quote.get('bids') or []
     asks = stock_intraday_quote.get('asks') or []
     best_bid_price = bids[0].get('price') if bids else None
     best_ask_price = asks[0].get('price') if asks else None
 
-    return (last_price, open_price, high_price, low_price, close_price, avg_price,
-            best_bid_price, best_ask_price, provider_time.isoformat(), received_at.isoformat())
+    return last_price, open_price, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price
 
 
-def validate_stock_quote(quote: Dict[str, Any], now_local: datetime) -> tuple[float, datetime]:
-    price = quote.get("lastPrice")
-    if not finite_positive(price):
-        raise ValueError("個股 lastPrice 必須為有限正數")
-    provider_time = provider_timestamp_to_datetime(quote.get("lastUpdated"))
-    if provider_time is None:
-        raise ValueError("個股 quote 缺少有效 lastUpdated")
-    age = (now_local - provider_time).total_seconds()
-    if not -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS <= age <= STOCK_QUOTE_STALE_SECONDS:
-        raise ValueError(f"個股 quote 時間無效或已過期 age_seconds={age:.3f}")
-    return float(price), provider_time
+def schedule_avg_position_quotes(states: Dict[str, Dict[str, Any]], realtime_sdk, *, request_quotes: bool) -> None:
+    # 每檔最多保留一筆在途請求，慢回應時不重複排入工作池。
+    for symbol, future in list(AVG_POSITION_QUOTE_FUTURES.items()):
+        state = states.get(symbol)
+        if state is None or state.get("traded") or not state.get("in_position"):
+            future.cancel()
+            AVG_POSITION_QUOTE_FUTURES.pop(symbol, None)
+    if not request_quotes:
+        return
+    for symbol, state in states.items():
+        if (not is_avg_strategy(state) or state.get("traded")
+                or not state.get("in_position") or symbol in AVG_POSITION_QUOTE_FUTURES):
+            continue
+        AVG_POSITION_QUOTE_FUTURES[symbol] = AVG_POSITION_QUOTE_EXECUTOR.submit(
+            get_realtime_price, symbol, realtime_sdk,
+        )
 
 
 def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
@@ -1995,10 +2002,7 @@ def get_fresh_market_index_value_from_snapshot(
         return None, age_seconds, f"REST 指數資料逾時 age_seconds={age_text}"
 
     try:
-        value = float(last_index)
-        if not finite_positive(value):
-            return None, age_seconds, "REST 指數必須為有限正數"
-        return value, age_seconds, ""
+        return float(last_index), age_seconds, ""
     except (TypeError, ValueError):
         return None, age_seconds, "REST 指數資料格式錯誤"
 
@@ -2052,7 +2056,7 @@ def get_market_strategy_decision_gate_result(
         result["lower_reason"] = "previous_close 無效"
         return result
 
-    if not finite_positive(previous_close_float):
+    if previous_close_float <= 0:
         result["lower_reason"] = "門檻設定無效"
         return result
 
@@ -2134,8 +2138,8 @@ def summarize_lower_strategy_decision_candidates(
                 last_price = float(current_prices[symbol_code])
             else:
                 quote_request_count += 1
-                quote = stock_rest_request(realtime_sdk, "quote", symbol_code.split(".")[0])
-                last_price, _provider_time = validate_stock_quote(quote, now_tpe())
+                quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol_code.split(".")[0])
+                last_price = float(quote.get("lastPrice"))
         except Exception as exc:
             data_missing_count += 1
             print(f"[LOWER_PERCENT] total_stocks {symbol_name} 取價資料不足：{exc!r}")
@@ -2209,8 +2213,8 @@ def summarize_lower_price_movements(
                 price = float(current_prices[symbol])
             else:
                 quote_request_count += 1
-                quote = stock_rest_request(realtime_sdk, "quote", symbol.split(".")[0])
-                price, _provider_time = validate_stock_quote(quote, now_tpe())
+                quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol.split(".")[0])
+                price = float(quote.get("lastPrice"))
             if not math.isfinite(price) or price <= 0:
                 raise ValueError("報價無效")
         except Exception as exc:
@@ -2632,7 +2636,7 @@ def provider_timestamp_to_datetime(value: Any) -> Optional[datetime]:
         elif timestamp > 10_000_000_000:
             timestamp /= 1_000
         return datetime.fromtimestamp(timestamp, TZ)
-    except (TypeError, ValueError, OSError, OverflowError):
+    except (TypeError, ValueError, OSError):
         return None
 
 
@@ -2640,38 +2644,6 @@ def get_stock_rest_client(realtime_sdk: EsunMarketdata):
     if MARKETDATA_STOCK_REST_CLIENT is not None:
         return MARKETDATA_STOCK_REST_CLIENT
     return realtime_sdk.rest_client.stock
-
-
-def stock_rest_request(realtime_sdk, resource: str, symbol: str, *, timeout=None, **params) -> Dict[str, Any]:
-    """沿用 SDK 認證；不使用其無 timeout 的 BaseRest.request，也不修改套件。"""
-    config = get_stock_rest_client(realtime_sdk).config
-    headers = {}
-    for key, header in (("api_key", "X-API-KEY"), ("sdk_token", "X-SDK-TOKEN")):
-        if config.get(key):
-            headers[header] = config[key]
-    if config.get("bearer_token"):
-        headers["Authorization"] = f"Bearer {config['bearer_token']}"
-    response = requests.get(
-        f"{config['base_url'].rstrip('/')}/intraday/{resource}/{symbol}",
-        headers=headers, params=params,
-        timeout=timeout or (REST_CONNECT_TIMEOUT_SECONDS, REST_READ_TIMEOUT_SECONDS),
-    )
-    response.raise_for_status()
-    result = response.json()
-    if not isinstance(result, dict):
-        raise ValueError("行情 REST 回應必須為物件")
-    return result
-
-
-def schedule_realtime_quotes(states, realtime_sdk) -> None:
-    # 持倉使用獨立工作池，避免候選股慢查詢佔滿持倉報價工作。
-    for symbol, state in states.items():
-        if state.get("traded") or symbol in QUOTE_PENDING_FUTURES:
-            continue
-        if is_avg_strategy(state) and not state.get("in_position"):
-            continue
-        executor = POSITION_QUOTE_EXECUTOR if state.get("in_position") else CANDIDATE_QUOTE_EXECUTOR
-        QUOTE_PENDING_FUTURES[symbol] = executor.submit(get_realtime_price, symbol, realtime_sdk)
 
 
 def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool:
@@ -2683,10 +2655,8 @@ def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool
 
     started = time.monotonic()
     try:
-        quote = stock_rest_request(realtime_sdk, "quote", index_symbol)
+        quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=index_symbol)
         index_value = float(quote["closePrice"])
-        if not finite_positive(index_value):
-            raise ValueError("指數必須為有限正數")
         provider_time_raw = quote.get("lastUpdated")
         provider_time = provider_timestamp_to_datetime(provider_time_raw)
         if provider_time is None:
@@ -2744,8 +2714,6 @@ def update_index_from_rest(realtime_sdk: EsunMarketdata, index_key: str) -> bool
 
 def update_required_industry_indices(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata) -> None:
     for index_key in get_required_industry_index_keys(states):
-        if MARKETDATA_STOP_EVENT.is_set():
-            return
         update_index_from_rest(realtime_sdk, index_key)
 
 
@@ -2958,7 +2926,7 @@ def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
         print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
-    if not finite_positive(previous_close_float) or not finite_positive(last_index_float):
+    if previous_close_float <= 0:
         print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
         return False
 
@@ -3358,7 +3326,7 @@ def check_lower_minute_bar_eligibility(
         minute_keys = set()
         error_msg = ""
         try:
-            response = stock_rest_request(realtime_sdk, "candles", state["symbol_code"])
+            response = get_stock_rest_client(realtime_sdk).intraday.candles(symbol=state["symbol_code"])
             candles = response.get("data")
             if not isinstance(candles, list):
                 raise ValueError("分K回應缺少 data 陣列")
@@ -4214,7 +4182,7 @@ def initialize_states(
 
 
 def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata):
-    global INDUSTRY_PENDING_FUTURE, ORDER_RESULTS_PENDING_FUTURE
+    global ORDER_RESULTS_PENDING_FUTURE
     update_status = False
     realtime_quote_start_announced = False
     lower_strategy_early_breakout_deadline_announced = False
@@ -4342,9 +4310,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     avg_candidates, realtime_sdk, strategy_type=STRATEGY_AVG,
                     force_rebuild_state=True,
                 )
-                for future in QUOTE_PENDING_FUTURES.values():
-                    future.cancel()
-                QUOTE_PENDING_FUTURES.clear()
                 states.clear()
                 states.update(avg_states)
                 ACTIVE_ORDER_STATES.clear()
@@ -4483,22 +4448,16 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         check_lower_percent_exit, states, realtime_sdk, check_dt=check_dt,
                     )
 
-        # 每分鐘四輪排程背景行情；主執行緒只消費已完成結果，不等網路。
-        if INDUSTRY_PENDING_FUTURE is not None and INDUSTRY_PENDING_FUTURE.done():
-            try:
-                INDUSTRY_PENDING_FUTURE.result()
-            except Exception as exc:
-                trade_log("INDUSTRY_SCAN_ERROR", error=True, error_msg=repr(exc))
-            INDUSTRY_PENDING_FUTURE = None
-        if round_should_update_realtime:
-            if current_entry_mode != ENTRY_MODE_AVG and INDUSTRY_PENDING_FUTURE is None:
-                INDUSTRY_PENDING_FUTURE = MARKET_SCAN_EXECUTOR.submit(
-                    update_required_industry_indices, dict(states), realtime_sdk,
-                )
-            schedule_realtime_quotes(states, realtime_sdk)
+        # 每分鐘四輪：先同步更新去重後的候選產業指數，再更新個股。
+        if round_should_update_realtime and current_entry_mode != ENTRY_MODE_AVG:
+            update_required_industry_indices(states, realtime_sdk)
 
         if current_entry_mode == ENTRY_MODE_AVG:
             process_avg_candle_round(states, realtime_sdk, mysdk)
+            # 先處理分K及入場，再排程持倉報價；主迴圈不等 SDK 網路回應。
+            schedule_avg_position_quotes(
+                states, realtime_sdk, request_quotes=round_should_update_realtime,
+            )
 
         # 輪詢
         for st in states.values():
@@ -4518,17 +4477,23 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     try_close_position(st, mysdk)
                     continue
 
-                quote_future = QUOTE_PENDING_FUTURES.get(st["symbol_code_with_suf"])
-                if quote_future is not None and quote_future.done():
-                    QUOTE_PENDING_FUTURES.pop(st["symbol_code_with_suf"], None)
+                quote_future = (
+                    AVG_POSITION_QUOTE_FUTURES.get(st["symbol_code_with_suf"])
+                    if is_avg_strategy(st) else None
+                )
+                quote_ready = (
+                    quote_future is not None and quote_future.done()
+                    if is_avg_strategy(st) else round_should_update_realtime
+                )
+                if quote_ready:
                     try:
                         # print("更新股價")
-                        (px, open_px, high_price, low_price, close_price, avg_price,
-                         best_bid_price, best_ask_price, provider_time, received_at) = quote_future.result()
-                        # 排隊／主迴圈延遲也可能讓原本新鮮的回應過期。
-                        quote_age = (now_tpe() - datetime.fromisoformat(provider_time)).total_seconds()
-                        if not -MARKET_INDEX_FUTURE_TOLERANCE_SECONDS <= quote_age <= STOCK_QUOTE_STALE_SECONDS:
-                            raise ValueError(f"消費個股 quote 時已過期 age_seconds={quote_age:.3f}")
+                        if is_avg_strategy(st):
+                            AVG_POSITION_QUOTE_FUTURES.pop(st["symbol_code_with_suf"], None)
+                            quote = quote_future.result()
+                        else:
+                            quote = get_realtime_price(st.get("symbol_code_with_suf", ""), realtime_sdk)
+                        px, open_px, high_price, low_price, close_price, avg_price, best_bid_price, best_ask_price = quote
                     except Exception as e:
                         trade_log(
                             "QUOTE_ERROR",
@@ -4563,8 +4528,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     st["pre_last_price"] = st.get("last_price", 0)  # 本次更新前的前一筆即時價
                     st["pre_last_price_time"] = st.get("last_price_time")
                     st["last_price"] = px  # 最新價格
-                    st["last_price_time"] = provider_time
-                    st["quote_received_at"] = received_at
+                    st["last_price_time"] = now_tpe().isoformat()
                     entry_check_end_time = get_entry_check_end_time(st)
                     if (
                         ((now_local.hour, now_local.minute) > entry_check_end_time)
@@ -4716,7 +4680,7 @@ if __name__ == "__main__":
             trade_log("SHUTDOWN_AUDIT_FAILED", error=True, error_msg=repr(exc))
         MARKETDATA_STOP_EVENT.set()
         MARKET_INDEX_REST_STOP_EVENT.set()
-        for executor in (AVG_CANDLE_EXECUTOR, POSITION_QUOTE_EXECUTOR, CANDIDATE_QUOTE_EXECUTOR, MARKET_SCAN_EXECUTOR):
+        for executor in (AVG_CANDLE_EXECUTOR, AVG_POSITION_QUOTE_EXECUTOR, MARKET_SCAN_EXECUTOR):
             executor.shutdown(wait=False, cancel_futures=True)
         if market_index_rest_thread is not None:
             market_index_rest_thread.join(timeout=2.0)
