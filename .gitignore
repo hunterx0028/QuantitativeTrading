@@ -31,3 +31,9 @@ execute_strategy_broken_high_falling_docker_v17.py
 /Z_ORB_ONE/stock_model_gpt/tests/
 /Z_ORB_ONE/stock_model_gpt/signal_reports/
 /Z_ORB_ONE/stock_model_gpt/
+
+# Application copies staged by generate_docker_strategy.py.
+/Z_ORB_ONE/docker_space/execute_strategy_broken_high_falling_singleton_v17.py
+/Z_ORB_ONE/docker_space/execute_strategy_broken_high_falling_docker_v17.py
+/Z_ORB_ONE/docker_space/runtime_environment.py
+/Z_ORB_ONE/docker_space/strategies/

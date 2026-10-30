@@ -1,306 +1,15 @@
 # -*- coding: utf-8 -*-
-"""
-Generate an AWS/Fargate-ready docker strategy file from a singleton strategy.
+"""Stage shared application code and a small Docker entry point.
 
-Set STRATEGY_FILENAME below, then run:
-    python generate_docker_strategy.py
+Run before copying docker_space's application files to the Docker build
+folder. No trading source is rewritten or imported by this packager.
 """
-
 import ast
-import os
-import re
+import shutil
 from pathlib import Path
-
 
 STRATEGY_FILENAME = "execute_strategy_broken_high_falling_singleton_v17.py"
 OVERWRITE_OUTPUT = True
-
-SUPPORTED_STOCK_DATA_EXPORTS = {
-    "selected_stocks",
-    "selected_limit_up_stocks",
-    "selected_limit_down_stocks",
-    "market_previous_close_indices",
-    "total_stocks",
-}
-
-
-DOCKER_HELPERS = '''
-
-# ============ Docker/Fargate 專用工具 ============
-S3_BUCKET = os.getenv("QUANT_S3_BUCKET", "leegueishen-quant-trading-17")
-S3_PREFIX = os.getenv("QUANT_S3_PREFIX", "exchange").strip("/")
-stock_data = None
-selected_stocks = []
-selected_limit_up_stocks = []
-selected_limit_down_stocks = []
-market_previous_close_indices = {}
-total_stocks = []
-
-REQUIRED_RUNTIME_FILES = (
-    "config.ini",
-    "stock_data.py",
-)
-DEFAULT_CERT_FILE = "T122260516_20270828.p12"
-
-
-def normalize_runtime_relative_path(path_value: str) -> str:
-    relative_path = str(path_value or "").strip().replace("\\\\", "/")
-    if not relative_path:
-        raise RuntimeError("Empty runtime file path")
-
-    normalized_path = os.path.normpath(relative_path)
-    if os.path.isabs(normalized_path) or normalized_path == ".." or normalized_path.startswith(f"..{os.sep}"):
-        raise RuntimeError(f"Runtime file path must stay under BASE_DIR: {path_value!r}")
-    return normalized_path
-
-
-def get_cert_runtime_file() -> str:
-    config_path = os.path.join(BASE_DIR, "config.ini")
-    if not os.path.exists(config_path):
-        return DEFAULT_CERT_FILE
-
-    runtime_config = ConfigParser()
-    runtime_config.read(config_path)
-    return normalize_runtime_relative_path(
-        runtime_config.get("Cert", "Path", fallback=DEFAULT_CERT_FILE)
-    )
-
-
-def is_truthy_env(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on")
-
-
-def should_download_from_s3() -> bool:
-    """
-    預設行為：
-    - AWS/Fargate 環境：下載 S3 檔案。
-    - 本機環境：若 /app 下缺少三個必要檔案，也嘗試下載。
-    可用 QUANT_DOWNLOAD_FROM_S3=true/false 強制控制。
-    """
-    override = os.getenv("QUANT_DOWNLOAD_FROM_S3")
-    if override is not None:
-        return is_truthy_env("QUANT_DOWNLOAD_FROM_S3")
-
-    running_in_aws = bool(os.getenv("AWS_EXECUTION_ENV") or os.getenv("ECS_CONTAINER_METADATA_URI_V4"))
-    runtime_files = list(REQUIRED_RUNTIME_FILES)
-    if os.path.exists(os.path.join(BASE_DIR, "config.ini")):
-        runtime_files.append(get_cert_runtime_file())
-    else:
-        runtime_files.append(DEFAULT_CERT_FILE)
-    missing_file = any(not os.path.exists(os.path.join(BASE_DIR, fname)) for fname in runtime_files)
-    return running_in_aws or missing_file
-
-
-def download_one_runtime_file_from_s3(fname: str) -> None:
-    runtime_path = normalize_runtime_relative_path(fname)
-    s3_path = runtime_path.replace(os.sep, "/")
-    s3_uri = f"s3://{S3_BUCKET}/{S3_PREFIX}/{s3_path}" if S3_PREFIX else f"s3://{S3_BUCKET}/{s3_path}"
-    local_path = os.path.join(BASE_DIR, runtime_path)
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    print(f"[S3] {s3_uri} -> {local_path}")
-    import subprocess
-    subprocess.run(
-        ["aws", "s3", "cp", s3_uri, local_path],
-        check=True,
-    )
-
-
-def download_runtime_files_from_s3():
-    """從 S3 下載 config.ini、stock_data.py，以及 config.ini 指定的 p12 憑證到 /app。"""
-    if not should_download_from_s3():
-        print("===== Skip S3 download: runtime files already exist locally =====")
-        return
-
-    print("===== Download runtime files from S3 =====")
-    for fname in REQUIRED_RUNTIME_FILES:
-        download_one_runtime_file_from_s3(fname)
-    download_one_runtime_file_from_s3(get_cert_runtime_file())
-
-
-def load_stock_data_from_runtime_file():
-    """
-    延後載入 stock_data.py。
-    這樣在 Fargate 啟動時，可以先從 S3 下載 stock_data.py，再載入策略需要的資料。
-    """
-    global stock_data, selected_stocks, selected_limit_up_stocks
-    global selected_limit_down_stocks, market_previous_close_indices
-    global total_stocks
-
-    import importlib.util
-    import sys
-
-    stock_data_path = os.path.join(BASE_DIR, "stock_data.py")
-    if not os.path.exists(stock_data_path):
-        raise FileNotFoundError(f"stock_data.py not found: {stock_data_path}")
-
-    spec = importlib.util.spec_from_file_location("stock_data", stock_data_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load stock_data.py from {stock_data_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    sys.modules["stock_data"] = module
-
-    required_stock_data_fields = (
-        "selected_stocks",
-        "selected_limit_up_stocks",
-        "selected_limit_down_stocks",
-        "market_previous_close_indices",
-        "total_stocks",
-    )
-    missing_fields = [
-        field_name
-        for field_name in required_stock_data_fields
-        if not hasattr(module, field_name)
-    ]
-    if missing_fields:
-        raise AttributeError(
-            "stock_data.py does not define required field(s): "
-            + ", ".join(missing_fields)
-        )
-
-    stock_data = module
-    selected_stocks = module.selected_stocks
-    selected_limit_up_stocks = module.selected_limit_up_stocks
-    selected_limit_down_stocks = module.selected_limit_down_stocks
-    market_previous_close_indices = module.market_previous_close_indices
-    total_stocks = module.total_stocks
-    return selected_stocks
-
-
-def build_login_stdin() -> io.StringIO:
-    """
-    玉山 SDK 在 Linux container 內會互動式詢問密碼。
-    主要由 patch_getpass_from_env() 回答密碼 prompt；這裡保留 stdin
-    fallback，避免 SDK 內部使用 input() 時在 ECS/Fargate 卡住。
-    """
-    required_envs = ("ESUN_PASSWORD", "CERT_PASSWORD")
-    missing = [name for name in required_envs if not os.getenv(name)]
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
-
-    login_lines = [os.environ["ESUN_PASSWORD"], os.environ["CERT_PASSWORD"]] * 8
-    return io.StringIO("\\n".join(login_lines) + "\\n")
-
-
-def configure_noninteractive_keyring() -> None:
-    """
-    ECS/Fargate 沒有可互動的 OS keyring。
-    若使用預設 keyring/keyrings.alt，可能會要求建立 keyring master password。
-    """
-    os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
-    try:
-        import keyring
-        from keyring.backends.null import Keyring
-
-        keyring.set_keyring(Keyring())
-        print("===== Python keyring backend: null (non-interactive) =====")
-    except Exception as e:
-        print(f"[WARN] Unable to force null keyring backend: {e}")
-
-
-def patch_getpass_from_env():
-    """讓 SDK 的 getpass prompt 改從環境變數取密碼。"""
-    import getpass
-
-    original_getpass = getpass.getpass
-    patched_module_getpass = []
-
-    last_password = None
-
-    def env_getpass(prompt: str = "Password: ", stream: Any = None) -> str:
-        nonlocal last_password
-
-        prompt_lower = str(prompt or "").casefold()
-
-        if "cert" in prompt_lower and "password" in prompt_lower:
-            env_name = "CERT_PASSWORD"
-            value = os.getenv(env_name)
-        elif "confirm" in prompt_lower and "password" in prompt_lower:
-            if last_password is None:
-                raise RuntimeError(f"Received confirm prompt before any password prompt: {prompt!r}")
-            env_name = "LAST_PASSWORD"
-            value = last_password
-        elif "password" in prompt_lower:
-            env_name = "ESUN_PASSWORD"
-            value = os.getenv(env_name)
-        else:
-            raise RuntimeError(f"Unknown password prompt: {prompt!r}")
-
-        if not value:
-            raise RuntimeError(f"Missing required environment variable for prompt {prompt!r}: {env_name}")
-
-        last_password = value
-        print(f"[AUTH] {prompt.strip()} -> {env_name}")
-        return value
-
-    getpass.getpass = env_getpass
-    for module_name, module in list(sys.modules.items()):
-        if not module_name.startswith(("esun_trade", "esun_marketdata")):
-            continue
-        if getattr(module, "getpass", None) is original_getpass:
-            setattr(module, "getpass", env_getpass)
-            patched_module_getpass.append(module)
-
-    return getpass, original_getpass, patched_module_getpass
-
-
-def login_sdks(config: ConfigParser) -> tuple[EsunMarketdata, SDK]:
-    """建立並登入行情與交易 SDK。"""
-    configure_noninteractive_keyring()
-    realtime_sdk = EsunMarketdata(config)
-    sdk = SDK(config)
-
-    original_stdin = sys.stdin
-    getpass_module, original_getpass, patched_module_getpass = patch_getpass_from_env()
-    sys.stdin = build_login_stdin()
-    try:
-        print("===== Login EsunMarketdata =====")
-        realtime_sdk.login()
-        print("===== EsunMarketdata login success =====")
-
-        print("===== Login Esun Trade SDK =====")
-        sdk.login()
-        print("===== Esun Trade SDK login success =====")
-    finally:
-        sys.stdin = original_stdin
-        getpass_module.getpass = original_getpass
-        for module in patched_module_getpass:
-            module.getpass = original_getpass
-
-    return realtime_sdk, sdk
-
-
-def safe_logout_sdk(name: str, sdk_obj: Any):
-    if sdk_obj is None:
-        return
-    try:
-        sdk_obj.logout()
-        print(f"===== {name} logout success =====")
-    except Exception as e:
-        print(f"[WARN] {name} logout skipped/failed: {e}")
-'''
-
-
-DOCKER_PERSIST_SELECTED_STOCKS = '''def persist_selected_stocks_to_stock_data(
-    stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]]
-):
-    """
-    Docker/Fargate 版不回寫 /app/stock_data.py。
-    /app 是 task 生命週期內的暫存檔案系統，回寫 stock_data.py 不會持久化到 S3。
-    selected_stocks 本身會在 initialize_states() 透過 stocks[:] 更新為過濾後名單。
-    """
-    return
-'''
-
-
-DOCKER_PERSIST_ENTRY_MODE = '''def persist_entry_mode_to_stock_data(entry_mode: int) -> None:
-    """
-    Docker/Fargate 版只更新 stock_data module 記憶體，不回寫 /app/stock_data.py。
-    後續 get_current_entry_mode() 會讀取這個 module 屬性。
-    """
-    stock_data.entry_mode = entry_mode
-'''
 
 
 def output_name_for(strategy_filename: str) -> str:
@@ -309,183 +18,62 @@ def output_name_for(strategy_filename: str) -> str:
     return strategy_filename.replace("_singleton_", "_docker_", 1)
 
 
-def replace_top_level_function(source: str, function_name: str, replacement: str) -> str:
+def transform_singleton_to_docker(source: str, strategy_filename: str = STRATEGY_FILENAME) -> str:
+    """Compatibility API: produce an entry point, not a modified strategy copy."""
     tree = ast.parse(source)
-    lines = source.splitlines(keepends=True)
-
-    for node in tree.body:
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == function_name
-        ):
-            start = node.lineno - 1
-            end = node.end_lineno
-            return "".join(lines[:start]) + replacement.rstrip() + "\n\n" + "".join(lines[end:])
-
-    raise ValueError(f"Cannot find function: {function_name}")
-
-
-def has_top_level_function(source: str, function_name: str) -> bool:
-    tree = ast.parse(source)
-    return any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == function_name
-        for node in tree.body
+    if not any(isinstance(node, ast.FunctionDef) and node.name == "main" for node in tree.body):
+        raise ValueError("Shared strategy must define main()")
+    module_name = Path(strategy_filename).stem
+    if not module_name.isidentifier():
+        raise ValueError("Strategy filename must be a valid Python module name")
+    return (
+        '# -*- coding: utf-8 -*-\n'
+        '# Generated entry point. Trading logic lives in the shared application.\n'
+        f'from {module_name} import main\n\n\n'
+        'if __name__ == "__main__":\n'
+        '    main(runtime_mode="docker")\n'
     )
 
 
-def get_stock_data_imported_names(source: str) -> set[str]:
-    tree = ast.parse(source)
-    imported_names: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, ast.ImportFrom) or node.module != "stock_data":
-            continue
-        for alias in node.names:
-            if alias.name == "*":
-                raise ValueError("Unsupported wildcard import from stock_data")
-            imported_names.add(alias.asname or alias.name)
-    return imported_names
-
-
-def replace_once_required(source: str, old: str, new: str, description: str) -> str:
-    """Replace one Docker-specific hook, failing instead of silently dropping behavior."""
-    occurrences = source.count(old)
-    if occurrences != 1:
-        raise ValueError(
-            f"Expected exactly one {description}, found {occurrences}; "
-            "the singleton startup flow may have changed"
-        )
-    return source.replace(old, new, 1)
-
-
-def insert_main_runtime_setup(source: str) -> str:
-    """Locate the main try structurally, preserving all strategy resource initializers."""
-    tree = ast.parse(source)
-    main_test = ast.parse('__name__ == "__main__"', mode="eval").body
-    main_blocks = [node for node in tree.body
-                   if isinstance(node, ast.If)
-                   and ast.dump(node.test) == ast.dump(main_test)]
-    if len(main_blocks) != 1:
-        raise ValueError(f"Expected exactly one __main__ block, found {len(main_blocks)}")
-    main_tries = [node for node in main_blocks[0].body
-                  if isinstance(node, ast.Try) and node.finalbody]
-    if len(main_tries) != 1:
-        raise ValueError(f"Expected exactly one main try/finally, found {len(main_tries)}")
-    main_try = main_tries[0]
-    lines = source.splitlines(keepends=True)
-    start = main_try.lineno - 1
-    if lines[start].strip() != "try:":
-        raise ValueError("Expected a standalone main try header")
-    indent = " " * main_try.col_offset
-    initializers = f"{indent}realtime_sdk = None\n{indent}sdk = None\n"
-    setup = (
-        f'{indent}    print("===== Prepare runtime files =====")\n'
-        f"{indent}    download_runtime_files_from_s3()\n"
-        f"{indent}    load_stock_data_from_runtime_file()\n\n"
-    )
-    return "".join(lines[:start]) + initializers + lines[start] + setup + "".join(lines[start + 1:])
-
-
-def transform_main_for_docker(source: str) -> str:
-    """Keep the singleton main flow and patch only container-specific operations."""
-    source = insert_main_runtime_setup(source)
-    source = replace_once_required(
-        source,
-        "        realtime_sdk = EsunMarketdata(config)\n"
-        "        try:\n"
-        "            realtime_sdk.login()\n"
-        "            trade_log(\"LOGIN_OK\", api=\"marketdata\")\n"
-        "        except Exception as exc:\n"
-        "            trade_log(\"LOGIN_ERROR\", error=True, api=\"marketdata\", error_msg=repr(exc))\n"
-        "            raise\n",
-        "        realtime_sdk, sdk = login_sdks(config)\n",
-        "market-data login block",
-    )
-    source = replace_once_required(
-        source,
-        "        sdk = SDK(config)\n"
-        "        try:\n"
-        "            sdk.login()\n"
-        "            trade_log(\"LOGIN_OK\", api=\"trade\")\n"
-        "        except Exception as exc:\n"
-        "            trade_log(\"LOGIN_ERROR\", error=True, api=\"trade\", error_msg=repr(exc))\n"
-        "            raise\n",
-        "",
-        "trade SDK login block",
-    )
-    source = replace_once_required(
-        source,
-        "        sys.stdout = original_stdout\n"
-        "        sys.stderr = original_stderr\n",
-        "        safe_logout_sdk(\"Esun Trade SDK\", sdk)\n"
-        "        safe_logout_sdk(\"EsunMarketdata\", realtime_sdk)\n"
-        "        sys.stdout = original_stdout\n"
-        "        sys.stderr = original_stderr\n",
-        "stdio restore cleanup hook",
-    )
-    return source
-
-
-def transform_singleton_to_docker(source: str) -> str:
-    source = source.replace("\r\n", "\n")
-
-    stock_data_imported_names = get_stock_data_imported_names(source)
-    unsupported_stock_data_names = sorted(stock_data_imported_names - SUPPORTED_STOCK_DATA_EXPORTS)
-    if unsupported_stock_data_names:
-        raise ValueError(
-            "Docker helper must be updated for stock_data import(s): "
-            + ", ".join(unsupported_stock_data_names)
-        )
-
-    # Docker 版必須先從 S3 下載 stock_data.py，不能在 module import 階段載入。
-    # 分別移除兩種 import，避免 stock_data 新增匯出名稱時，因完整字串不符而殘留。
-    source = re.sub(r"(?m)^import stock_data\s*\n", "", source, count=1)
-    source = re.sub(r"(?m)^from stock_data import [^\n]+\n", "", source, count=1)
-    source = source.replace("\nstock_data.entry_mode = ENTRY_MODE_NO_TRADE\n", "\n")
-
-    marker = "# ============ 下單函式 ============"
-    if marker not in source:
-        raise ValueError(f"Cannot find insertion marker: {marker}")
-    if "# ============ Docker/Fargate 專用工具 ============" not in source:
-        source = source.replace(marker, DOCKER_HELPERS.rstrip() + "\n\n" + marker, 1)
-
-    source = re.sub(
-        r'def now_tpe\(\) -> datetime:\n    return datetime\.now\(pytz\.timezone\("Asia/Taipei"\)\)',
-        "def now_tpe() -> datetime:\n    return datetime.now(TZ)",
-        source,
-        count=1,
-    )
-
-    if has_top_level_function(source, "persist_selected_stocks_to_stock_data"):
-        source = replace_top_level_function(
-            source,
-            "persist_selected_stocks_to_stock_data",
-            DOCKER_PERSIST_SELECTED_STOCKS,
-        )
-    source = replace_top_level_function(
-        source,
-        "persist_entry_mode_to_stock_data",
-        DOCKER_PERSIST_ENTRY_MODE,
-    )
-
-    return transform_main_for_docker(source)
+def package_strategy(source_dir: Path, output_dir: Path, *,
+                     strategy_filename: str = STRATEGY_FILENAME,
+                     overwrite: bool = OVERWRITE_OUTPUT) -> list[Path]:
+    """Validate and copy application code; runtime files remain external/S3."""
+    source_dir, output_dir = Path(source_dir).resolve(), Path(output_dir).resolve()
+    input_path = source_dir / strategy_filename
+    output_path = output_dir / output_name_for(strategy_filename)
+    if not overwrite and output_path.exists():
+        raise FileExistsError(output_path)
+    required = [input_path, source_dir / "runtime_environment.py"]
+    required += [source_dir / "strategies" / name for name in ("__init__.py", "fall.py", "avg.py", "lower.py")]
+    for path in required:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    payload = [input_path, source_dir / "runtime_environment.py"]
+    payload += sorted((source_dir / "strategies").rglob("*.py"))
+    for path in payload:
+        compile(path.read_text(encoding="utf-8"), str(path), "exec")
+    entry_point = transform_singleton_to_docker(input_path.read_text(encoding="utf-8"), strategy_filename)
+    compile(entry_point, str(output_path), "exec")
+    destinations = []
+    for path in payload:
+        destination = output_dir / path.relative_to(source_dir)
+        if destination.resolve() == path.resolve():
+            raise ValueError("Output directory must differ from the application source directory")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        destinations.append(destination)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(entry_point, encoding="utf-8", newline="\n")
+    destinations.append(output_path)
+    return destinations
 
 
 def main() -> None:
     output_dir = Path(__file__).resolve().parent
-    source_dir = output_dir.parent
-    input_path = source_dir / STRATEGY_FILENAME
-    output_path = output_dir / output_name_for(STRATEGY_FILENAME)
-
-    if not input_path.exists():
-        raise FileNotFoundError(input_path)
-    if output_path.exists() and not OVERWRITE_OUTPUT:
-        raise FileExistsError(output_path)
-
-    source = input_path.read_text(encoding="utf-8")
-    output = transform_singleton_to_docker(source)
-    output_path.write_text(output, encoding="utf-8", newline="\n")
-    print(f"Generated: {output_path}")
+    paths = package_strategy(output_dir.parent, output_dir)
+    for path in paths:
+        print(f"Staged: {path}")
 
 
 if __name__ == "__main__":

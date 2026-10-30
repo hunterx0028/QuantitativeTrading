@@ -22,8 +22,17 @@ from esun_trade.order import OrderObject
 from esun_trade.constant import (APCode, Trade, PriceFlag, Action)
 from esun_marketdata import EsunMarketdata
 
-import stock_data
-from stock_data import selected_stocks, market_previous_close_indices, total_stocks
+from runtime_environment import RuntimeEnvironment
+
+# Runtime data is loaded only after local/container preparation.
+stock_data = None
+selected_stocks = []
+market_previous_close_indices = {}
+total_stocks = []
+from strategies.fall import FallConfig, FallRuntime, evaluate_fall_quote
+from strategies.fall import fetch_screen_result, fetch_quote_snapshot
+from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
+from strategies.lower import LowerConfig, LowerRuntime, LowerServices, LowerStrategy
 
 
 class TeeStream:
@@ -200,45 +209,24 @@ LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT = threading.Event()
 ENTRY_MODE_NO_TRADE = 0
 ENTRY_MODE_LOWER = 2
 ENTRY_MODE_AVG = 3
-stock_data.entry_mode = ENTRY_MODE_NO_TRADE
-LOWER_SESSION_STATE: Dict[str, Any] = {
-    "activation_dt": None,
-    "window_number": None,
-    "baseline_prices": {},
-    "next_exit_check_dt": None,
-    "stopped": False,
-}
-AVG_SESSION_STATE: Dict[str, Any] = {
-    "active": False,
-    "last_scan_minute_key": None,
-    "candidate_count": 0,
-}
-AVG_CANDLE_REQUEST_SCHEDULE_LOCK = threading.Lock()
-AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
+
 AVG_CANDLE_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="avg-candles")
-AVG_CANDLE_PENDING_FUTURES: Dict[Future, Dict[str, Any]] = {}
+
 AVG_POSITION_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="avg-position-quote")
-AVG_POSITION_QUOTE_FUTURES: Dict[str, Future] = {}
+
 MARKET_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="market-scan")
 LOWER_DATA_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lower-data")
 LOWER_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lower-quote")
 INDEX_DATA_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="industry-data")
-LOWER_MINUTE_FUTURES: Dict[str, tuple] = {}
-LOWER_QUOTE_FUTURES: Dict[str, tuple] = {}
+
+
 INDUSTRY_INDEX_FUTURES: Dict[str, Future] = {}
 ORDER_RESULTS_PENDING_FUTURE: Optional[Future] = None
 MARKETDATA_STOP_EVENT = threading.Event()
 
-FALL_STATES: Dict[str, Dict[str, Any]] = {}
-FALL_CANDIDATE_SYMBOLS: set[str] = set()
-FALL_SCREEN_PENDING_SYMBOLS: set[str] = set()
-FALL_SCREEN_QUEUE: list = []
-FALL_SCREEN_FUTURES: Dict[Future, tuple] = {}
-FALL_QUOTE_FUTURES: Dict[str, Future] = {}
-FALL_QUOTE_SNAPSHOTS: Dict[str, tuple] = {}
-FALL_QUOTE_POLLER_STOP_EVENT = threading.Event()
-FALL_LAST_QUOTE_ROUND = None
-FALL_SESSION_STATE = {"screen_started": False, "screen_complete": False}
+AVG_RUNTIME = AvgRuntime()
+LOWER_RUNTIME = LowerRuntime()
+FALL_RUNTIME = FallRuntime()
 FALL_SCREEN_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fall-screen")
 FALL_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fall-quote")
 # 所有日內 stock REST 共用節流，保留 600/min 額度餘裕，避免兩套背景工作互相超額。
@@ -325,7 +313,7 @@ def is_fall_strategy(state):
 def all_order_states(states):
     """市場計算仍用原 states，委託與對帳採每檔唯一的交易擁有者。"""
     with ORDER_STATE_LOCK:
-        return {**states, **FALL_STATES}
+        return {**states, **FALL_RUNTIME.states}
 
 
 def refresh_active_order_states(states):
@@ -337,241 +325,137 @@ def refresh_active_order_states(states):
 def fall_blocks_other_entry(state):
     symbol = state.get("symbol_code_with_suf")
     return not is_fall_strategy(state) and (
-        symbol in FALL_CANDIDATE_SYMBOLS or symbol in FALL_SCREEN_PENDING_SYMBOLS)
+        symbol in FALL_RUNTIME.candidate_symbols or symbol in FALL_RUNTIME.screen_pending_symbols)
+
+
+def get_fall_config() -> FallConfig:
+    """從現有調參入口建立設定快照，避免模組持有過期的參數副本。"""
+    return FallConfig(
+        stock_data_source=FALL_STOCK_DATA_SOURCE,
+        signal_start_time=FALL_SIGNAL_START_TIME,
+        signal_end_time=FALL_SIGNAL_END_TIME,
+        min_drop_percent=FALL_MIN_DROP_PERCENT,
+        max_deviation_ratio=FALL_MAX_DEVIATION_RATIO,
+        entry_deadline=FALL_ENTRY_DEADLINE,
+        candle_publish_delay_seconds=FALL_CANDLE_PUBLISH_DELAY_SECONDS,
+        stop_loss_percent=FALL_STOP_LOSS_PERCENT,
+        take_profit_percent=FALL_TAKE_PROFIT_PERCENT,
+        force_close_time=FALL_FORCE_CLOSE_TIME,
+        entry_order_quantity=FALL_ENTRY_ORDER_QUANTITY,
+        protect_profit_switch=FALL_PROTECT_PROFIT_SWITCH,
+        protect_profit_per=FALL_PROTECT_PROFIT_PER,
+        protect_loss_per=FALL_PROTECT_LOSS_PER,
+        profit_back_percent=FALL_PROFIT_BACK_PERCENT,
+        profit_target_percent=FALL_PROFIT_TARGET_PERCENT,
+    )
 
 
 def validate_fall_config():
-    start = time_tuple_to_minutes(FALL_SIGNAL_START_TIME, "FALL_SIGNAL_START_TIME")
-    end = time_tuple_to_minutes(FALL_SIGNAL_END_TIME, "FALL_SIGNAL_END_TIME")
-    deadline = time_tuple_to_minutes(FALL_ENTRY_DEADLINE, "FALL_ENTRY_DEADLINE")
-    close = time_tuple_to_minutes(FALL_FORCE_CLOSE_TIME, "FALL_FORCE_CLOSE_TIME")
-    if not 540 <= start < end < end + 1 <= deadline < close <= 810:
-        raise ValueError("FALL 需滿足 09:00 <= 起點 < 確認 < 監看起點 <= 截止 < 平倉 <= 13:30")
-    if FALL_STOCK_DATA_SOURCE not in ("T", "S") or FALL_ENTRY_ORDER_QUANTITY != 1:
-        raise ValueError("FALL 股票池須為 T/S，每檔限一張")
-    for value in (FALL_MIN_DROP_PERCENT, FALL_STOP_LOSS_PERCENT, FALL_TAKE_PROFIT_PERCENT,
-                  FALL_PROTECT_PROFIT_PER, FALL_PROTECT_LOSS_PER,
-                  FALL_PROFIT_BACK_PERCENT, FALL_PROFIT_TARGET_PERCENT):
-        if not math.isfinite(value) or not 0 < value < 100:
-            raise ValueError("FALL 百分比必須介於 0 與 100")
-    if not math.isfinite(FALL_MAX_DEVIATION_RATIO) or not 0 <= FALL_MAX_DEVIATION_RATIO < 1:
-        raise ValueError("FALL 偏離比例須介於 0（含）與 1 之間")
-    if not 0 <= FALL_CANDLE_PUBLISH_DELAY_SECONDS < 60:
-        raise ValueError("FALL 分K發布等待秒數須介於 0（含）與 60 之間")
+    get_fall_config().validate(time_tuple_to_minutes)
 
 
 def initialize_fall_session():
-    global FALL_LAST_QUOTE_ROUND
     validate_fall_config()
-    FALL_STATES.clear()
-    FALL_CANDIDATE_SYMBOLS.clear()
-    FALL_SCREEN_PENDING_SYMBOLS.clear()
-    FALL_SCREEN_QUEUE.clear()
-    FALL_SCREEN_FUTURES.clear()
-    FALL_QUOTE_FUTURES.clear()
-    FALL_QUOTE_SNAPSHOTS.clear()
-    FALL_QUOTE_POLLER_STOP_EVENT.clear()
-    FALL_LAST_QUOTE_ROUND = None
-    FALL_SESSION_STATE.update(screen_started=False, screen_complete=False)
-    seen = set()
-    for row in (total_stocks if FALL_STOCK_DATA_SOURCE == "T" else selected_stocks):
-        symbol = get_pure_symbol(row[0])[1]
-        if symbol not in seen:
-            seen.add(symbol)
-            FALL_SCREEN_QUEUE.append(row)
-            FALL_SCREEN_PENDING_SYMBOLS.add(symbol)
-    trade_log("FALL_UNIVERSE", source=FALL_STOCK_DATA_SOURCE, count=len(seen))
+    FALL_RUNTIME.reset()
+    count = FALL_RUNTIME.initialize_universe(
+        total_stocks if FALL_STOCK_DATA_SOURCE == "T" else selected_stocks,
+        get_pure_symbol,
+    )
+    trade_log("FALL_UNIVERSE", source=FALL_STOCK_DATA_SOURCE, count=count)
 
 
 def find_fall_signal(bars, now_local):
-    """與 v24 相同的首尾 close 連線及逐根最大偏離，僅使用完成分K。"""
-    start = now_local.replace(hour=FALL_SIGNAL_START_TIME[0], minute=FALL_SIGNAL_START_TIME[1], second=0, microsecond=0)
-    end = start.replace(hour=FALL_SIGNAL_END_TIME[0], minute=FALL_SIGNAL_END_TIME[1])
-    activation = end + timedelta(minutes=1)
-    if now_local < activation:
-        return None
-    window = [bar for bar in bars if start <= bar["dt"] < activation]
-    intervals = int((end - start).total_seconds() // 60)
-    if [b["dt"] for b in window] != [start + timedelta(minutes=i) for i in range(intervals + 1)]:
-        raise ValueError("FALL 確認窗口缺棒、重複或非整分鐘資料")
-    first, last = Decimal(str(window[0]["close"])), Decimal(str(window[-1]["close"]))
-    drop = first - last
-    if drop <= 0 or drop * 100 < first * Decimal(str(FALL_MIN_DROP_PERCENT)):
-        return None
-    maximum = max(abs((Decimal(str(b["close"])) - first) * intervals + drop * i)
-                  for i, b in enumerate(window))
-    if maximum > drop * intervals * Decimal(str(FALL_MAX_DEVIATION_RATIO)):
-        return None
-    return {"fall_signal_time": end.isoformat(), "fall_activation_time": activation.isoformat(),
-            "fall_drop_percent": float(drop / first * 100),
-            "fall_max_deviation_ratio": float(maximum / (drop * intervals))}
+    """沿用主程式參數，將純訊號計算交給 FALL 模組。"""
+    return get_fall_config().find_signal(bars, now_local)
 
 
 def fetch_fall_screen_result(row, realtime_sdk):
-    symbol = get_pure_symbol(row[0])[0]
-    response = get_stock_rest_client(realtime_sdk).intraday.candles(symbol=symbol, timeframe="1", sort="asc")
-    now_local = now_tpe()
-    signal = find_fall_signal(parse_avg_candles(response.get("data"), now_local), now_local)
-    if signal is None:
-        return None, None
-    try:
-        ticker = get_up_down_price(get_pure_symbol(row[0])[1], realtime_sdk)
-    except Exception as exc:
-        # 符合緩跌就保留專屬標記，即使資格查詢失敗也不釋回 LOWER/AVG。
-        return signal, {"error": repr(exc)}
-    return signal, ticker
+    return fetch_screen_result(
+        row, realtime_sdk, get_pure_symbol=get_pure_symbol,
+        get_stock_rest_client=get_stock_rest_client, now=now_tpe,
+        parse_candles=parse_avg_candles, find_signal=find_fall_signal,
+        get_up_down_price=get_up_down_price,
+    )
 
 
 def register_fall_candidate(row, signal, ticker, states):
-    symbol = get_pure_symbol(row[0])[1]
-    FALL_CANDIDATE_SYMBOLS.add(symbol)
-    trade_log("FALL_RESERVED", symbol=symbol, **signal)
-    existing = all_order_states(states).get(symbol, {})
-    if (existing.get("in_position") or existing.get("entry_order_pending")
-            or existing.get("exit_order_pending") or existing.get("entry_order_no")
-            or existing.get("entry_request_id")):
-        trade_log("FALL_ALREADY_USED", symbol=symbol, action="keep_existing_trade_no_fall_entry")
-        return
-    if isinstance(ticker, dict):
-        trade_log("FALL_INELIGIBLE", error=True, symbol=symbol, reason=ticker.get("error"))
-        return
-    up, down, can_trade, disposition = ticker
-    if not can_trade or disposition is None or disposition or not all(finite_positive(p) for p in (up, down, row[3], row[4])):
-        trade_log("FALL_INELIGIBLE", symbol=symbol, action="reserved_no_entry")
-        return
-    name, _qty, v1, v2, v3, v4, industry, _volatility, streak = row
-    state = build_initial_state(name, FALL_ENTRY_ORDER_QUANTITY, v1, v2, v3, v4,
-                                str(industry).zfill(2), "", up, down, *streak, STRATEGY_FALL)
-    state.update(signal, fall_candidate=True, minute_bars_eligible=True, side=TRADE_SIDE_SHORT)
-    with ORDER_STATE_LOCK:
-        FALL_STATES[symbol] = state
-        refresh_active_order_states(states)
-    atomic_write_json(state_path(symbol), state)
+    FALL_RUNTIME.register_candidate(
+        row, signal, ticker, states, get_pure_symbol=get_pure_symbol,
+        all_order_states=all_order_states, finite_positive=finite_positive,
+        build_initial_state=build_initial_state, entry_order_quantity=FALL_ENTRY_ORDER_QUANTITY,
+        strategy_type=STRATEGY_FALL, trade_side_short=TRADE_SIDE_SHORT,
+        order_state_lock=ORDER_STATE_LOCK, refresh_active_order_states=refresh_active_order_states,
+        persist_state=lambda symbol, state: atomic_write_json(state_path(symbol), state),
+        trade_log=trade_log,
+    )
 
 
 def fall_work_pending():
-    return (not FALL_SESSION_STATE["screen_complete"] or bool(FALL_SCREEN_FUTURES)
-            or any(not s.get("traded") or s.get("in_position") or s.get("entry_order_pending")
-                   or s.get("exit_order_pending") for s in list(FALL_STATES.values())))
+    return FALL_RUNTIME.work_pending()
 
 
 def process_fall_round(states, realtime_sdk, mysdk, *, request_quotes):
     now_local = now_tpe()
-    activation = now_local.replace(hour=FALL_SIGNAL_END_TIME[0], minute=FALL_SIGNAL_END_TIME[1],
-                                   second=0, microsecond=0) + timedelta(minutes=1, seconds=FALL_CANDLE_PUBLISH_DELAY_SECONDS)
-    if now_local >= activation:
-        FALL_SESSION_STATE["screen_started"] = True
-    for future, row in list(FALL_SCREEN_FUTURES.items()):
-        if not future.done():
-            continue
-        FALL_SCREEN_FUTURES.pop(future)
-        symbol = get_pure_symbol(row[0])[1]
-        try:
-            signal, ticker = future.result()
-            if signal:
-                register_fall_candidate(row, signal, ticker, states)
-        except Exception as exc:
-            trade_log("FALL_SCREEN_ERROR", error=True, symbol=symbol, error_msg=repr(exc), action="skip_no_signal")
-        finally:
-            FALL_SCREEN_PENDING_SYMBOLS.discard(symbol)
-    if (now_local.hour, now_local.minute) > FALL_ENTRY_DEADLINE:
-        FALL_SCREEN_QUEUE.clear()
-        for future in FALL_SCREEN_FUTURES:
-            future.cancel()  # 已執行者保留，尚未開始的篩選不再發 API。
-        # 在途結果仍會消費，但過期不送新單。
-        FALL_SCREEN_PENDING_SYMBOLS.intersection_update(
-            get_pure_symbol(row[0])[1] for row in FALL_SCREEN_FUTURES.values())
-    if FALL_SESSION_STATE["screen_started"]:
-        while FALL_SCREEN_QUEUE:
-            row = FALL_SCREEN_QUEUE.pop(0)
-            FALL_SCREEN_FUTURES[FALL_SCREEN_EXECUTOR.submit(fetch_fall_screen_result, row, realtime_sdk)] = row
-        if not FALL_SCREEN_QUEUE and not FALL_SCREEN_FUTURES and not FALL_SESSION_STATE["screen_complete"]:
-            FALL_SESSION_STATE["screen_complete"] = True
-            trade_log("FALL_SCREEN_COMPLETE", candidates=len(FALL_CANDIDATE_SYMBOLS), monitor_count=len(FALL_STATES))
+    FALL_RUNTIME.process_screen_round(
+        states, realtime_sdk, now_local=now_local, config=get_fall_config(),
+        get_pure_symbol=get_pure_symbol, register_candidate=register_fall_candidate,
+        screen_executor=FALL_SCREEN_EXECUTOR, fetch_screen_result=fetch_fall_screen_result,
+        trade_log=trade_log,
+    )
 
     # 獨立於市場分流、LOWER 停止及 AVG 分K循環，持倉/未知委託始終保留。
-    for symbol, state in list(FALL_STATES.items()):
-        try:
-            if state.get("in_position") and (force_close_time_reached(state) or state.get("exit_retry_reason")):
-                try_close_position(state, mysdk)
-            if state.get("traded"):
-                continue
-            if ((now_local.hour, now_local.minute) > FALL_ENTRY_DEADLINE and check_open_status(state)):
-                state.update(traded=True, exit_reason="fall_entry_deadline_passed")
-                atomic_write_json(state_path(symbol), state)
-                continue
-            with ORDER_STATE_LOCK:
-                snapshot = FALL_QUOTE_SNAPSHOTS.pop(symbol, None)
-            if snapshot is not None:
-                quote, requested_at = snapshot
-                if time.monotonic() - requested_at <= QUOTE_ROUND_INTERVAL_SECONDS:
-                    apply_fall_quote(state, quote, mysdk)
-        except Exception as exc:
-            trade_log("FALL_MONITOR_ERROR", error=True, symbol=symbol, error_msg=repr(exc))
+    FALL_RUNTIME.process_position_round(
+        mysdk, now_local=now_local, entry_deadline=FALL_ENTRY_DEADLINE,
+        order_state_lock=ORDER_STATE_LOCK, monotonic=time.monotonic,
+        quote_round_interval_seconds=QUOTE_ROUND_INTERVAL_SECONDS,
+        force_close_time_reached=force_close_time_reached, close_position=try_close_position,
+        check_open_status=check_open_status,
+        persist_state=lambda symbol, state: atomic_write_json(state_path(symbol), state),
+        apply_quote=apply_fall_quote, trade_log=trade_log,
+    )
 
 
 def fetch_fall_quote(symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_CANDIDATE):
-    requested_at = time.monotonic()
-    return get_realtime_price(symbol, realtime_sdk, priority=priority), requested_at
+    return fetch_quote_snapshot(
+        symbol, realtime_sdk, priority, monotonic=time.monotonic,
+        get_realtime_price=get_realtime_price,
+    )
 
 
 def poll_fall_quotes_once(realtime_sdk):
     """只抓行情與發布最新快照；不得在行情執行緒操作委託或交易狀態。"""
-    global FALL_LAST_QUOTE_ROUND
-    for symbol, future in list(FALL_QUOTE_FUTURES.items()):
-        if not future.done():
-            continue
-        FALL_QUOTE_FUTURES.pop(symbol)
-        try:
-            snapshot = future.result()
-        except Exception as exc:
-            trade_log("FALL_QUOTE_ERROR", error=True, symbol=symbol, error_msg=repr(exc))
-        else:
-            with ORDER_STATE_LOCK:
-                FALL_QUOTE_SNAPSHOTS[symbol] = snapshot
-    now_local = now_tpe()
-    round_key = int((now_local.timestamp() - 5) // QUOTE_ROUND_INTERVAL_SECONDS)
-    if round_key == FALL_LAST_QUOTE_ROUND:
-        return
-    FALL_LAST_QUOTE_ROUND = round_key
-    with ORDER_STATE_LOCK:
-        candidates = list(FALL_STATES.items())
-    for symbol, state in candidates:
-        if state.get("traded") and not state.get("in_position"):
-            continue
-        if not state.get("in_position") and (now_local.hour, now_local.minute) > FALL_ENTRY_DEADLINE:
-            continue
-        if symbol not in FALL_QUOTE_FUTURES:
-            priority = MARKETDATA_PRIORITY_POSITION if state.get('in_position') else MARKETDATA_PRIORITY_CANDIDATE
-            executor = AVG_POSITION_QUOTE_EXECUTOR if state.get('in_position') else FALL_QUOTE_EXECUTOR
-            FALL_QUOTE_FUTURES[symbol] = executor.submit(fetch_fall_quote, symbol, realtime_sdk, priority)
+    FALL_RUNTIME.poll_quotes_once(
+        realtime_sdk, now=now_tpe, order_state_lock=ORDER_STATE_LOCK,
+        entry_deadline=FALL_ENTRY_DEADLINE, quote_round_interval_seconds=QUOTE_ROUND_INTERVAL_SECONDS,
+        fetch_quote=fetch_fall_quote, position_executor=AVG_POSITION_QUOTE_EXECUTOR,
+        candidate_executor=FALL_QUOTE_EXECUTOR, position_priority=MARKETDATA_PRIORITY_POSITION,
+        candidate_priority=MARKETDATA_PRIORITY_CANDIDATE, trade_log=trade_log,
+    )
 
 
 def start_fall_quote_poller(realtime_sdk):
     def worker():
-        while not FALL_QUOTE_POLLER_STOP_EVENT.is_set():
+        while not FALL_RUNTIME.quote_poller_stop_event.is_set():
             try:
                 poll_fall_quotes_once(realtime_sdk)
             except Exception as exc:
                 trade_log("FALL_QUOTE_POLLER_ERROR", error=True, error_msg=repr(exc))
-            FALL_QUOTE_POLLER_STOP_EVENT.wait(0.5)
+            FALL_RUNTIME.quote_poller_stop_event.wait(0.5)
     thread = threading.Thread(target=worker, name="fall-quotes", daemon=True)
     thread.start()
     return thread
 
 
 def apply_fall_quote(state, quote, mysdk):
-    px, opening, high, low, close, average, bid, ask = quote
-    if not all(finite_positive(value) for value in (px, opening, high, low)):
+    action = evaluate_fall_quote(
+        state, quote, now=now_tpe,
+        finite_positive=finite_positive, check_open_status=check_open_status,
+    )
+    if action == "invalid":
         return
-    state.update(pre_last_price=state.get("last_price"), pre_last_price_time=state.get("last_price_time"),
-                 last_price=float(px), last_price_time=now_tpe().isoformat(), open_price=opening,
-                 high_price=high, low_price=low, close_price=close, avg_price=average,
-                 best_bid_price=bid, best_ask_price=ask)
-    if state.get("in_position"):
+    if action == "close":
         try_close_position(state, mysdk)
-    elif check_open_status(state) and float(px) < float(state["yesterday_low_price"]):
-        state["entry_trigger_price"] = float(px)
+    elif action == "open":
         try_open_position(state, mysdk)
     atomic_write_json(state_path(state["symbol_code_with_suf"]), state)
 
@@ -625,6 +509,153 @@ def state_symbol_fields(state: Dict[str, Any]) -> Dict[str, Any]:
         "side": state.get("side"),
     }
 
+
+
+def get_avg_strategy() -> AvgStrategy:
+    """使用目前參數與股票池建立策略視圖；同日狀態共用同一份。"""
+    return AvgStrategy(
+        config=AvgConfig(
+            AVG_CANDLES_START_TIME=AVG_CANDLES_START_TIME,
+            AVG_CANDLE_POLL_SECOND=AVG_CANDLE_POLL_SECOND,
+            AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS=AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS,
+            AVG_ENTRY_DEADLINE=AVG_ENTRY_DEADLINE,
+            AVG_ENTRY_ORDER_QUANTITY=AVG_ENTRY_ORDER_QUANTITY,
+            AVG_ENTRY_START_TIME=AVG_ENTRY_START_TIME,
+            AVG_FORCE_CLOSE_TIME=AVG_FORCE_CLOSE_TIME,
+            AVG_MAX_NORMALIZED_SLOPE=AVG_MAX_NORMALIZED_SLOPE,
+            AVG_MIN_MINUTE_BARS_BEFORE_0930=AVG_MIN_MINUTE_BARS_BEFORE_0930,
+            AVG_MIN_PRE_ENTRY_RANGE_PERCENT=AVG_MIN_PRE_ENTRY_RANGE_PERCENT,
+            AVG_PROFIT_BACK_PERCENT=AVG_PROFIT_BACK_PERCENT,
+            AVG_PROFIT_TARGET_PERCENT=AVG_PROFIT_TARGET_PERCENT,
+            AVG_PROTECT_LOSS_PER=AVG_PROTECT_LOSS_PER,
+            AVG_PROTECT_PROFIT_PER=AVG_PROTECT_PROFIT_PER,
+            AVG_SLOPE_CUTOFF_TIME=AVG_SLOPE_CUTOFF_TIME,
+            AVG_STAGE_1_AMPLITUDE_PERCENT=AVG_STAGE_1_AMPLITUDE_PERCENT,
+            AVG_STAGE_1_MIN_BARS=AVG_STAGE_1_MIN_BARS,
+            AVG_STAGE_1_START_TIME=AVG_STAGE_1_START_TIME,
+            AVG_STAGE_2_AMPLITUDE_PERCENT=AVG_STAGE_2_AMPLITUDE_PERCENT,
+            AVG_STAGE_2_MIN_BARS=AVG_STAGE_2_MIN_BARS,
+            AVG_STAGE_3_AMPLITUDE_PERCENT=AVG_STAGE_3_AMPLITUDE_PERCENT,
+            AVG_STAGE_3_MIN_BARS=AVG_STAGE_3_MIN_BARS,
+            AVG_STAGE_4_MIN_BARS=AVG_STAGE_4_MIN_BARS,
+            AVG_STOCK_DATA_SOURCE=AVG_STOCK_DATA_SOURCE,
+            AVG_STOP_LOSS_PERCENT=AVG_STOP_LOSS_PERCENT,
+            AVG_TAKE_PROFIT_PERCENT=AVG_TAKE_PROFIT_PERCENT,
+            INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE=INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE,
+            MARKETDATA_PRIORITY_POSITION=MARKETDATA_PRIORITY_POSITION,
+            STRATEGY_AVG=STRATEGY_AVG,
+            STRATEGY_START_LOWER_3=STRATEGY_START_LOWER_3,
+            TRADE_SIDE_SHORT=TRADE_SIDE_SHORT,
+        ),
+        runtime=AVG_RUNTIME,
+        services=AvgServices(
+            AVG_CANDLE_EXECUTOR=AVG_CANDLE_EXECUTOR,
+            AVG_POSITION_QUOTE_EXECUTOR=AVG_POSITION_QUOTE_EXECUTOR,
+            MARKET_INDEX_REST_FATAL_EVENT=MARKET_INDEX_REST_FATAL_EVENT,
+            TZ=TZ,
+            TradeApiBusy=TradeApiBusy,
+            atomic_write_json=atomic_write_json,
+            ceil_price_to_tick_value=ceil_price_to_tick_value,
+            floor_price_to_tick_value=floor_price_to_tick_value,
+            get_realtime_price=get_realtime_price,
+            get_stock_rest_client=get_stock_rest_client,
+            initialize_states=initialize_states,
+            now_tpe=now_tpe,
+            selected_stocks=selected_stocks,
+            state_path=state_path,
+            state_symbol_fields=state_symbol_fields,
+            time_tuple_to_minutes=time_tuple_to_minutes,
+            total_stocks=total_stocks,
+            trade_log=trade_log,
+            try_open_position=try_open_position,
+        ),
+    )
+
+
+def get_lower_strategy() -> LowerStrategy:
+    """使用目前參數與股票池建立策略視圖；同日狀態共用同一份。"""
+    return LowerStrategy(
+        config=LowerConfig(
+            ENTRY_MODE_LOWER=ENTRY_MODE_LOWER,
+            ENTRY_MODE_NO_TRADE=ENTRY_MODE_NO_TRADE,
+            ENTRY_ORDER_QUANTITY_LOWER=ENTRY_ORDER_QUANTITY_LOWER,
+            FORCE_CLOSE_TIME_LOWER=FORCE_CLOSE_TIME_LOWER,
+            INDUSTRY_MARKET_FILTER_SHORT_PERCENT=INDUSTRY_MARKET_FILTER_SHORT_PERCENT,
+            IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER=IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER,
+            IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER=IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER,
+            IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER=IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER,
+            IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER=IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER,
+            LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD=LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD,
+            LOWER_DECISION_DECLINE_PERCENT_THRESHOLD=LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
+            LOWER_ENTRY_RANGE_END_PERCENT=LOWER_ENTRY_RANGE_END_PERCENT,
+            LOWER_ENTRY_RANGE_START_PERCENT=LOWER_ENTRY_RANGE_START_PERCENT,
+            LOWER_EXIT_CHECK_INTERVAL_MINUTES=LOWER_EXIT_CHECK_INTERVAL_MINUTES,
+            LOWER_EXIT_PERCENT_THRESHOLD=LOWER_EXIT_PERCENT_THRESHOLD,
+            LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME=LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME,
+            LOWER_STRATEGY_DECISION_1=LOWER_STRATEGY_DECISION_1,
+            LOWER_STRATEGY_DECISION_2=LOWER_STRATEGY_DECISION_2,
+            LOWER_STRATEGY_DECISION_3=LOWER_STRATEGY_DECISION_3,
+            LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE=LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE,
+            MARKETDATA_PRIORITY_POSITION=MARKETDATA_PRIORITY_POSITION,
+            MARKET_INDEX_CRITICAL_WAIT_SECONDS=MARKET_INDEX_CRITICAL_WAIT_SECONDS,
+            MIN_MINUTE_BARS_BEFORE_0930=MIN_MINUTE_BARS_BEFORE_0930,
+            STRATEGY_END_LOWER_1=STRATEGY_END_LOWER_1,
+            STRATEGY_END_LOWER_2=STRATEGY_END_LOWER_2,
+            STRATEGY_END_LOWER_3=STRATEGY_END_LOWER_3,
+            STRATEGY_START_LOWER_1=STRATEGY_START_LOWER_1,
+            STRATEGY_START_LOWER_2=STRATEGY_START_LOWER_2,
+            STRATEGY_START_LOWER_3=STRATEGY_START_LOWER_3,
+        ),
+        runtime=LOWER_RUNTIME,
+        services=LowerServices(
+            AVG_POSITION_QUOTE_EXECUTOR=AVG_POSITION_QUOTE_EXECUTOR,
+            LOWER_DATA_EXECUTOR=LOWER_DATA_EXECUTOR,
+            LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT=LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT,
+            LOWER_QUOTE_EXECUTOR=LOWER_QUOTE_EXECUTOR,
+            MARKETDATA_PRIORITY_CANDIDATE=MARKETDATA_PRIORITY_CANDIDATE,
+            MARKETDATA_STOP_EVENT=MARKETDATA_STOP_EVENT,
+            MARKET_GATE_INDEX_KEYS=MARKET_GATE_INDEX_KEYS,
+            MARKET_INDEX_FUTURE_TOLERANCE_SECONDS=MARKET_INDEX_FUTURE_TOLERANCE_SECONDS,
+            MARKET_INDEX_REST_FATAL_EVENT=MARKET_INDEX_REST_FATAL_EVENT,
+            MARKET_INDEX_REST_STOP_EVENT=MARKET_INDEX_REST_STOP_EVENT,
+            MARKET_INDEX_STALE_SECONDS=MARKET_INDEX_STALE_SECONDS,
+            MARKET_INDEX_STATE=MARKET_INDEX_STATE,
+            MARKET_INDEX_STATE_LOCK=MARKET_INDEX_STATE_LOCK,
+            ORDER_STATE_LOCK=ORDER_STATE_LOCK,
+            TZ=TZ,
+            atomic_write_json=atomic_write_json,
+            calculate_entry_range_bounds=calculate_entry_range_bounds,
+            calculate_percent=calculate_percent,
+            ceil_price_to_tick_value=ceil_price_to_tick_value,
+            close_flat_position=close_flat_position,
+            fetch_fall_quote=fetch_fall_quote,
+            finite_positive=finite_positive,
+            format_market_gate_percent=format_market_gate_percent,
+            format_market_gate_value=format_market_gate_value,
+            get_critical_market_gate_snapshots=get_critical_market_gate_snapshots,
+            get_entry_check_end_time=get_entry_check_end_time,
+            get_entry_check_start_time=get_entry_check_start_time,
+            get_entry_mode_text=get_entry_mode_text,
+            get_fresh_market_index_value=get_fresh_market_index_value,
+            get_fresh_market_index_value_from_snapshot=get_fresh_market_index_value_from_snapshot,
+            get_market_gate_snapshots=get_market_gate_snapshots,
+            get_market_index_snapshot=get_market_index_snapshot,
+            get_market_index_snapshot_freshness=get_market_index_snapshot_freshness,
+            get_market_key_for_symbol=get_market_key_for_symbol,
+            get_pure_symbol=get_pure_symbol,
+            get_stock_rest_client=get_stock_rest_client,
+            is_avg_strategy=is_avg_strategy,
+            is_price_in_entry_range=is_price_in_entry_range,
+            market_gate_snapshots_are_fresh=market_gate_snapshots_are_fresh,
+            market_previous_close_indices=market_previous_close_indices,
+            now_tpe=now_tpe,
+            state_path=state_path,
+            state_symbol_fields=state_symbol_fields,
+            time_tuple_to_minutes=time_tuple_to_minutes,
+            total_stocks=total_stocks,
+            trade_log=trade_log,
+        ),
+    )
 
 # ============ 下單函式 ============
 def start_serialized_trade_call(operation: str, callback, before_start=None) -> Future:
@@ -1125,7 +1156,7 @@ def get_up_down_price(stock_id: str, realtime_sdk):
 
 
 def now_tpe() -> datetime:
-    return datetime.now(pytz.timezone("Asia/Taipei"))
+    return datetime.now(TZ)
 
 
 def wait_until_main_start_time() -> None:
@@ -1179,94 +1210,19 @@ def time_tuple_to_minutes(value: tuple[int, int], name: str) -> int:
 
 
 def get_lower_strategy_windows() -> list[tuple[tuple[int, int], tuple[int, int], tuple[int, int]]]:
-    return [
-        (LOWER_STRATEGY_DECISION_1, STRATEGY_START_LOWER_1, STRATEGY_END_LOWER_1),
-        (LOWER_STRATEGY_DECISION_2, STRATEGY_START_LOWER_2, STRATEGY_END_LOWER_2),
-        (LOWER_STRATEGY_DECISION_3, STRATEGY_START_LOWER_3, STRATEGY_END_LOWER_3),
-    ]
+    return get_lower_strategy().get_lower_strategy_windows()
 
 
 def get_active_lower_window() -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
-    window_number = LOWER_SESSION_STATE.get("window_number")
-    if window_number is None:
-        raise ValueError("LOWER 尚未啟動，沒有可用的進場時間窗")
-    return get_lower_strategy_windows()[window_number - 1]
+    return get_lower_strategy().get_active_lower_window()
 
 
 def activate_lower_session(window_number: int, decision_dt: datetime, summary: Dict[str, Any]) -> None:
-    if LOWER_SESSION_STATE.get("activation_dt") is not None or LOWER_SESSION_STATE.get("stopped"):
-        raise ValueError("LOWER 已啟動或已停止，不可再次啟動")
-    LOWER_SESSION_STATE.update({
-        "activation_dt": decision_dt,
-        "window_number": window_number,
-        "baseline_prices": dict(summary["prices"]),
-        "next_exit_check_dt": decision_dt + timedelta(minutes=LOWER_EXIT_CHECK_INTERVAL_MINUTES),
-    })
+    return get_lower_strategy().activate_lower_session(window_number, decision_dt, summary)
 
 
 def validate_market_reversal_time_config() -> None:
-    if type(ENTRY_ORDER_QUANTITY_LOWER) is not int or ENTRY_ORDER_QUANTITY_LOWER != 1:
-        raise ValueError("LOWER 目前每檔只允許一張")
-    if MIN_MINUTE_BARS_BEFORE_0930 <= 0:
-        raise ValueError("MIN_MINUTE_BARS_BEFORE_0930 必須大於 0")
-    if LOWER_EXIT_CHECK_INTERVAL_MINUTES <= 0:
-        raise ValueError("LOWER_EXIT_CHECK_INTERVAL_MINUTES 必須大於 0")
-    previous_decision_hm = -1
-    force_close_hm = time_tuple_to_minutes(FORCE_CLOSE_TIME_LOWER, "FORCE_CLOSE_TIME_LOWER")
-    for window_number, (decision, start, end) in enumerate(get_lower_strategy_windows(), start=1):
-        decision_hm = time_tuple_to_minutes(decision, f"LOWER_STRATEGY_DECISION_{window_number}")
-        start_hm = time_tuple_to_minutes(start, f"STRATEGY_START_LOWER_{window_number}")
-        end_hm = time_tuple_to_minutes(end, f"STRATEGY_END_LOWER_{window_number}")
-        if not previous_decision_hm < decision_hm < start_hm < end_hm < force_close_hm:
-            raise ValueError(f"LOWER 第{window_number}組需符合前組決策 < 決策 < 開始 < 截止 < 平倉時間")
-        previous_decision_hm = decision_hm
-    if not 0 <= LOWER_EXIT_PERCENT_THRESHOLD <= 100:
-        raise ValueError("LOWER_EXIT_PERCENT_THRESHOLD 必須介於 0 與 100")
-    lower_strategy_early_breakout_deadline_hm = (
-        LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
-        + LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
-    )
-    lower_market_previous_close_reversal_start_hm = (
-        LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
-    )
-    lower_strategy_decision_hm = LOWER_STRATEGY_DECISION_1[0] * 60 + LOWER_STRATEGY_DECISION_1[1]
-    if not (0 <= lower_strategy_early_breakout_deadline_hm <= 23 * 60 + 59):
-        raise ValueError(
-            "LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE 設定錯誤，需介於 00:00~23:59"
-        )
-    if not (0 <= lower_market_previous_close_reversal_start_hm <= 23 * 60 + 59):
-        raise ValueError(
-            "LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 設定錯誤，需介於 00:00~23:59"
-        )
-    if lower_strategy_early_breakout_deadline_hm >= lower_strategy_decision_hm:
-        raise ValueError(
-            "LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE 必須早於 LOWER_STRATEGY_DECISION_1"
-        )
-    if lower_market_previous_close_reversal_start_hm > lower_strategy_early_breakout_deadline_hm:
-        raise ValueError(
-            "LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME "
-            "不可晚於 LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE"
-        )
-    if lower_market_previous_close_reversal_start_hm >= lower_strategy_decision_hm:
-        raise ValueError(
-            "LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME 必須早於 LOWER_STRATEGY_DECISION_1"
-        )
-    if not (
-        0 <= LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
-        < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100
-    ):
-        raise ValueError(
-            "lower 股票比例門檻須符合 0 <= "
-            "LOWER_DECISION_DECLINE_PERCENT_THRESHOLD < "
-            "LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD <= 100"
-        )
-    if INDUSTRY_MARKET_FILTER_SHORT_PERCENT < 0:
-        raise ValueError("INDUSTRY_MARKET_FILTER_SHORT_PERCENT 不可小於 0")
-    time_tuple_to_minutes(
-        STRATEGY_START_LOWER_1,
-        "STRATEGY_START_LOWER_1",
-    )
+    return get_lower_strategy().validate_market_reversal_time_config()
 
 
 def get_entry_mode_text(entry_mode: int | None = None) -> str:
@@ -1281,69 +1237,16 @@ def get_entry_mode_text(entry_mode: int | None = None) -> str:
 
 
 def get_avg_candidate_stocks() -> list:
-    """不可將 LOWER 初始化過濾後的清單作為 AVG 股票池。"""
-    if AVG_STOCK_DATA_SOURCE == "T":
-        return list(total_stocks)
-    if AVG_STOCK_DATA_SOURCE == "S":
-        return list(selected_stocks)
-    raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
+    return get_avg_strategy().get_avg_candidate_stocks()
 
 
 def validate_avg_config() -> None:
-    if AVG_STOCK_DATA_SOURCE not in ("T", "S"):
-        raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
-    for name in ("AVG_STAGE_1_START_TIME", "AVG_CANDLES_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
-                 "AVG_ENTRY_START_TIME", "AVG_ENTRY_DEADLINE", "AVG_FORCE_CLOSE_TIME"):
-        time_tuple_to_minutes(globals()[name], name)
-    entry_start_minutes = time_tuple_to_minutes(AVG_ENTRY_START_TIME, "AVG_ENTRY_START_TIME")
-    entry_deadline_minutes = time_tuple_to_minutes(AVG_ENTRY_DEADLINE, "AVG_ENTRY_DEADLINE")
-    force_close_minutes = time_tuple_to_minutes(AVG_FORCE_CLOSE_TIME, "AVG_FORCE_CLOSE_TIME")
-    candles_start_minutes = time_tuple_to_minutes(AVG_CANDLES_START_TIME, "AVG_CANDLES_START_TIME")
-    lower_3_start_minutes = time_tuple_to_minutes(STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3")
-    stage_1_start_minutes = time_tuple_to_minutes(AVG_STAGE_1_START_TIME, "AVG_STAGE_1_START_TIME")
-    slope_cutoff_minutes = time_tuple_to_minutes(AVG_SLOPE_CUTOFF_TIME, "AVG_SLOPE_CUTOFF_TIME")
-    if not entry_start_minutes <= entry_deadline_minutes < force_close_minutes:
-        raise ValueError("AVG 需符合最早入場 <= 截止入場 < 強制平倉")
-    if not lower_3_start_minutes <= candles_start_minutes <= entry_start_minutes:
-        raise ValueError("AVG 分K開始時間須介於第三組 LOWER 開始時間與 AVG 最早入場時間之間")
-    if stage_1_start_minutes > entry_deadline_minutes or slope_cutoff_minutes > entry_deadline_minutes:
-        raise ValueError("AVG 階段起算及斜率檢核時間不可晚於入場截止")
-    for value in (AVG_STAGE_1_MIN_BARS, AVG_STAGE_2_MIN_BARS, AVG_STAGE_3_MIN_BARS,
-                  AVG_STAGE_4_MIN_BARS, AVG_MIN_MINUTE_BARS_BEFORE_0930):
-        if type(value) is not int or value <= 0:
-            raise ValueError("AVG 分K根數必須為正整數")
-    if type(AVG_ENTRY_ORDER_QUANTITY) is not int or AVG_ENTRY_ORDER_QUANTITY != 1:
-        raise ValueError("AVG 目前每檔只允許一張")
-    if type(AVG_CANDLE_POLL_SECOND) is not int or not 0 <= AVG_CANDLE_POLL_SECOND <= 59:
-        raise ValueError("AVG_CANDLE_POLL_SECOND 必須介於 0~59")
-    if (
-        not math.isfinite(AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS)
-        or AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS <= 0
-        or len(get_avg_candidate_stocks()) * AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
-        >= 60.0
-    ):
-        raise ValueError("AVG 股票池無法在 60 秒輪詢週期內完成一次節流查詢")
-    projected_candle_requests = len(get_avg_candidate_stocks())
-    if projected_candle_requests > INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE - 20:
-        raise ValueError(
-            f"AVG 分K輪詢預估 {projected_candle_requests:.0f} 次／分鐘，"
-            f"須低於行情 API 額度並保留 20 次／分鐘餘裕"
-        )
-    if not math.isfinite(AVG_MAX_NORMALIZED_SLOPE):
-        raise ValueError("AVG 斜率門檻必須為有限數值")
-    for value in (AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT, AVG_PROTECT_PROFIT_PER,
-                  AVG_PROTECT_LOSS_PER, AVG_PROFIT_BACK_PERCENT, AVG_PROFIT_TARGET_PERCENT):
-        if not math.isfinite(value) or not 0 < value < 100:
-            raise ValueError("AVG 風控百分比必須介於 0 與 100")
-    for value in (AVG_STAGE_1_AMPLITUDE_PERCENT, AVG_STAGE_2_AMPLITUDE_PERCENT,
-                  AVG_STAGE_3_AMPLITUDE_PERCENT, AVG_MIN_PRE_ENTRY_RANGE_PERCENT):
-        if not math.isfinite(value) or not 0 <= value < 100:
-            raise ValueError("AVG 振幅百分比必須介於 0（含）與 100（不含）")
+    return get_avg_strategy().validate_avg_config()
 
 
 def resolve_session_entry_mode(now_local: datetime) -> Optional[int]:
     """LOWER 一旦啟動即固定；否則第三組開始時才最後分流。"""
-    if LOWER_SESSION_STATE.get("activation_dt") is not None:
+    if LOWER_RUNTIME.session_state.get("activation_dt") is not None:
         return ENTRY_MODE_LOWER
     if (now_local.hour, now_local.minute) < STRATEGY_START_LOWER_3:
         return None
@@ -1353,303 +1256,39 @@ def resolve_session_entry_mode(now_local: datetime) -> Optional[int]:
 
 
 def is_avg_strategy(state: Dict[str, Any] | None) -> bool:
-    return bool(state and state.get("strategy_type") == STRATEGY_AVG)
+    return get_avg_strategy().is_avg_strategy(state)
 
 
 def parse_avg_candles(raw_candles: Any, now_local: datetime) -> list[Dict[str, Any]]:
-    """解析當日 1 分K；策略階段只使用已完成 K 棒，下一根 open 僅用來確認入場時點。"""
-    if not isinstance(raw_candles, list):
-        raise ValueError("intraday.candles 回應缺少 data 陣列")
-    bars = []
-    for raw in raw_candles:
-        try:
-            candle_dt = datetime.fromisoformat(str(raw["date"]).replace("Z", "+00:00"))
-            candle_dt = TZ.localize(candle_dt) if candle_dt.tzinfo is None else candle_dt.astimezone(TZ)
-            if candle_dt.date() != now_local.date():
-                continue
-            prices = {key: float(raw[key]) for key in ("open", "high", "low", "close")}
-            try:
-                average = float(raw.get("average"))
-                if not math.isfinite(average) or average <= 0:
-                    average = None
-            except (TypeError, ValueError, OverflowError):
-                average = None
-            if (
-                any(not math.isfinite(value) or value <= 0 for value in prices.values())
-                or prices["low"] > min(prices["open"], prices["close"])
-                or prices["high"] < max(prices["open"], prices["close"])
-            ):
-                continue
-        except (KeyError, TypeError, ValueError, OverflowError):
-            continue
-        bars.append({"dt": candle_dt, **prices, "average": average})
-    bars.sort(key=lambda bar: bar["dt"])
-    return bars
+    return get_avg_strategy().parse_avg_candles(raw_candles, now_local)
 
 
 def calculate_avg_normalized_slope(bars: list[Dict[str, Any]], previous_close: float) -> Optional[float]:
-    samples = []
-    for bar in bars:
-        dt = bar["dt"]
-        if bar["average"] is None:
-            continue
-        if not (9 * 60 <= dt.hour * 60 + dt.minute < AVG_SLOPE_CUTOFF_TIME[0] * 60 + AVG_SLOPE_CUTOFF_TIME[1]):
-            continue
-        samples.append((dt.hour * 60 + dt.minute + dt.second / 60.0, bar["average"]))
-    if len(samples) < 2 or not math.isfinite(previous_close) or previous_close <= 0:
-        return None
-    x_mean = sum(x for x, _ in samples) / len(samples)
-    y_mean = sum(y for _, y in samples) / len(samples)
-    denominator = sum((x - x_mean) ** 2 for x, _ in samples)
-    if denominator <= 0:
-        return None
-    slope = sum((x - x_mean) * (y - y_mean) for x, y in samples) / denominator
-    return slope / previous_close * 100.0
+    return get_avg_strategy().calculate_avg_normalized_slope(bars, previous_close)
 
 
 def find_avg_entry_signal(bars: list[Dict[str, Any]], now_local: datetime) -> Optional[Dict[str, Any]]:
-    """與 v18 find_entry 對齊：low>avg、high<avg、low>avg，之後連續 low<avg。"""
-    current_minute = now_local.replace(second=0, microsecond=0)
-    completed = [bar for bar in bars if bar["dt"] < current_minute]
-    requirements = (AVG_STAGE_1_MIN_BARS, AVG_STAGE_2_MIN_BARS, AVG_STAGE_3_MIN_BARS)
-    amplitudes = (AVG_STAGE_1_AMPLITUDE_PERCENT, AVG_STAGE_2_AMPLITUDE_PERCENT,
-                  AVG_STAGE_3_AMPLITUDE_PERCENT)
-    stage = count = 0
-    amplitude_reached = False
-    for index, bar in enumerate(completed):
-        minute = (bar["dt"].hour, bar["dt"].minute)
-        if minute < AVG_STAGE_1_START_TIME:
-            continue
-        if minute > AVG_ENTRY_DEADLINE:
-            break
-        average = bar["average"]
-        if average is None:
-            count = 0
-            amplitude_reached = False
-            continue
-        if stage == 3:
-            if minute < AVG_SLOPE_CUTOFF_TIME:
-                continue
-            count = count + 1 if bar["low"] < average else 0
-            if count >= AVG_STAGE_4_MIN_BARS:
-                if index + 1 >= len(bars):
-                    return None
-                entry_bar = bars[index + 1]
-                entry_time = (entry_bar["dt"].hour, entry_bar["dt"].minute)
-                if not AVG_ENTRY_START_TIME <= entry_time <= AVG_ENTRY_DEADLINE:
-                    return {"rejected": "first_signal_outside_entry_window", "signal_bar": bar}
-                return {"entry_bar": entry_bar, "signal_bar": bar}
-            continue
-        matched = bar["high"] < average if stage == 1 else bar["low"] > average
-        if not matched:
-            count = 0
-            amplitude_reached = False
-            continue
-        count += 1
-        avg_dec = Decimal(str(average))
-        percent = Decimal(str(amplitudes[stage])) / Decimal("100")
-        if stage == 1:
-            reached = Decimal(str(bar["low"])) < avg_dec * (1 - percent)
-        else:
-            reached = Decimal(str(bar["high"])) > avg_dec * (1 + percent)
-        amplitude_reached = amplitude_reached or reached
-        if count >= requirements[stage] and amplitude_reached:
-            stage += 1
-            count = 0
-            amplitude_reached = False
-    return None
+    return get_avg_strategy().find_avg_entry_signal(bars, now_local)
 
 
-def mark_avg_state_traded(state: Dict[str, Any], reason: str, *, error: bool = False, **fields: Any) -> None:
-    state["traded"] = True
-    state["entry_time"] = now_tpe().isoformat()
-    state["exit_reason"] = reason
-    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-    trade_log("AVG_CANDIDATE_SKIPPED", error=error, **state_symbol_fields(state), reason=reason, **fields)
+def mark_avg_state_traded(state: Dict[str, Any], reason: str, *, error: bool=False, **fields: Any) -> None:
+    return get_avg_strategy().mark_avg_state_traded(state, reason, error=error, **fields)
 
 
 def fetch_avg_candle_response(state: Dict[str, Any], realtime_sdk: EsunMarketdata) -> Dict[str, Any]:
-    global AVG_CANDLE_NEXT_REQUEST_MONOTONIC
-    with AVG_CANDLE_REQUEST_SCHEDULE_LOCK:
-        delay = AVG_CANDLE_NEXT_REQUEST_MONOTONIC - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        AVG_CANDLE_NEXT_REQUEST_MONOTONIC = time.monotonic() + AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS
-
-    return get_stock_rest_client(realtime_sdk).intraday.candles(
-        symbol=state["symbol_code"], timeframe="1", sort="asc",
-    )
+    return get_avg_strategy().fetch_avg_candle_response(state, realtime_sdk)
 
 
-def process_avg_candle_state(
-    state: Dict[str, Any], response: Dict[str, Any], mysdk: SDK, now_local: datetime,
-) -> None:
-    # AVG 進場委託送出後，成交及持倉風控交由主監控迴圈的即時報價處理。
-    if state.get("in_position") or state.get("entry_order_pending") or state.get("exit_order_pending"):
-        return
-    if state.get("traded") and not (state.get("in_position") or state.get("entry_order_pending")):
-        return
-    try:
-        bars = parse_avg_candles(response.get("data"), now_local)
-        if not bars:
-            raise ValueError("API 未回傳當日有效分K")
-    except Exception as exc:
-        trade_log("AVG_CANDLES_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
-        if not state.get("in_position") and not state.get("entry_order_pending"):
-            mark_avg_state_traded(state, "avg_candles_unavailable", error=True, error_msg=repr(exc))
-        return
-
-    current = bars[-1]
-    state["open_price"] = bars[0]["open"]
-    state["high_price"] = max(bar["high"] for bar in bars)
-    state["low_price"] = min(bar["low"] for bar in bars)
-    state["close_price"] = current["close"]
-    state["avg_price"] = current["average"]
-    state["pre_last_price"] = state.get("last_price", 0)
-    state["pre_last_price_time"] = state.get("last_price_time")
-    state["last_price"] = current["close"]
-    state["last_price_time"] = now_local.isoformat()
-
-    before_0930 = sum(1 for bar in bars if (bar["dt"].hour, bar["dt"].minute) < (9, 30))
-    state["minute_bars_before_0930"] = before_0930
-    state["minute_bars_checked"] = True
-    state["minute_bars_eligible"] = before_0930 >= AVG_MIN_MINUTE_BARS_BEFORE_0930
-
-    if not state["minute_bars_eligible"]:
-        mark_avg_state_traded(state, "insufficient_minute_bars_before_0930", count=before_0930)
-        return
-    slope = calculate_avg_normalized_slope(bars, float(state.get("yesterday_close_price", 0) or 0))
-    if slope is None or not slope < AVG_MAX_NORMALIZED_SLOPE:
-        mark_avg_state_traded(state, "avg_slope_rejected", normalized_slope=slope)
-        return
-    signal = find_avg_entry_signal(bars, now_local)
-    if signal and signal.get("rejected"):
-        mark_avg_state_traded(state, signal["rejected"])
-        return
-    if signal:
-        if MARKET_INDEX_REST_FATAL_EVENT.is_set():
-            mark_avg_state_traded(state, "market_index_rest_fatal")
-            return
-        entry_bar = signal["entry_bar"]
-        signal_bar = signal["signal_bar"]
-        entry_dt = entry_bar["dt"]
-        entry_hm = (entry_dt.hour, entry_dt.minute)
-        if not AVG_ENTRY_START_TIME <= entry_hm <= AVG_ENTRY_DEADLINE:
-            mark_avg_state_traded(state, "first_signal_outside_entry_window", entry_time=entry_dt.isoformat())
-            return
-        if entry_dt != now_local.replace(second=0, microsecond=0):
-            mark_avg_state_traded(state, "avg_entry_signal_stale", entry_time=entry_dt.isoformat())
-            return
-        entry_price = float(entry_bar["open"])
-        prior_bars = [bar for bar in bars if bar["dt"] < entry_dt]
-        previous_close = float(state.get("yesterday_close_price", 0) or 0)
-        if not prior_bars or previous_close <= 0:
-            mark_avg_state_traded(state, "avg_pre_entry_data_missing")
-            return
-        pre_entry_range_dec = Decimal(str(max(bar["high"] for bar in prior_bars))) - Decimal(
-            str(min(bar["low"] for bar in prior_bars))
-        )
-        pre_entry_range = float(pre_entry_range_dec)
-        if pre_entry_range_dec <= Decimal(str(previous_close)) * Decimal(str(AVG_MIN_PRE_ENTRY_RANGE_PERCENT)) / 100:
-            mark_avg_state_traded(state, "avg_pre_entry_range_rejected", range=pre_entry_range)
-            return
-        limit_up = float(state.get("limit_up_price", 0) or 0)
-        limit_down = float(state.get("limit_down_price", 0) or 0)
-        if any(bar["high"] >= limit_up or bar["low"] <= limit_down for bar in prior_bars):
-            mark_avg_state_traded(state, "limit_price_touched_before_entry")
-            return
-        raw_stop = entry_price * (1 + AVG_STOP_LOSS_PERCENT / 100.0)
-        stop_price = min(ceil_price_to_tick_value(raw_stop), limit_up)
-        if entry_price + entry_price * AVG_STOP_LOSS_PERCENT / 100.0 >= limit_up:
-            mark_avg_state_traded(state, "avg_stop_loss_too_close_to_limit_up")
-            return
-        take_profit = max(floor_price_to_tick_value(entry_price * (1 - AVG_TAKE_PROFIT_PERCENT / 100.0)), limit_down)
-        state["side"] = TRADE_SIDE_SHORT
-        state["entry_signal_time"] = entry_dt.isoformat()
-        state["entry_signal_price"] = entry_price
-        state["entry_trigger_price"] = current["close"]
-        state["last_price"] = current["close"]
-        state["avg_signal_bar_time"] = signal_bar["dt"].isoformat()
-        state["avg_normalized_slope"] = slope
-        state["avg_pre_entry_range"] = pre_entry_range
-        state["avg_initial_stop_price"] = stop_price
-        state["avg_initial_take_profit_price"] = take_profit
-        try_open_position(state, mysdk)
-        return
-    if (now_local.hour, now_local.minute) > AVG_ENTRY_DEADLINE:
-        mark_avg_state_traded(state, "avg_entry_deadline_passed")
-        return
-    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+def process_avg_candle_state(state: Dict[str, Any], response: Dict[str, Any], mysdk: SDK, now_local: datetime) -> None:
+    return get_avg_strategy().process_avg_candle_state(state, response, mysdk, now_local)
 
 
 def process_avg_candle_round(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, mysdk: SDK) -> None:
-    # 先處理已完成的請求；未完成請求留在背景執行，不阻塞即時報價與持倉風控。
-    had_pending_requests = bool(AVG_CANDLE_PENDING_FUTURES)
-    for future, state in list(AVG_CANDLE_PENDING_FUTURES.items()):
-        if not future.done():
-            continue
-        AVG_CANDLE_PENDING_FUTURES.pop(future, None)
-        try:
-            process_avg_candle_state(state, future.result(), mysdk, now_tpe())
-        except TradeApiBusy:
-            # 未送出委託；保留完成的資料，當分鐘內下輪重試，不永久封鎖候選。
-            AVG_CANDLE_PENDING_FUTURES[future] = state
-        except requests.RequestException as exc:
-            trade_log(
-                "AVG_CANDLES_REQUEST_RETRY",
-                error=True,
-                **state_symbol_fields(state),
-                error_msg=repr(exc),
-                action="keep_candidate_for_next_poll",
-            )
-        except Exception as exc:
-            trade_log("AVG_CANDIDATE_PROCESS_ERROR", error=True, **state_symbol_fields(state), error_msg=repr(exc))
-            if not state.get("in_position") and not state.get("entry_order_pending"):
-                mark_avg_state_traded(state, "avg_candidate_processing_error", error=True, error_msg=repr(exc))
-
-    if AVG_CANDLE_PENDING_FUTURES:
-        return
-
-    # 整輪處理完才統計，讓本輪斜率剔除與其他候選狀態變化一併反映。
-    if had_pending_requests:
-        monitoring_count = sum(
-            1 for state in states.values()
-            if not state.get("traded")
-            and not state.get("in_position")
-            and not state.get("entry_order_pending")
-            and not state.get("exit_order_pending")
-        )
-        print(
-            f"[AVG_MONITORING_SUMMARY] time={now_tpe().strftime('%H:%M:%S')} "
-            f"本輪分K處理完成，目前每分鐘監看候選股票={monitoring_count} 檔；"
-            f"預估候選分K查詢約 {monitoring_count} 次／分鐘"
-        )
-
-    now_local = now_tpe()
-    if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
-        return
-    if now_local.second < AVG_CANDLE_POLL_SECOND:
-        return
-    scan_minute_key = now_local.strftime("%Y-%m-%d %H:%M")
-    if AVG_SESSION_STATE["last_scan_minute_key"] == scan_minute_key:
-        return
-    AVG_SESSION_STATE["last_scan_minute_key"] = scan_minute_key
-    pending_states = [
-        state for state in states.values()
-        if not state.get("traded")
-        and not state.get("in_position")
-        and not state.get("entry_order_pending")
-        and not state.get("exit_order_pending")
-    ]
-    for state in pending_states:
-        future = AVG_CANDLE_EXECUTOR.submit(fetch_avg_candle_response, state, realtime_sdk)
-        AVG_CANDLE_PENDING_FUTURES[future] = state
+    return get_avg_strategy().process_avg_candle_round(states, realtime_sdk, mysdk)
 
 
 def prepare_avg_states(realtime_sdk):
-    validate_avg_config()
-    return initialize_states(get_avg_candidate_stocks(), realtime_sdk,
-                             strategy_type=STRATEGY_AVG, force_rebuild_state=True)
+    return get_avg_strategy().prepare_avg_states(realtime_sdk)
 
 
 def print_entry_position_prices(state: Dict[str, Any]) -> None:
@@ -1756,21 +1395,7 @@ def fetch_realtime_price_uncached(stock_id: str, realtime_sdk):
 
 
 def schedule_avg_position_quotes(states: Dict[str, Dict[str, Any]], realtime_sdk, *, request_quotes: bool) -> None:
-    # 每檔最多保留一筆在途請求，慢回應時不重複排入工作池。
-    for symbol, future in list(AVG_POSITION_QUOTE_FUTURES.items()):
-        state = states.get(symbol)
-        if state is None or state.get("traded") or not state.get("in_position"):
-            future.cancel()
-            AVG_POSITION_QUOTE_FUTURES.pop(symbol, None)
-    if not request_quotes:
-        return
-    for symbol, state in states.items():
-        if (not is_avg_strategy(state) or state.get("traded")
-                or not state.get("in_position") or symbol in AVG_POSITION_QUOTE_FUTURES):
-            continue
-        AVG_POSITION_QUOTE_FUTURES[symbol] = AVG_POSITION_QUOTE_EXECUTOR.submit(
-            get_realtime_price, symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_POSITION,
-        )
+    return get_avg_strategy().schedule_avg_position_quotes(states, realtime_sdk, request_quotes=request_quotes)
 
 
 def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
@@ -2166,100 +1791,17 @@ def get_industry_index_config(symbol_code_with_suf: str, industry_code: str) -> 
 
 
 def get_strategy_decision_drop_percent(index_key: str) -> float | None:
-    if index_key == "TWSE:MARKET":
-        return IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER
-    if index_key == "TPEX:MARKET":
-        return IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER
-    return None
+    return get_lower_strategy().get_strategy_decision_drop_percent(index_key)
 
 
 def get_strategy_decision_rebound_percent(index_key: str) -> float | None:
-    if index_key == "TWSE:MARKET":
-        return IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER
-    if index_key == "TPEX:MARKET":
-        return IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER
-    return None
+    return get_lower_strategy().get_strategy_decision_rebound_percent(index_key)
 
 
 
 
 def update_market_strategy_decision_gate_state(market_key: str, index_value: float, event_time: Any) -> None:
-    if market_key not in MARKET_GATE_INDEX_KEYS:
-        return
-
-    now_local = now_tpe()
-    if (
-        LOWER_SESSION_STATE.get("activation_dt") is not None
-        or LOWER_SESSION_STATE.get("stopped")
-        or (now_local.hour, now_local.minute) >= get_lower_strategy_windows()[-1][0]
-    ):
-        return
-
-    index_config = market_previous_close_indices.get(market_key, {})
-    drop_percent = get_strategy_decision_drop_percent(market_key)
-    previous_close = index_config.get("previous_close")
-    try:
-        previous_close_float = float(previous_close)
-    except (TypeError, ValueError):
-        return
-    if not finite_positive(previous_close_float) or not finite_positive(index_value):
-        return
-
-    now_hm = now_local.hour * 60 + now_local.minute
-    drop_threshold = (
-        previous_close_float * (1 - drop_percent / 100.0)
-        if drop_percent is not None
-        else None
-    )
-    lower_strategy_early_breakout_deadline_hm = (
-        LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0] * 60
-        + LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]
-    )
-    lower_market_previous_close_reversal_start_hm = (
-        LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0] * 60
-        + LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]
-    )
-    with MARKET_INDEX_STATE_LOCK:
-        market_state = MARKET_INDEX_STATE.setdefault(market_key, {})
-        if (now_local.hour, now_local.minute) >= LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME:
-            if not LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.is_set():
-                LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.set()
-                print(
-                    f"⏰ {now_local.strftime('%H:%M:%S')} 已到市場指數上下穿越檢核時間，"
-                    "開始檢核上市及上櫃指數是否穿越昨收"
-                )
-
-            if index_value > previous_close_float:
-                market_state["previous_close_traded_above"] = True
-            elif index_value < previous_close_float:
-                market_state["previous_close_traded_below"] = True
-
-            if (
-                market_state.get("previous_close_traded_above")
-                and market_state.get("previous_close_traded_below")
-                and not market_state.get("previous_close_reversal_blocked")
-            ):
-                market_state["previous_close_reversal_blocked"] = True
-                market_state["previous_close_reversal_time"] = event_time or now_local.isoformat()
-                print(
-                    f"[MODE] {now_local.strftime('%H:%M:%S')} {market_key} 指數已檢核到上下穿越昨收，"
-                    "將於下一次 LOWER 決策判定為 NO_TRADE"
-                )
-
-        if (
-            now_hm >= lower_market_previous_close_reversal_start_hm
-            and now_hm <= lower_strategy_early_breakout_deadline_hm
-            and not market_state.get("early_breakout_passed")
-            and drop_threshold is not None
-            and index_value < drop_threshold
-        ):
-            market_state["early_breakout_passed"] = True
-            market_state["early_breakout_side"] = "DOWN"
-            market_state["early_breakout_time"] = event_time or now_local.isoformat()
-            market_state["early_breakout_index"] = index_value
-            market_state["early_breakout_change_percent"] = (
-                (index_value - previous_close_float) / previous_close_float * 100.0
-            )
+    return get_lower_strategy().update_market_strategy_decision_gate_state(market_key, index_value, event_time)
 
 
 def get_market_index_snapshot(index_key: str) -> Dict[str, Any]:
@@ -2411,85 +1953,8 @@ def get_fresh_market_index_value(index_key: str) -> tuple[Optional[float], Optio
     return get_fresh_market_index_value_from_snapshot(index_key, get_market_index_snapshot(index_key))
 
 
-def get_market_strategy_decision_gate_result(
-    index_key: str,
-    market_state: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    index_config = market_previous_close_indices.get(index_key, {})
-    drop_percent = get_strategy_decision_drop_percent(index_key)
-    rebound_percent = get_strategy_decision_rebound_percent(index_key)
-    previous_close = index_config.get("previous_close")
-    market_state = get_market_index_snapshot(index_key) if market_state is None else dict(market_state)
-    market_index_fresh, market_index_age = get_market_index_snapshot_freshness(index_key, market_state)
-
-    result = {
-        "index_key": index_key,
-        "symbol": index_config.get("symbol"),
-        "name": index_config.get("name"),
-        "previous_close": previous_close,
-        "last_index": market_state.get("last_index"),
-        "current_change_percent": None,
-        "provider_last_updated": market_state.get("last_updated"),
-        "received_at": market_state.get("received_at"),
-        "drop_threshold": None,
-        "rebound_threshold": None,
-        "previous_close_traded_above": bool(market_state.get("previous_close_traded_above")),
-        "previous_close_traded_below": bool(market_state.get("previous_close_traded_below")),
-        "previous_close_reversal_blocked": bool(market_state.get("previous_close_reversal_blocked")),
-        "previous_close_reversal_time": market_state.get("previous_close_reversal_time"),
-        "early_breakout_passed": bool(market_state.get("early_breakout_passed")),
-        "early_breakout_side": market_state.get("early_breakout_side"),
-        "early_breakout_time": market_state.get("early_breakout_time"),
-        "index_fresh": market_index_fresh,
-        "index_age_seconds": market_index_age,
-        "rebound_level_maintained": False,
-        "lower_reason": "",
-    }
-
-    if not index_config.get("symbol"):
-        result["lower_reason"] = "stock_data.py 缺少市場指數設定"
-        return result
-
-    try:
-        previous_close_float = float(previous_close)
-    except (TypeError, ValueError):
-        result["lower_reason"] = "previous_close 無效"
-        return result
-
-    if previous_close_float <= 0:
-        result["lower_reason"] = "門檻設定無效"
-        return result
-
-    if drop_percent is not None:
-        result["drop_threshold"] = previous_close_float * (1 - drop_percent / 100.0)
-    if rebound_percent is not None:
-        result["rebound_threshold"] = previous_close_float * (1 - rebound_percent / 100.0)
-    try:
-        raw_last_index_float = float(market_state.get("last_index"))
-        result["current_change_percent"] = (
-            (raw_last_index_float - previous_close_float) / previous_close_float * 100.0
-        )
-    except (TypeError, ValueError):
-        pass
-
-    last_index_float, market_index_age, market_index_error = get_fresh_market_index_value_from_snapshot(
-        index_key,
-        market_state,
-    )
-    result["index_age_seconds"] = market_index_age
-    if last_index_float is None:
-        result["lower_reason"] = market_index_error
-        return result
-
-    if drop_percent is None or rebound_percent is None:
-        result["lower_reason"] = "LOWER 門檻設定無效"
-    elif last_index_float >= result["rebound_threshold"]:
-        result["lower_reason"] = "決策時已反彈至失效門檻"
-    else:
-        result["rebound_level_maintained"] = True
-        result["lower_reason"] = "決策時仍維持在反彈失效門檻以下"
-
-    return result
+def get_market_strategy_decision_gate_result(index_key: str, market_state: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
+    return get_lower_strategy().get_market_strategy_decision_gate_result(index_key, market_state)
 
 
 def calculate_percent(numerator: int, denominator: int) -> float:
@@ -2498,359 +1963,44 @@ def calculate_percent(numerator: int, denominator: int) -> float:
     return (numerator / denominator) * 100.0
 
 
-def summarize_lower_strategy_decision_candidates(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-    completed_trade_matches: Optional[Dict[str, bool]] = None,
-    current_prices: Optional[Dict[str, float]] = None,
-) -> Dict[str, Any]:
-    """以 total_stocks 有效報價計算下降比例，並保留同一輪的啟動基準價格。"""
-    candidate_count = 0
-    decline_count = 0
-    data_missing_count = 0
-
-    seen_symbols = set()
-    completed_trade_matches = completed_trade_matches or {}
-    current_prices = current_prices or {}
-    states_by_symbol = {state.get("symbol_code_with_suf"): state for state in states.values()}
-    quote_request_count = 0
-    prices = {}
-    for stock_item in total_stocks:
-        symbol_name = stock_item[0]
-        _, symbol_code = get_pure_symbol(symbol_name)
-        if symbol_code in seen_symbols:
-            continue
-        seen_symbols.add(symbol_code)
-        if symbol_code in completed_trade_matches:
-            candidate_count += 1
-            decline_count += int(completed_trade_matches[symbol_code])
-            continue
-
-        try:
-            yesterday_close = float(stock_item[5])
-            state = states_by_symbol.get(symbol_code)
-            if state is not None and state.get("limit_down_price"):
-                limit_down = float(state["limit_down_price"])
-            else:
-                # 僅供 LOWER 比例判斷：依昨收九折並向上對齊 tick 推算跌停價。
-                limit_down = ceil_price_to_tick_value(yesterday_close * 0.90)
-            if symbol_code in current_prices:
-                last_price = float(current_prices[symbol_code])
-            else:
-                quote_request_count += 1
-                quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol_code.split(".")[0])
-                last_price = float(quote.get("lastPrice"))
-        except Exception as exc:
-            data_missing_count += 1
-            print(f"[LOWER_PERCENT] total_stocks {symbol_name} 取價資料不足：{exc!r}")
-            continue
-
-        if not all(math.isfinite(value) and value > 0 for value in (yesterday_close, limit_down, last_price)):
-            data_missing_count += 1
-            continue
-        candidate_count += 1
-        prices[symbol_code] = last_price
-
-        entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-            yesterday_close,
-            limit_down,
-            LOWER_ENTRY_RANGE_START_PERCENT,
-            LOWER_ENTRY_RANGE_END_PERCENT,
-        )
-        if is_price_in_entry_range(last_price, entry_lower_bound, entry_upper_bound):
-            decline_count += 1
-
-    valid_count = candidate_count
-    decline_percent = calculate_percent(decline_count, candidate_count)
-    return {
-        "candidate_count": candidate_count,
-        "valid_count": valid_count,
-        "decline_count": decline_count,
-        "decline_percent": decline_percent,
-        "data_missing_count": data_missing_count,
-        "source_count": len(seen_symbols),
-        "quote_request_count": quote_request_count,
-        "prices": prices,
-        "threshold": LOWER_DECISION_DECLINE_PERCENT_THRESHOLD,
-        "max_threshold": LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD,
-        "passed": (
-            candidate_count > 0
-            and LOWER_DECISION_DECLINE_PERCENT_THRESHOLD
-            < decline_percent
-            < LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD
-        ),
-    }
+def summarize_lower_strategy_decision_candidates(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, completed_trade_matches: Optional[Dict[str, bool]]=None, current_prices: Optional[Dict[str, float]]=None) -> Dict[str, Any]:
+    return get_lower_strategy().summarize_lower_strategy_decision_candidates(states, realtime_sdk, completed_trade_matches, current_prices)
 
 
-def summarize_lower_price_movements(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-    baseline_prices: Dict[str, float],
-    current_prices: Optional[Dict[str, float]] = None,
-) -> Dict[str, Any]:
-    """停利成交者排除、停損成交者算上漲，其餘與啟動價格比較。"""
-    with ORDER_STATE_LOCK:
-        completed_trade_matches = {
-            state["symbol_code_with_suf"]: state.get("exit_reason") == "profit"
-            for state in states.values()
-            if (
-                state.get("exit_fully_filled")
-                and state.get("exit_fill_confirmed")
-                and state.get("exit_reason") in ("profit", "stop")
-            )
-        }
-    up_count = flat_count = down_count = data_missing_count = quote_request_count = 0
-    current_prices = current_prices or {}
-    for symbol, baseline_price in baseline_prices.items():
-        if MARKETDATA_STOP_EVENT.is_set():
-            break
-        if symbol in completed_trade_matches:
-            if not completed_trade_matches[symbol]:
-                up_count += 1
-            continue
-        try:
-            if symbol in current_prices:
-                price = float(current_prices[symbol])
-            else:
-                quote_request_count += 1
-                quote = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=symbol.split(".")[0])
-                price = float(quote.get("lastPrice"))
-            if not math.isfinite(price) or price <= 0:
-                raise ValueError("報價無效")
-        except Exception as exc:
-            data_missing_count += 1
-            trade_log("LOWER_PERCENT_QUOTE_ERROR", symbol=symbol, error_msg=repr(exc), action="exclude_from_denominator")
-            continue
-        if price > baseline_price:
-            up_count += 1
-        elif price < baseline_price:
-            down_count += 1
-        else:
-            flat_count += 1
-    total = up_count + flat_count + down_count
-    return {
-        "candidate_count": total,
-        "up_count": up_count,
-        "flat_count": flat_count,
-        "down_count": down_count,
-        "up_percent": calculate_percent(up_count, total),
-        "flat_percent": calculate_percent(flat_count, total),
-        "down_percent": calculate_percent(down_count, total),
-        "data_missing_count": data_missing_count,
-        "quote_request_count": quote_request_count,
-    }
+def summarize_lower_price_movements(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, baseline_prices: Dict[str, float], current_prices: Optional[Dict[str, float]]=None) -> Dict[str, Any]:
+    return get_lower_strategy().summarize_lower_price_movements(states, realtime_sdk, baseline_prices, current_prices)
 
 
 def get_due_lower_exit_check(now_local: datetime) -> Optional[datetime]:
-    next_check = LOWER_SESSION_STATE.get("next_exit_check_dt")
-    if next_check is None or now_local < next_check:
-        return None
-    interval = timedelta(minutes=LOWER_EXIT_CHECK_INTERVAL_MINUTES)
-    check_dt = next_check + ((now_local - next_check) // interval) * interval
-    LOWER_SESSION_STATE["next_exit_check_dt"] = check_dt + interval
-    if (check_dt.hour, check_dt.minute) >= FORCE_CLOSE_TIME_LOWER:
-        return None
-    return check_dt
+    return get_lower_strategy().get_due_lower_exit_check(now_local)
 
 
-def check_lower_percent_exit(
-    states: Dict[str, Dict[str, Any]],
-    realtime_sdk: EsunMarketdata,
-    current_prices: Optional[Dict[str, float]] = None,
-    check_dt: Optional[datetime] = None,
-) -> Optional[Dict[str, Any]]:
-    summary = summarize_lower_price_movements(
-        states, realtime_sdk, LOWER_SESSION_STATE["baseline_prices"], current_prices,
-    )
-    if not summary["candidate_count"] or summary["up_percent"] <= LOWER_EXIT_PERCENT_THRESHOLD:
-        return None
-    trigger_time = check_dt or now_tpe()
-    summary.update({
-        "exit_threshold": LOWER_EXIT_PERCENT_THRESHOLD,
-        "trigger_time": trigger_time.isoformat(),
-    })
-    print(
-        f'{trigger_time:%H:%M} [母數={summary["candidate_count"]}  '
-        f'+{summary["up_percent"]:.2f}% {summary["flat_percent"]:.2f}% '
-        f'-{summary["down_percent"]:.2f}%]-平倉'
-    )
-    return summary
+def check_lower_percent_exit(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata, current_prices: Optional[Dict[str, float]]=None, check_dt: Optional[datetime]=None) -> Optional[Dict[str, Any]]:
+    return get_lower_strategy().check_lower_percent_exit(states, realtime_sdk, current_prices, check_dt)
 
 
-def handle_lower_percent_exit(
-    states: Dict[str, Dict[str, Any]],
-    mysdk,
-    summary: Dict[str, Any],
-) -> None:
-    """封鎖當日 LOWER 新進場，待入場成交確認後平倉並持續重試失敗委託。"""
-    LOWER_SESSION_STATE["stopped"] = True
-    for state in states.values():
-        if state.get("traded"):
-            continue
-        try:
-            state.update({
-                "lower_percent_trigger_dt": summary["trigger_time"],
-                "lower_percent_trigger_percent": summary["up_percent"],
-                "lower_percent_exit_threshold": summary["exit_threshold"],
-            })
-            if state.get("entry_order_pending") or state.get("exit_order_pending"):
-                atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-                continue
-            if state.get("in_position"):
-                if state.get("entry_fill_confirmed"):
-                    close_flat_position(state, mysdk, "lower_percent")
-            else:
-                state["traded"] = True
-                state["exit_reason"] = "lower_percent"
-            atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        except Exception as exc:
-            trade_log(
-                "LOWER_PERCENT_EXIT_ERROR", error=True,
-                **state_symbol_fields(state), error_msg=repr(exc), action="retry_next_loop",
-            )
+def handle_lower_percent_exit(states: Dict[str, Dict[str, Any]], mysdk, summary: Dict[str, Any]) -> None:
+    return get_lower_strategy().handle_lower_percent_exit(states, mysdk, summary)
 
 
 def format_lower_decision_summary(summary: Dict[str, Any]) -> str:
-    return (
-        f"數量門檻={LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% < 比例 "
-        f"< {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
-        f"候選={summary.get('candidate_count', 0)} "
-        f"下降={summary.get('decline_count', 0)} "
-        f"資料不足={summary.get('data_missing_count', 0)} "
-        f"報價查詢={summary.get('quote_request_count', 0)} "
-        f"下降比例={float(summary.get('decline_percent', 0.0)):.2f}%"
-    )
+    return get_lower_strategy().format_lower_decision_summary(summary)
 
 
-def decide_entry_mode_by_market_gate(
-    states: Dict[str, Dict[str, Any]],
-    market_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
-    realtime_sdk: Optional[EsunMarketdata] = None,
-    window_number: int = 1,
-    lower_decision_summary: Optional[Dict[str, Any]] = None,
-) -> tuple[int, list[Dict[str, Any]]]:
-    if lower_decision_summary is None:
-        # 保留同步工具呼叫介面；實機 monitor 僅傳入已完成的背景結果。
-        lower_decision_summary = summarize_lower_strategy_decision_candidates(states, realtime_sdk)
-        market_snapshots = get_critical_market_gate_snapshots(f"lower_decision_{window_number}_after_scan")
-    elif market_snapshots is None:
-        market_snapshots, _ = get_market_gate_snapshots()
-    gate_results = [
-        get_market_strategy_decision_gate_result(index_key, market_snapshots.get(index_key))
-        for index_key in MARKET_GATE_INDEX_KEYS
-    ]
-    for result in gate_results:
-        result["lower_decision_summary"] = lower_decision_summary
-        result["window_number"] = window_number
-        result["decision_status"] = "STOP"
-
-    now_local = now_tpe()
-    if (now_local.hour, now_local.minute) > get_lower_strategy_windows()[window_number - 1][2]:
-        for result in gate_results:
-            result["decision_status"] = "WAIT" if window_number < len(get_lower_strategy_windows()) else "STOP"
-            result["decision_reason"] = "股票池掃描完成時已超過本組進場截止時間"
-        return ENTRY_MODE_NO_TRADE, gate_results
-
-    if lower_decision_summary["decline_percent"] > LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:
-        for result in gate_results:
-            result["decision_reason"] = (
-                "原因=LOWER 股票下跌百分超出候選範圍 "
-                f"( > {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:g}%)"
-            )
-        return ENTRY_MODE_NO_TRADE, gate_results
-
-    data_issue_results = [
-        result
-        for result in gate_results
-        if (
-            not result.get("symbol")
-            or result.get("previous_close") in (None, "")
-            or result.get("last_index") is None
-            or not result.get("index_fresh")
-        )
-    ]
-    if data_issue_results:
-        for result in data_issue_results:
-            print(
-                f"[MODE] {result['index_key']} 市場指數資料不足，"
-                f"lower_reason={result.get('lower_reason') or '--'}"
-            )
-        print("[MODE] 市場指數資料不足，保守判定為 NO_TRADE")
-        return ENTRY_MODE_NO_TRADE, gate_results
-
-    def fallback_no_trade(reason: str) -> tuple[int, list[Dict[str, Any]]]:
-        print(f"[MODE] {reason}，判定為 NO_TRADE")
-        return ENTRY_MODE_NO_TRADE, gate_results
-
-    early_breakout_failed = [
-        result for result in gate_results
-        if not result.get("early_breakout_passed")
-    ]
-    if early_breakout_failed:
-        return ENTRY_MODE_NO_TRADE, gate_results
-
-    reversal_blocked = any(result["previous_close_reversal_blocked"] for result in gate_results)
-    if reversal_blocked:
-        decision_time = get_lower_strategy_windows()[window_number - 1][0]
-        print(
-            "[MODE] 上市或上櫃指數在指定時段曾位於昨收上下兩側 "
-            f"({LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[0]:02d}:"
-            f"{LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME[1]:02d}~"
-            f"{decision_time[0]:02d}:{decision_time[1]:02d})"
-        )
-        return fallback_no_trade("上市或上櫃指數在指定時段曾位於昨收上下兩側")
-
-    lower_mode_passed = all(result["rebound_level_maintained"] for result in gate_results)
-
-    if lower_mode_passed:
-        if not lower_decision_summary["passed"]:
-            decision_status = "WAIT" if window_number < len(get_lower_strategy_windows()) else "STOP"
-            for result in gate_results:
-                result["decision_status"] = decision_status
-                result["decision_reason"] = (
-                    "原因=LOWER 股票比例不符 "
-                    f"({LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:g}% < 比例 "
-                    f"< {LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:g}%)"
-                )
-            print(
-                "[MODE] LOWER 個股池下降比例未落在允許範圍："
-                f"{format_lower_decision_summary(lower_decision_summary)}，"
-                + ("等待下次決策" if decision_status == "WAIT" else "本日無後續決策機會")
-            )
-            return ENTRY_MODE_NO_TRADE, gate_results
-        for result in gate_results:
-            result["decision_status"] = "ACTIVE"
-        return ENTRY_MODE_LOWER, gate_results
-    return fallback_no_trade("LOWER 未成立")
+def decide_entry_mode_by_market_gate(states: Dict[str, Dict[str, Any]], market_snapshots: Optional[Dict[str, Dict[str, Any]]]=None, realtime_sdk: Optional[EsunMarketdata]=None, window_number: int=1, lower_decision_summary: Optional[Dict[str, Any]]=None) -> tuple[int, list[Dict[str, Any]]]:
+    return get_lower_strategy().decide_entry_mode_by_market_gate(states, market_snapshots, realtime_sdk, window_number, lower_decision_summary)
 
 
 def fetch_lower_early_summary(states_snapshot, realtime_sdk):
-    snapshots = get_critical_market_gate_snapshots('lower_strategy_early_breakout_deadline_summary')
-    return snapshots, summarize_lower_strategy_decision_candidates(states_snapshot, realtime_sdk)
+    return get_lower_strategy().fetch_lower_early_summary(states_snapshot, realtime_sdk)
 
 
 def lower_minute_checks_complete(states):
-    return all(state.get('traded') or state.get('minute_bars_checked') for state in states.values())
+    return get_lower_strategy().lower_minute_checks_complete(states)
 
 
 def poll_lower_decision_inputs(future, window_number, wait_started):
-    """只消費完整掃描；新鮮大盤等待採非阻塞輪詢，保留原有最長等待時間。"""
-    if not future.done():
-        return None, wait_started
-    summary = future.result()
-    snapshots, _ = get_market_gate_snapshots()
-    expired = (now_tpe().hour, now_tpe().minute) > get_lower_strategy_windows()[window_number - 1][2]
-    if (expired or market_gate_snapshots_are_fresh(snapshots)
-            or MARKET_INDEX_REST_FATAL_EVENT.is_set() or MARKET_INDEX_REST_STOP_EVENT.is_set()):
-        return (summary, snapshots), None
-    now_monotonic = time.monotonic()
-    if wait_started is None:
-        trade_log('LOWER_DECISION_WAIT_MARKET_DATA', window_number=window_number,
-                  timeout_seconds=MARKET_INDEX_CRITICAL_WAIT_SECONDS)
-        wait_started = now_monotonic
-    if now_monotonic - wait_started >= MARKET_INDEX_CRITICAL_WAIT_SECONDS:
-        return (summary, snapshots), None
-    return None, wait_started
+    return get_lower_strategy().poll_lower_decision_inputs(future, window_number, wait_started)
 
 
 def format_market_gate_value(value: Any) -> str:
@@ -2912,137 +2062,12 @@ def format_market_gate_percent(value: Any, *, threshold_drop: bool = False) -> s
         return str(value)
 
 
-def print_lower_strategy_early_breakout_deadline_summary(
-    market_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> None:
-    """早盤突破截止分鐘結束後，列印並記錄兩指數的完整觸發結果。"""
-    market_snapshots = market_snapshots or {}
-    deadline_text = (
-        f"{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[0]:02d}:"
-        f"{LOWER_STRATEGY_EARLY_BREAKOUT_DEADLINE[1]:02d}"
-    )
-    print(f"[MODE] 早盤 LOWER 突破截止結果（截止分鐘 {deadline_text}，含）")
-
-    for index_key in MARKET_GATE_INDEX_KEYS:
-        index_config = market_previous_close_indices.get(index_key, {})
-        market_state = dict(market_snapshots.get(index_key) or get_market_index_snapshot(index_key))
-        drop_percent = get_strategy_decision_drop_percent(index_key)
-        previous_close = index_config.get("previous_close")
-        passed = bool(market_state.get("early_breakout_passed"))
-        _, age_seconds, data_error = get_fresh_market_index_value_from_snapshot(
-            index_key,
-            market_state,
-        )
-        raw_last_index = market_state.get("last_index")
-
-        try:
-            previous_close_float = float(previous_close)
-        except (TypeError, ValueError):
-            previous_close_float = None
-
-        threshold = None
-        latest_change_percent = None
-        if (
-            previous_close_float is not None
-            and previous_close_float > 0
-            and drop_percent is not None
-        ):
-            threshold = previous_close_float * (1 - drop_percent / 100.0)
-            try:
-                display_last_index = float(raw_last_index)
-            except (TypeError, ValueError):
-                display_last_index = None
-            if display_last_index is not None:
-                latest_change_percent = (
-                    (display_last_index - previous_close_float) / previous_close_float * 100.0
-                )
-        else:
-            display_last_index = None
-
-        print(
-            f"[MODE] {index_key} {index_config.get('symbol') or ''} "
-            f"價位門檻={format_market_gate_value(threshold)}"
-            f"({format_market_gate_percent(drop_percent, threshold_drop=True)}) "
-            f"當前值={format_market_gate_value(display_last_index)}"
-            f"({format_market_gate_percent(latest_change_percent)}) "
-            f"早盤突破={'YES' if passed else 'NO'}"
-        )
-        if data_error:
-            trade_log(
-                "MARKET_INDEX_BREAKOUT_DATA_ERROR",
-                error=True,
-                index_key=index_key,
-                symbol=index_config.get("symbol"),
-                stored_index=raw_last_index,
-                provider_last_updated=market_state.get("last_updated"),
-                received_at=market_state.get("received_at"),
-                index_age_seconds=age_seconds,
-                stale_limit_seconds=MARKET_INDEX_STALE_SECONDS,
-                future_tolerance_seconds=MARKET_INDEX_FUTURE_TOLERANCE_SECONDS,
-                reason=data_error,
-                action="diagnostic_only_breakout_state_remains_fail_closed",
-            )
+def print_lower_strategy_early_breakout_deadline_summary(market_snapshots: Optional[Dict[str, Dict[str, Any]]]=None) -> None:
+    return get_lower_strategy().print_lower_strategy_early_breakout_deadline_summary(market_snapshots)
 
 
-def print_entry_mode_decision(
-    entry_mode: int,
-    gate_results: list[Dict[str, Any]],
-    states: Dict[str, Dict[str, Any]],
-) -> None:
-    mode_text = get_entry_mode_text(entry_mode)
-    lower_decision_summary = next(
-        (result["lower_decision_summary"] for result in gate_results if "lower_decision_summary" in result),
-        None,
-    )
-    for result in gate_results:
-        drop_percent = get_strategy_decision_drop_percent(result["index_key"])
-        rebound_percent = get_strategy_decision_rebound_percent(result["index_key"])
-        if not result.get("index_fresh"):
-            rebound_maintained_text = "N/A"
-        elif result.get("rebound_level_maintained"):
-            rebound_maintained_text = "YES"
-        else:
-            rebound_maintained_text = "NO"
-        print(
-            f"[MODE] {result['index_key']} {result.get('symbol') or ''} "
-            f"價位門檻={format_market_gate_value(result.get('drop_threshold'))}"
-            f"({format_market_gate_percent(drop_percent, threshold_drop=True)}) "
-            f"反彈門檻={format_market_gate_value(result.get('rebound_threshold'))}"
-            f"({format_market_gate_percent(rebound_percent, threshold_drop=True)}) "
-            f"當前值={format_market_gate_value(result.get('last_index'))}"
-            f"({format_market_gate_percent(result.get('current_change_percent'))}) "
-            f"早盤突破={'YES' if result.get('early_breakout_passed') else 'NO'} "
-            f"決策維持={rebound_maintained_text}"
-        )
-        if not result.get("index_fresh") or result.get("last_index") is None:
-            trade_log(
-                "MARKET_INDEX_DECISION_DATA_ERROR",
-                error=True,
-                index_key=result["index_key"],
-                symbol=result.get("symbol"),
-                stored_index=result.get("last_index"),
-                provider_last_updated=result.get("provider_last_updated"),
-                received_at=result.get("received_at"),
-                index_age_seconds=result.get("index_age_seconds"),
-                stale_limit_seconds=MARKET_INDEX_STALE_SECONDS,
-                future_tolerance_seconds=MARKET_INDEX_FUTURE_TOLERANCE_SECONDS,
-                reason=result.get("lower_reason") or "市場指數資料不足",
-                action="fail_closed",
-            )
-    if lower_decision_summary is not None:
-        window_number = gate_results[0].get("window_number", 1)
-        print(
-            f'時間{window_number}:[下降={lower_decision_summary["decline_count"]}  '
-            f'母數={lower_decision_summary["candidate_count"]}  '
-            f'{lower_decision_summary["decline_percent"]:.2f}%]'
-            + ("-進場" if entry_mode == ENTRY_MODE_LOWER else "")
-        )
-        reason = gate_results[0].get("decision_reason")
-        if reason:
-            print(reason)
-    else:
-        print("[MODE] LOWER 指數條件未通過，未查詢 total_stocks 比例")
-    print(f'[MODE] 時間{gate_results[0].get("window_number", 1)} 模式判斷：{mode_text} 狀態={gate_results[0].get("decision_status", "STOP")}')
+def print_entry_mode_decision(entry_mode: int, gate_results: list[Dict[str, Any]], states: Dict[str, Dict[str, Any]]) -> None:
+    return get_lower_strategy().print_entry_mode_decision(entry_mode, gate_results, states)
 
 
 def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: int) -> None:
@@ -3050,11 +2075,11 @@ def apply_entry_mode_to_states(states: Dict[str, Dict[str, Any]], entry_mode: in
     for st in states.values():
         st["qty"] = get_entry_order_quantity()
         if entry_mode == ENTRY_MODE_LOWER:
-            st["lower_window_number"] = LOWER_SESSION_STATE["window_number"]
-            st["lower_activation_dt"] = LOWER_SESSION_STATE["activation_dt"].isoformat()
+            st["lower_window_number"] = LOWER_RUNTIME.session_state["window_number"]
+            st["lower_activation_dt"] = LOWER_RUNTIME.session_state["activation_dt"].isoformat()
             st["lower_entry_start_time"] = get_entry_check_start_time()
             st["lower_entry_end_time"] = get_entry_check_end_time(st)
-            if st.get("symbol_code_with_suf") not in LOWER_SESSION_STATE["baseline_prices"]:
+            if st.get("symbol_code_with_suf") not in LOWER_RUNTIME.session_state["baseline_prices"]:
                 st["traded"] = True
                 st["exit_reason"] = "missing_activation_price"
         st["entry_time"] = now_tpe().isoformat()
@@ -3350,72 +2375,11 @@ def is_price_in_entry_range(price: float, lower_bound: float, upper_bound: float
 
 
 def lower_industry_market_filter_pass(state: Dict[str, Any]) -> bool:
-    market_key = state.get("market_index_key")
-    if not market_key:
-        market_key = get_market_key_for_symbol(
-            state.get("symbol_code_with_suf", ""),
-            state.get("industry_code", ""),
-        )
-
-    index_config = market_previous_close_indices.get(market_key, {})
-    previous_close = index_config.get("previous_close")
-    last_index_float, _age_seconds, stale_reason = get_fresh_market_index_value(market_key)
-    if last_index_float is None:
-        print(f"[{state['symbol_name']}] 產業別盤勢濾網等待 {market_key} 指數資料：{stale_reason}")
-        return False
-
-    try:
-        previous_close_float = float(previous_close)
-    except (TypeError, ValueError):
-        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
-        return False
-
-    if previous_close_float <= 0:
-        print(f"[{state['symbol_name']}] 產業別盤勢濾網 {market_key} 昨收指數設定錯誤: {previous_close}")
-        return False
-
-    threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
-    if last_index_float >= threshold:
-        index_name = index_config.get("name", "")
-        print(
-            f"[{state['symbol_name']}] 產業別盤勢濾網未通過：{market_key} {index_name} "
-            f"指數 {last_index_float:.2f} >= 門檻 {threshold:.2f}"
-        )
-        return False
-
-    return True
+    return get_lower_strategy().lower_industry_market_filter_pass(state)
 
 
 def format_industry_market_filter_pass_text(state: Dict[str, Any]) -> str:
-    market_key = state.get("market_index_key")
-    if not market_key:
-        market_key = get_market_key_for_symbol(
-            state.get("symbol_code_with_suf", ""),
-            state.get("industry_code", ""),
-        )
-
-    index_config = market_previous_close_indices.get(market_key, {})
-    previous_close = index_config.get("previous_close")
-    last_index_float, _age_seconds, _stale_reason = get_fresh_market_index_value(market_key)
-    if last_index_float is None:
-        return ""
-
-    try:
-        previous_close_float = float(previous_close)
-    except (TypeError, ValueError):
-        return ""
-
-    if not finite_positive(previous_close_float) or not finite_positive(last_index_float):
-        return ""
-
-    index_name = index_config.get("name", "")
-    threshold = previous_close_float * (1 - INDUSTRY_MARKET_FILTER_SHORT_PERCENT / 100.0)
-    operator = "<"
-
-    return (
-        f"（產業別盤勢濾網：{market_key} {index_name} "
-        f"指數 {last_index_float:.2f} {operator} 門檻 {threshold:.2f}）"
-    )
+    return get_lower_strategy().format_industry_market_filter_pass_text(state)
 
 
 def calculate_profit_trail_step(price: float, percent: float) -> float:
@@ -3770,76 +2734,16 @@ def check_open_status(state: Dict[str, Any]) -> bool:
     return open_pass
 
 
-def check_lower_minute_bar_eligibility(
-    states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata,
-) -> None:
-    """09:30 後背景取分K；只有主迴圈可套用資格結果，每檔最多一次在途。"""
-    now_local = now_tpe()
-    if (now_local.hour, now_local.minute) < (9, 30):
-        return
-    for symbol, (future, state) in list(LOWER_MINUTE_FUTURES.items()):
-        if not future.done():
-            continue
-        LOWER_MINUTE_FUTURES.pop(symbol)
-        if states.get(symbol) is not state or state.get('traded') or is_avg_strategy(state):
-            continue
-        try:
-            count = future.result()
-            error_msg = ''
-        except Exception as exc:
-            count, error_msg = 0, repr(exc)
-        eligible = not error_msg and count >= MIN_MINUTE_BARS_BEFORE_0930
-        state["minute_bars_checked"] = True
-        state["minute_bars_eligible"] = bool(eligible)
-        state["minute_bars_before_0930"] = count
-        if not eligible:
-            state["traded"] = True
-            state["exit_reason"] = "insufficient_minute_bars_before_0930"
-        atomic_write_json(state_path(state["symbol_code_with_suf"]), state)
-        trade_log(
-            "LOWER_MINUTE_BARS_CHECK", **state_symbol_fields(state),
-            count=count, required=MIN_MINUTE_BARS_BEFORE_0930,
-            action="eligible" if eligible else "block_today", error_msg=error_msg,
-        )
-    for symbol, state in states.items():
-        if (state.get('minute_bars_checked') or state.get('traded') or is_avg_strategy(state)
-                or symbol in LOWER_MINUTE_FUTURES):
-            continue
-        LOWER_MINUTE_FUTURES[symbol] = (
-            LOWER_DATA_EXECUTOR.submit(fetch_lower_minute_count, state['symbol_code'], realtime_sdk, now_local.date()), state)
+def check_lower_minute_bar_eligibility(states: Dict[str, Dict[str, Any]], realtime_sdk: EsunMarketdata) -> None:
+    return get_lower_strategy().check_lower_minute_bar_eligibility(states, realtime_sdk)
 
 
 def fetch_lower_minute_count(symbol, realtime_sdk, target_date):
-    response = get_stock_rest_client(realtime_sdk).intraday.candles(symbol=symbol)
-    candles = response.get('data')
-    if not isinstance(candles, list):
-        raise ValueError('分K回應缺少 data 陣列')
-    minute_keys = set()
-    for candle in candles:
-        try:
-            dt = datetime.fromisoformat(str(candle['date']).replace('Z', '+00:00'))
-            dt = TZ.localize(dt) if dt.tzinfo is None else dt.astimezone(TZ)
-            if (dt.date() == target_date and (9, 0) <= (dt.hour, dt.minute) < (9, 30)
-                    and all(finite_positive(candle[field]) for field in ('open', 'high', 'low', 'close'))):
-                minute_keys.add((dt.hour, dt.minute))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return len(minute_keys)
+    return get_lower_strategy().fetch_lower_minute_count(symbol, realtime_sdk, target_date)
 
 
 def schedule_lower_quotes(states, realtime_sdk, *, request_quotes):
-    for symbol, (future, owner) in list(LOWER_QUOTE_FUTURES.items()):
-        if states.get(symbol) is not owner or owner.get('traded') or is_avg_strategy(owner):
-            future.cancel()
-            LOWER_QUOTE_FUTURES.pop(symbol)
-    if not request_quotes:
-        return
-    for symbol, state in states.items():
-        if state.get('traded') or is_avg_strategy(state) or symbol in LOWER_QUOTE_FUTURES:
-            continue
-        priority = MARKETDATA_PRIORITY_POSITION if state.get('in_position') else MARKETDATA_PRIORITY_CANDIDATE
-        executor = AVG_POSITION_QUOTE_EXECUTOR if state.get('in_position') else LOWER_QUOTE_EXECUTOR
-        LOWER_QUOTE_FUTURES[symbol] = (executor.submit(fetch_fall_quote, symbol, realtime_sdk, priority), state)
+    return get_lower_strategy().schedule_lower_quotes(states, realtime_sdk, request_quotes=request_quotes)
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
@@ -3847,7 +2751,7 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
         return FALL_ENTRY_DEADLINE
     if is_avg_strategy(state):
         return AVG_ENTRY_DEADLINE
-    if LOWER_SESSION_STATE.get("activation_dt") is not None:
+    if LOWER_RUNTIME.session_state.get("activation_dt") is not None:
         return get_active_lower_window()[2]
     return get_lower_strategy_windows()[-1][2]
 
@@ -3858,7 +2762,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
         return divmod(minutes, 60)
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
         return AVG_ENTRY_START_TIME
-    if LOWER_SESSION_STATE.get("activation_dt") is not None:
+    if LOWER_RUNTIME.session_state.get("activation_dt") is not None:
         return get_active_lower_window()[1]
     return STRATEGY_START_LOWER_1
 
@@ -3870,59 +2774,7 @@ def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = N
 
 
 def entry_lower_mode_price_check(state: Dict[str, Any]) -> bool | str:
-    """
-    lower 模式進場條件判斷；成立時以當下 last_price 寫入 entry_trigger_price。
-
-    回傳值：
-      True      — 條件成立，應進場（side 由呼叫端設定）
-      'BLOCKED' — 驗證失敗，需永久封鎖本日進場（呼叫端負責設 traded=True）
-      False     — 尚未觸發，繼續等待下一輪
-    """
-    now_local = now_tpe()
-    if LOWER_SESSION_STATE.get("stopped") or LOWER_SESSION_STATE.get("activation_dt") is None:
-        return False
-    if not state.get("minute_bars_eligible"):
-        return False
-    if state.get("symbol_code_with_suf") not in LOWER_SESSION_STATE["baseline_prices"]:
-        return False
-    if (now_local.hour, now_local.minute) < get_entry_check_start_time():
-        return False
-    if (now_local.hour, now_local.minute) > get_entry_check_end_time(state):
-        return False
-
-    yesterday_close_price = state.get("yesterday_close_price")
-    limit_down_price = state.get("limit_down_price")
-    if yesterday_close_price is None or limit_down_price is None:
-        return False
-
-    last_price = state.get("last_price", 0)
-    if last_price is None:
-        return False
-
-    try:
-        yesterday_close = float(yesterday_close_price)
-        limit_down = float(limit_down_price)
-        last_px = float(last_price)
-    except (TypeError, ValueError):
-        return False
-
-    if last_px <= 0:
-        return False
-
-    entry_lower_bound, entry_upper_bound = calculate_entry_range_bounds(
-        yesterday_close,
-        limit_down,
-        LOWER_ENTRY_RANGE_START_PERCENT,
-        LOWER_ENTRY_RANGE_END_PERCENT,
-    )
-    if not is_price_in_entry_range(last_px, entry_lower_bound, entry_upper_bound):
-        return False
-
-    if not lower_industry_market_filter_pass(state):
-        return False
-
-    state["entry_trigger_price"] = last_px
-    return True
+    return get_lower_strategy().entry_lower_mode_price_check(state)
 
 
 def entry_price_check(state: Dict[str, Any]) -> bool | str:
@@ -3933,7 +2785,7 @@ def entry_price_check(state: Dict[str, Any]) -> bool | str:
         return 'BLOCKED'
     if get_current_entry_mode() == ENTRY_MODE_NO_TRADE:
         now_local = now_tpe()
-        if not LOWER_SESSION_STATE.get("stopped"):
+        if not LOWER_RUNTIME.session_state.get("stopped"):
             return False
         print(f"[{state['symbol_name']}] {now_local.strftime('%H:%M:%S')} NO_TRADE 模式不追蹤")
         return 'BLOCKED'
@@ -3952,22 +2804,22 @@ def try_open_position(state: Dict[str, Any], mysdk):
     if TRADE_API_DEGRADED_EVENT.is_set():
         return  # 當日停止新風險；保留已送出的委託與持倉對帳。
     if is_fall_strategy(state):
-        if (state.get("symbol_code_with_suf") not in FALL_CANDIDATE_SYMBOLS
+        if (state.get("symbol_code_with_suf") not in FALL_RUNTIME.candidate_symbols
                 or not finite_positive(state.get("last_price"))
                 or not finite_positive(state.get("yesterday_low_price"))
                 or float(state["last_price"]) >= float(state["yesterday_low_price"])):
             return
     elif is_avg_strategy(state):
-        if not AVG_SESSION_STATE.get("active"):
+        if not AVG_RUNTIME.session_state.get("active"):
             return
-    elif LOWER_SESSION_STATE.get("stopped") or LOWER_SESSION_STATE.get("activation_dt") is None:
+    elif LOWER_RUNTIME.session_state.get("stopped") or LOWER_RUNTIME.session_state.get("activation_dt") is None:
         return
     now_local = now_tpe()
     if not get_entry_check_start_time(state) <= (now_local.hour, now_local.minute) <= get_entry_check_end_time(state):
         return
     if not state.get("minute_bars_eligible"):
         return
-    if not (is_avg_strategy(state) or is_fall_strategy(state)) and state.get("symbol_code_with_suf") not in LOWER_SESSION_STATE["baseline_prices"]:
+    if not (is_avg_strategy(state) or is_fall_strategy(state)) and state.get("symbol_code_with_suf") not in LOWER_RUNTIME.session_state["baseline_prices"]:
         return
     if MARKET_INDEX_REST_FATAL_EVENT.is_set() and not is_fall_strategy(state):
         state["traded"] = True
@@ -4554,25 +3406,11 @@ def all_traded(states: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def has_unfinished_lower_states(states: Dict[str, Dict[str, Any]]) -> bool:
-    return any(
-        not state.get("traded")
-        for state in states.values()
-    )
+    return get_lower_strategy().has_unfinished_lower_states(states)
 
 
 def mark_unentered_lower_states_blocked(states: Dict[str, Dict[str, Any]], reason: str) -> None:
-    for state in states.values():
-        if (
-            state.get("traded")
-            or state.get("in_position")
-            or state.get("entry_order_pending")
-            or state.get("exit_order_pending")
-        ):
-            continue
-        state["traded"] = True
-        state["entry_time"] = now_tpe().isoformat()
-        state["exit_reason"] = reason
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
+    return get_lower_strategy().mark_unentered_lower_states_blocked(states, reason)
 
 
 def mark_unentered_states_blocked_after_market_index_rest_fatal(
@@ -4733,7 +3571,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 print("[MODE] AVG 已切換，忽略 LOWER 專屬市場模式停止事件")
             else:
                 mark_unentered_lower_states_blocked(states, "market_mode_blocked")
-                LOWER_SESSION_STATE["stopped"] = True
+                LOWER_RUNTIME.session_state["stopped"] = True
                 MARKET_INDEX_REST_STOP_EVENT.set()
             MARKET_REVERSAL_STOP_EVENT.clear()
             if get_current_entry_mode() != ENTRY_MODE_AVG:
@@ -4780,7 +3618,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         decision_windows = get_lower_strategy_windows()
         decision_processed_this_round = False
         if lower_decision_future is not None:
-            if LOWER_SESSION_STATE.get('stopped') or MARKET_INDEX_REST_FATAL_EVENT.is_set() or entry_mode_decided:
+            if LOWER_RUNTIME.session_state.get('stopped') or MARKET_INDEX_REST_FATAL_EVENT.is_set() or entry_mode_decided:
                 lower_decision_future.cancel()
                 lower_decision_future = None
                 lower_decision_wait_started = None
@@ -4791,7 +3629,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         lower_decision_future, window_number, lower_decision_wait_started)
                 except Exception as exc:
                     trade_log('LOWER_DECISION_SCAN_ERROR', error=True, window_number=window_number, error_msg=repr(exc))
-                    LOWER_SESSION_STATE['stopped'] = True
+                    LOWER_RUNTIME.session_state['stopped'] = True
                     mark_unentered_lower_states_blocked(states, 'lower_decision_scan_failed')
                     MARKET_INDEX_REST_STOP_EVENT.set()
                     lower_decision_future = None
@@ -4809,12 +3647,12 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                         entry_mode_decided = True
                     print_entry_mode_decision(entry_mode, gate_results, states)
                     if decision_status == 'STOP':
-                        LOWER_SESSION_STATE['stopped'] = True
+                        LOWER_RUNTIME.session_state['stopped'] = True
                         mark_unentered_lower_states_blocked(states, 'market_mode_blocked')
                         MARKET_INDEX_REST_STOP_EVENT.set()
                     now_local = now_tpe()
         if (
-            not LOWER_SESSION_STATE.get("stopped")
+            not LOWER_RUNTIME.session_state.get("stopped")
             and not MARKET_INDEX_REST_FATAL_EVENT.is_set()
             and not entry_mode_decided
             and not decision_processed_this_round
@@ -4835,12 +3673,12 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 {symbol: dict(st) for symbol, st in states.items()}, realtime_sdk,
             )
         if (not entry_mode_decided and lower_decision_future is None
-                and (LOWER_SESSION_STATE.get('stopped') or MARKET_INDEX_REST_FATAL_EVENT.is_set()
+                and (LOWER_RUNTIME.session_state.get('stopped') or MARKET_INDEX_REST_FATAL_EVENT.is_set()
                      or (lower_strategy_early_breakout_deadline_announced and lower_minute_checks_complete(states)))):
             final_mode = resolve_session_entry_mode(now_tpe())
             if final_mode == ENTRY_MODE_AVG:
                 # 資格初始化含大量 REST 查詢，放背景執行以維持 FALL 報價與持倉風控。
-                LOWER_SESSION_STATE["stopped"] = True
+                LOWER_RUNTIME.session_state["stopped"] = True
                 MARKET_INDEX_REST_STOP_EVENT.set()
                 avg_initialization_future = MARKET_SCAN_EXECUTOR.submit(prepare_avg_states, realtime_sdk)
                 entry_mode_decided = True
@@ -4865,7 +3703,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 refresh_active_order_states(states)
                 order_states = all_order_states(states)
                 started = now_tpe()
-                AVG_SESSION_STATE.update(active=True, candidate_count=len(states),
+                AVG_RUNTIME.session_state.update(active=True, candidate_count=len(states),
                     last_scan_minute_key=(started.strftime("%Y-%m-%d %H:%M")
                                          if started.second >= AVG_CANDLE_POLL_SECOND else None))
                 trade_log("AVG_MODE_SELECTED", source=AVG_STOCK_DATA_SOURCE,
@@ -4956,7 +3794,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
         if (
             current_entry_mode != ENTRY_MODE_AVG
-            and LOWER_SESSION_STATE.get("activation_dt") is not None
+            and LOWER_RUNTIME.session_state.get("activation_dt") is not None
             and lower_percent_exit_summary is None
         ):
             if lower_exit_future is not None and lower_exit_future.done():
@@ -5006,19 +3844,19 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                     continue
 
                 quote_future = (
-                    AVG_POSITION_QUOTE_FUTURES.get(st["symbol_code_with_suf"])
+                    AVG_RUNTIME.position_quote_futures.get(st["symbol_code_with_suf"])
                     if is_avg_strategy(st) else
-                    LOWER_QUOTE_FUTURES.get(st["symbol_code_with_suf"], (None, None))[0]
+                    LOWER_RUNTIME.quote_futures.get(st["symbol_code_with_suf"], (None, None))[0]
                 )
                 quote_ready = quote_future is not None and quote_future.done()
                 if quote_ready:
                     try:
                         # print("更新股價")
                         if is_avg_strategy(st):
-                            AVG_POSITION_QUOTE_FUTURES.pop(st["symbol_code_with_suf"], None)
+                            AVG_RUNTIME.position_quote_futures.pop(st["symbol_code_with_suf"], None)
                             quote = quote_future.result()
                         else:
-                            LOWER_QUOTE_FUTURES.pop(st['symbol_code_with_suf'], None)
+                            LOWER_RUNTIME.quote_futures.pop(st['symbol_code_with_suf'], None)
                             quote, requested_at = quote_future.result()
                             if time.monotonic() - requested_at > QUOTE_ROUND_INTERVAL_SECONDS:
                                 continue
@@ -5120,7 +3958,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
 
 # ============ 呼叫 ============
-if __name__ == "__main__":
+def main(*, runtime_mode: str | None = None):
+    """本機與 Docker 共用入口；此程式只支援每日啟動一次。"""
+    global stock_data, selected_stocks, market_previous_close_indices, total_stocks
+    global MARKETDATA_STOCK_REST_CLIENT
+    environment = RuntimeEnvironment(BASE_DIR, mode=runtime_mode or os.getenv("QUANT_RUNTIME_MODE", "local"))
     #print(10*get_tick_size(74.3))
 
     base_dir = os.path.dirname(__file__)
@@ -5133,8 +3975,15 @@ if __name__ == "__main__":
     states = {}
     market_index_rest_thread = None
     fall_quote_thread = None
+    realtime_sdk = None
+    sdk = None
 
     try:
+        stock_data = environment.prepare_stock_data()
+        selected_stocks = stock_data.selected_stocks
+        market_previous_close_indices = stock_data.market_previous_close_indices
+        total_stocks = stock_data.total_stocks
+        stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         validate_market_reversal_time_config()
         validate_fall_config()
         wait_until_main_start_time()
@@ -5142,12 +3991,12 @@ if __name__ == "__main__":
         MARKET_REVERSAL_STOP_EVENT.clear()
         MARKET_INDEX_REST_STOP_EVENT.clear()
         MARKET_INDEX_REST_FATAL_EVENT.clear()
-        LOWER_SESSION_STATE.update({
+        LOWER_RUNTIME.session_state.update({
             "activation_dt": None, "window_number": None, "baseline_prices": {},
             "next_exit_check_dt": None, "stopped": False,
         })
-        AVG_SESSION_STATE.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})
-        AVG_CANDLE_NEXT_REQUEST_MONOTONIC = 0.0
+        AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})
+        AVG_RUNTIME.next_request_monotonic = 0.0
         LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_CHECK_ANNOUNCED_EVENT.clear()
         with MARKET_INDEX_ROUND_CONDITION:
             MARKET_INDEX_ROUND_STATE["completed_round"] = 0
@@ -5158,11 +4007,11 @@ if __name__ == "__main__":
 
         # 登入以操作API
         config = ConfigParser()
-        config.read('config.ini')
+        config.read(os.path.join(BASE_DIR, "config.ini"))
 
         realtime_sdk = EsunMarketdata(config)
         try:
-            realtime_sdk.login()
+            environment.login_sdk(realtime_sdk)
             trade_log("LOGIN_OK", api="marketdata")
         except Exception as exc:
             trade_log("LOGIN_ERROR", error=True, api="marketdata", error_msg=repr(exc))
@@ -5172,7 +4021,7 @@ if __name__ == "__main__":
 
         sdk = SDK(config)
         try:
-            sdk.login()
+            environment.login_sdk(sdk)
             trade_log("LOGIN_OK", api="trade")
         except Exception as exc:
             trade_log("LOGIN_ERROR", error=True, api="trade", error_msg=repr(exc))
@@ -5211,7 +4060,7 @@ if __name__ == "__main__":
         except Exception as exc:
             trade_log("SHUTDOWN_AUDIT_FAILED", error=True, error_msg=repr(exc))
         MARKETDATA_STOP_EVENT.set()
-        FALL_QUOTE_POLLER_STOP_EVENT.set()
+        FALL_RUNTIME.quote_poller_stop_event.set()
         MARKET_INDEX_REST_STOP_EVENT.set()
         for executor in (AVG_CANDLE_EXECUTOR, AVG_POSITION_QUOTE_EXECUTOR, MARKET_SCAN_EXECUTOR,
                          FALL_SCREEN_EXECUTOR, FALL_QUOTE_EXECUTOR, LOWER_DATA_EXECUTOR, LOWER_QUOTE_EXECUTOR,
@@ -5221,6 +4070,8 @@ if __name__ == "__main__":
             market_index_rest_thread.join(timeout=2.0)
         if fall_quote_thread is not None:
             fall_quote_thread.join(timeout=2.0)
+        environment.safe_logout_sdk("Esun Trade SDK", sdk)
+        environment.safe_logout_sdk("EsunMarketdata", realtime_sdk)
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         try:
@@ -5228,3 +4079,7 @@ if __name__ == "__main__":
                 f.write(capture_buffer.getvalue())
         except Exception as e:
             print(f"[WARN] 無法輸出 execute_strategy_result.txt：{e}", file=original_stderr)
+
+
+if __name__ == "__main__":
+    main()
