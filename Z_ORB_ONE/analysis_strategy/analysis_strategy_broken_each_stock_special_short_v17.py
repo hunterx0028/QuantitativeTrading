@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from esun_marketdata import EsunMarketdata
 # 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = "20261029"
+HISTORICAL_CACHE_DATE = ""
 
 if not HISTORICAL_CACHE_DATE:
     from Z_ORB_ONE.stock_data import (

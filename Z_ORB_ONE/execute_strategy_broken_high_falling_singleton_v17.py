@@ -64,6 +64,10 @@ STRATEGY_FALL = 'FALL'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
+# 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
+# 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
+ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
+
 PROTECT_PROFIT_SWITCH = True # 所有策略共用：False 不啟動獲利保護；True 啟動獲利保護
 PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
 PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
@@ -89,9 +93,18 @@ FORCE_CLOSE_TIME_LOWER = (12, 50)  # lower 收盤前強制平倉時間
 OPTIMIZE_PROFIT_PER_LOWER = 5.0 # lower 停利百分比(%)，例如 5.0 代表入場價減去 5%
 OPTIMIZE_LOSS_PER_LOWER = 2.0 # lower 停損百分比(%)，例如 3.0 代表入場價加上 3%
 
-# 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
-# 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
-ENTRY_ORDER_QUANTITY_LOWER = 1 # lower 每次進場下單數量
+LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
+LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
+LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # 各決策時點的股票下降比例須嚴格大於此值
+LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例需嚴格小於此值，即下限 < 比例 < 上限
+LOWER_EXIT_PERCENT_THRESHOLD = 40.0
+
+IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
+IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.9 # IX0001 各決策時點的最新有效即時值須低於此門檻
+IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
+IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.75 # IX0043 各決策時點的最新有效即時值須低於此門檻
+# 產業盤勢過濾：LOWER 作空須嚴格低於昨收下跌門檻。
+INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER 作空：產業指數需低於昨收下跌此百分比的門檻
 
 # AVG 參數獨立於 LOWER。
 AVG_STOCK_DATA_SOURCE = "T"  # T: total_stocks；S: selected_stocks，均使用獨立副本
@@ -140,20 +153,6 @@ FALL_PROTECT_PROFIT_PER = 2.5
 FALL_PROTECT_LOSS_PER = 1.5
 FALL_PROFIT_BACK_PERCENT = 0.5
 FALL_PROFIT_TARGET_PERCENT = 1.0
-
-LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起始百分比
-LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比
-LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # 各決策時點的股票下降比例須嚴格大於此值
-LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例需嚴格小於此值，即下限 < 比例 < 上限
-LOWER_EXIT_PERCENT_THRESHOLD = 35.0
-
-IX0001_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.2 # IX0001 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
-IX0001_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.9 # IX0001 各決策時點的最新有效即時值須低於此門檻
-IX0043_STRATEGY_DECISION_DROP_PERCENT_LOWER = 1.0 # IX0043 早盤啟動門檻：截止時間前即時值需低於前日最後 close 的百分比
-IX0043_STRATEGY_DECISION_REBOUND_PERCENT_LOWER = 0.75 # IX0043 各決策時點的最新有效即時值須低於此門檻
-
-# 產業盤勢過濾：LOWER 作空須嚴格低於昨收下跌門檻。
-INDUSTRY_MARKET_FILTER_SHORT_PERCENT = 0 # LOWER 作空：產業指數需低於昨收下跌此百分比的門檻
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 開盤前不查委託結果，09:00 後才補成交價量
@@ -251,7 +250,6 @@ MARKETDATA_PRIORITY_SCAN = 50
 MARKETDATA_REQUEST_CONTEXT = threading.local()
 QUOTE_CACHE_LOCK = threading.Lock()
 QUOTE_ROUND_CACHE: Dict[str, tuple] = {}
-
 
 class MarketDataRequestGate:
     """統一發放行情請求時槽；等待期間釋放鎖，較高優先序可先取下一個時槽。"""
