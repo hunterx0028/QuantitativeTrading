@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from esun_marketdata import EsunMarketdata
 # 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "20261029"
 
 if not HISTORICAL_CACHE_DATE:
     from Z_ORB_ONE.stock_data import (
@@ -85,7 +85,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # 各啟動檢核時點的區間股票比例須嚴格大於此值
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
-LOWER_EXIT_PERCENT_THRESHOLD = 35.0 # 啟動後每十分鐘的上漲家數比例嚴格超過此值時全平倉，當日不再入場
+LOWER_EXIT_PERCENT_THRESHOLD = 40.0 # 啟動後每十分鐘的上漲家數比例嚴格超過此值時全平倉，當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
