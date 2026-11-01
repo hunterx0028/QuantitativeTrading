@@ -22,8 +22,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
 MARKET_OPEN_TIME = (9, 0)
-SIGNAL_START_TIME = (9, 30)  # 包含此分鐘的訊號K
-ENTRY_DEADLINE = (12, 0)  # 實際進場時間，包含此分鐘
+SIGNAL_START_TIME = (10, 0)  # 包含此分鐘的訊號K
+ENTRY_DEADLINE = (12, 0)  # 實際進場最後時間，包含此分鐘
 OPENING_DROP_PERCENT = 3.0  # 首根 low 嚴格低於昨收此百分比
 IX0001_OPENING_DROP_PERCENT = 0.5  # 首根 close 相對 open，嚴格跌逾此值則排除 .TW
 IX0043_OPENING_DROP_PERCENT = 0.5  # 同上，對應 .TWO
@@ -437,6 +437,8 @@ def evaluate_candidates(
             'opening_low': candidate['opening_low'],
             'previous_close': candidate['previous_close'],
             'signal_dt': candidate['signal_dt'],
+            'market_index': candidate.get('market_index'),
+            'market_opening_drop_percent': candidate.get('market_opening_drop_percent'),
             'effective_stop_loss': effective_stop_loss,
             'stop_loss_price': stop_loss_price,
         }
@@ -584,7 +586,7 @@ def filter_candidates_by_market(candidates, index_bars, counts):
 
 
 def get_api_cache_path(target_date):
-    """與 v17 共用原始 API cache；不要求舊策略的指數資料。"""
+    """與 v17 共用原始 API cache；僅使用兩個市場指數，不要求產業指數。"""
     return Path(__file__).parent / 'analysis_json_cache' / (
         f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
     )
@@ -626,9 +628,14 @@ def validate_settings():
 
 
 def format_result_line(stock_name, date_str, signal, result):
+    market = ''
+    if signal.get('market_index') is not None:
+        market = (f'{signal["market_index"]} 首根close/open跌幅='
+                  f'{signal["market_opening_drop_percent"]:.4f}% | ')
     prefix = (
         f'{date_str} {stock_name} broken 首根low跌幅={signal["opening_drop_percent"]:.4f}% '
         f'昨收={signal["previous_close"]:.2f} 首根low={signal["opening_low"]:.2f} '
+        f'{market}'
         f'訊號={signal["signal_dt"]:%H:%M} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
