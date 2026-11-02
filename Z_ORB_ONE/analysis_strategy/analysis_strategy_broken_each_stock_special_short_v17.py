@@ -38,19 +38,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from esun_marketdata import EsunMarketdata
-# 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
-HISTORICAL_CACHE_DATE = ""
-
-if not HISTORICAL_CACHE_DATE:
-    from Z_ORB_ONE.stock_data import (
-        market_previous_close_indices,
-        selected_stocks,
-        total_stocks as lower_decision_stocks,
-    )
-else:
-    market_previous_close_indices = {}
-    selected_stocks = []
-    lower_decision_stocks = []
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.ini'
 STOCK_DATA_PATH = Path(__file__).resolve().parents[1] / 'stock_data.py'
@@ -66,11 +53,25 @@ STRATEGY_LOWER = 'LOWER'
 STRATEGY_NO_TRADE = 'NO_TRADE'
 TRADE_SIDE_SHORT = 'SHORT'
 
-INCLUDE_LOWER_IN_PRINT_STATS = True
-
 # ---------------------------------------------------------------------------
 # IDE 直接執行時可在此調整策略參數, 此版本不會跳過前一日非營業日的狀況
 # ---------------------------------------------------------------------------
+
+# 空字串維持原流程；YYYYMMDD 固定讀取歷史 cache，優先於 --to。
+# 字面值 "xxxxxxxx"：讀取同尾碼 cache，以檔內最新有效個股分 K 日期為截止日，
+# 回測全部可用歷史日期；不連 API、不讀 stock_data.py。
+HISTORICAL_CACHE_DATE = "xxxxxxxx"
+
+if not HISTORICAL_CACHE_DATE:
+    from Z_ORB_ONE.stock_data import (
+        market_previous_close_indices,
+        selected_stocks,
+        total_stocks as lower_decision_stocks,
+    )
+else:
+    market_previous_close_indices = {}
+    selected_stocks = []
+    lower_decision_stocks = []
 
 STOCK_DATA_SOURCE = "S" # "S": selected_stocks；"T": total_stocks；非空 STOCK_LIST 仍優先使用
 
@@ -86,7 +87,7 @@ LOWER_ENTRY_RANGE_START_PERCENT = 10.0 # lower 入場價距昨收到跌停的起
 LOWER_ENTRY_RANGE_END_PERCENT = 60.0 # lower 入場價距昨收到跌停的結束百分比，可以為 70
 LOWER_DECISION_DECLINE_PERCENT_THRESHOLD = 35.0 # 各啟動檢核時點的區間股票比例須嚴格大於此值
 LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD = 65.0 # 同一比例須嚴格小於此值，即下限 < 比例 < 上限
-LOWER_EXIT_PERCENT_THRESHOLD = 40.0 # 啟動後每十分鐘的上漲家數比例嚴格超過此值時全平倉，當日不再入場
+LOWER_EXIT_PERCENT_THRESHOLD = 50.0 # 啟動後每十分鐘的上漲家數比例嚴格超過此值時全平倉，當日不再入場
 
 
 LOWER_MARKET_PREVIOUS_CLOSE_REVERSAL_START_TIME = (9, 6) # LOWER 指數昨收兩側檢查起始時間，包含此時間
@@ -302,6 +303,18 @@ def ensure_backtest_industry_index_metadata(stock_list: list[tuple]) -> list[tup
 def get_api_cache_path(target_date: date) -> Path:
     """回傳 API 快取檔路徑（json_cache 資料夾）。"""
     return Path(__file__).resolve().parent / 'analysis_json_cache' / f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
+
+
+def resolve_historical_cache(value: str) -> tuple[Path, date | None]:
+    """xxxxxxxx 為字面檔名尾碼；日期模式仍採 YYYYMMDD。"""
+    if value == 'xxxxxxxx':
+        return get_api_cache_path(date(2000, 1, 1)).with_name(
+            'analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json'
+        ), None
+    if not re.fullmatch(r'\d{8}', value):
+        raise ValueError('歷史 cache 設定須為 YYYYMMDD 或字面值 xxxxxxxx')
+    target_date = datetime.strptime(value, '%Y%m%d').date()
+    return get_api_cache_path(target_date), target_date
 
 
 def load_api_cache(cache_path: Path, stock_list: list[tuple], decision_stock_list: list[tuple] | None = None) -> tuple[dict[str, dict[str, list]], dict[str, dict[str, list]]] | None:
@@ -1582,21 +1595,13 @@ def signed_pnl(result: dict | None) -> float:
     return result['pnl'] if result.get('outcome') == 'success' else -result['pnl']
 
 
-def should_include_strategy_in_print_stats(strategy_type: str | None) -> bool:
-    """依打印統計開關判斷策略模式是否納入輸出。"""
-    if strategy_type == STRATEGY_LOWER:
-        return INCLUDE_LOWER_IN_PRINT_STATS
-    return True
-
-
 def filter_results_for_print_stats(all_results: list) -> list:
-    """回傳納入打印統計的交易結果。"""
+    """回傳有效交易結果；LOWER 固定納入輸出與統計。"""
     return [
         (signal, result)
         for signal, result in all_results
         if signal
         and result
-        and should_include_strategy_in_print_stats(signal.get('strategy_type'))
     ]
 
 
@@ -1802,7 +1807,6 @@ def print_daily_optimization_results(
         current_date.strftime('%Y-%m-%d')
         for current_date, (gate_status, _) in market_start_gate_cache.items()
         if gate_status in (GATE_LOWER_PASSED, GATE_LOWER_PERCENT_REJECTED, GATE_LOWER_CANDIDATE_RANGE_REJECTED)
-        and INCLUDE_LOWER_IN_PRINT_STATS
     }
     if summary['total'] == 0 and not lower_gate_date_keys:
         print('固定參數下沒有交易結果。')
@@ -1971,9 +1975,6 @@ def print_daily_optimization_results(
     print(
         f'LOWER_LOSS_PER={OPTIMIZE_LOSS_PER_LOWER:.1f}%  '
         f'LOWER_PROFIT_PER={OPTIMIZE_PROFIT_PER_LOWER:.1f}%'
-    )
-    print(
-        f'INCLUDE_LOWER_IN_PRINT_STATS={INCLUDE_LOWER_IN_PRINT_STATS}'
     )
     print(
         f'LOWER_ENTRY_RANGE={LOWER_ENTRY_RANGE_START_PERCENT:.1f}%~{LOWER_ENTRY_RANGE_END_PERCENT:.1f}%'
@@ -2336,13 +2337,20 @@ def main() -> None:
         args = parse_args()
         if HISTORICAL_CACHE_DATE:
             try:
-                if not re.fullmatch(r'\d{8}', HISTORICAL_CACHE_DATE):
-                    raise ValueError('歷史日期必須為 YYYYMMDD')
-                target_date = datetime.strptime(HISTORICAL_CACHE_DATE, '%Y%m%d').date()
-                cache_path = get_api_cache_path(target_date)
+                cache_path, target_date = resolve_historical_cache(HISTORICAL_CACHE_DATE)
                 analysis_stock_list, minute_bars_by_symbol, index_minute_bars_by_key = (
                     load_historical_api_cache(cache_path)
                 )
+                if target_date is None:
+                    cached_dates = [
+                        date.fromisoformat(day)
+                        for bars_by_date in minute_bars_by_symbol.values()
+                        for day, bars in bars_by_date.items()
+                        if bars
+                    ]
+                    if not cached_dates:
+                        raise ValueError('xxxxxxxx cache 沒有可用分 K，無法判定回測截止日')
+                    target_date = max(cached_dates)
             except ValueError as exc:
                 print(f'[ERROR] {exc}', file=sys.stderr)
                 sys.exit(1)

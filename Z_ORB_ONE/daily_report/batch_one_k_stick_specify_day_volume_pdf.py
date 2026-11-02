@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 import re
 import math
 import sys
@@ -28,19 +27,19 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import (
-    selected_limit_down_stocks,
-    selected_limit_up_stocks,
-    selected_stocks,
-    total_stocks,
-)
+from Z_ORB_ONE.daily_report.history_cache import CacheStock, load_cache
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")  # 產製結果資料夾
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
-STOCK_LIST_SOURCE = "T"  # S：selected_stocks；T：total_stocks；C：指定日期快取 JSON 的 stock_names
-STOCK_LIST_CACHE_DATE = ""  # C 模式的股票清單檔案日期 YYYYMMDD，與 SPECIFIED_DATE 無關
-SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 STOCK_LIST_SOURCE；例如 ["5055", "2377"]
+SPECIFIED_STOCK_CODES = "T"  # 僅 SPECIFIED_DATE 為空時有效；"S": selected_stocks；"T": total_stocks
+SPECIFIED_STOCK_DATA_CODES = [""]  # 僅 SPECIFIED_DATE 非空時有效；[""]: cache 全部股票；["3124", "6068"]: 指定股票；[]: 不選股票
+HISTORY_CACHE_PATH = os.path.join(
+    BASE_DIR,
+    "analysis_strategy",
+    "analysis_json_cache",
+    "analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json",
+)
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 固定置於個股報表之前；可自行增減或調整順序
 STRATEGY_START_LOWER = (9, 0) # lower 個股進場開始分K棒的(時, 分)，包含此時間
 STRATEGY_START_FOLLOW = (9, 0) # follow 個股進場開始分K棒的(時, 分)，包含此時間
@@ -97,7 +96,8 @@ def fetch_recent_candles(rest_stock, symbol_code: str, target_date: date, lookba
             "timeframe": "1",
         }
     )
-    time_module.sleep(1)
+    if not getattr(rest_stock, "is_history_cache", False):
+        time_module.sleep(1)
 
     grouped_rows: dict[date, list[dict]] = {}
     for row in response_data.get("data", []) or []:
@@ -523,6 +523,37 @@ def draw_intraday_ohlc(
 def now_tpe() -> datetime:
     return datetime.now(pytz.timezone("Asia/Taipei"))
 
+
+def load_history_stock_codes(target_date: date) -> list[str]:
+    """取得歷史快取中，指定日期有日 K 或分 K 資料的股票代碼。"""
+    cache = load_cache(HISTORY_CACHE_PATH)
+
+    candle_groups = [
+        cache[key]
+        for key in ("day_candles_by_symbol", "minute_raw_by_symbol")
+        if isinstance(cache.get(key), dict)
+    ]
+    if not candle_groups:
+        raise ValueError(f"歷史快取缺少股票日 K / 分 K 資料: {HISTORY_CACHE_PATH}")
+
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    stock_codes = []
+    seen = set()
+    for candles_by_symbol in candle_groups:
+        for label, rows in candles_by_symbol.items():
+            if not any(str(row.get("date", ""))[:10] == target_date_str for row in rows):
+                continue
+            code = extract_stock_code(label)
+            if not re.fullmatch(r"\d{4}", code):
+                raise ValueError(f"歷史快取的股票代碼必須是 4 位數字: {label!r}")
+            if code not in seen:
+                seen.add(code)
+                stock_codes.append(code)
+
+    print(f"[INFO] 歷史快取 {target_date_str}: 找到 {len(stock_codes)} 檔股票")
+    return stock_codes
+
+
 def build_report_items() -> list[dict]:
     default_strategy_start_times = {
         STRATEGY_START_LOWER,
@@ -541,8 +572,16 @@ def build_report_items() -> list[dict]:
         }
         for code in SPECIFIED_INDEX_CODES
     ]
-    specified_stock_codes = [code.strip() for code in SPECIFIED_STOCK_CODES if code.strip()]
-    if specified_stock_codes:
+    if SPECIFIED_DATE.strip():
+        if not isinstance(SPECIFIED_STOCK_DATA_CODES, list):
+            raise ValueError('SPECIFIED_STOCK_DATA_CODES 須為 [""]、股票代碼清單或 []')
+        if SPECIFIED_STOCK_DATA_CODES == [""]:
+            specified_stock_codes = load_history_stock_codes(parse_specified_date(SPECIFIED_DATE))
+        else:
+            specified_stock_codes = [str(code).strip() for code in SPECIFIED_STOCK_DATA_CODES]
+            if any(not re.fullmatch(r"\d{4}", code) for code in specified_stock_codes):
+                raise ValueError('SPECIFIED_STOCK_DATA_CODES 須為 [""]、4 位數字股票代碼清單或 []')
+            specified_stock_codes = list(dict.fromkeys(specified_stock_codes))
         report_items.extend(
             {
                 "code": code,
@@ -555,38 +594,12 @@ def build_report_items() -> list[dict]:
         )
         return report_items
 
-    stock_list_source = STOCK_LIST_SOURCE.strip().upper()
-    if stock_list_source not in {"S", "T", "C"}:
-        raise ValueError("STOCK_LIST_SOURCE 須為 S（selected_stocks）、T（total_stocks）或 C（快取 JSON）")
-    if stock_list_source == "C":
-        cache_date = STOCK_LIST_CACHE_DATE.strip()
-        if not re.fullmatch(r"[0-9]{8}", cache_date):
-            raise ValueError("STOCK_LIST_CACHE_DATE 需為 YYYYMMDD")
-        datetime.strptime(cache_date, "%Y%m%d")
-        cache_path = os.path.join(
-            BASE_DIR,
-            "analysis_strategy",
-            "analysis_json_cache",
-            f"analysis_strategy_broken_each_stock_special_short_api_cache_{cache_date}.json",
-        )
-        with open(cache_path, encoding="utf-8-sig") as cache_file:
-            cache_data = json.load(cache_file)
-        stock_names = cache_data.get("stock_names") if isinstance(cache_data, dict) else None
-        if not isinstance(stock_names, list) or not all(
-            isinstance(label, str) and label.strip() for label in stock_names
-        ):
-            raise ValueError(f"快取 JSON 的 stock_names 須為股票名稱字串清單: {cache_path}")
-        report_items.extend(
-            {
-                "code": extract_stock_code(label),
-                "label": label,
-                "atr_value": None,
-                "is_index": False,
-                "strategy_start_times": default_strategy_start_times,
-            }
-            for label in stock_names
-        )
-        return report_items
+    if not isinstance(SPECIFIED_STOCK_CODES, str):
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    stock_list_source = SPECIFIED_STOCK_CODES.strip().upper()
+    if stock_list_source not in {"S", "T"}:
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
     stock_items = selected_stocks if stock_list_source == "S" else total_stocks
 
     report_items.extend(
@@ -598,29 +611,6 @@ def build_report_items() -> list[dict]:
             "strategy_start_times": default_strategy_start_times,
         }
         for item in stock_items
-    )
-    if stock_list_source == "T":
-        return report_items
-
-    report_items.extend(
-        {
-            "code": extract_stock_code(item[0]),
-            "label": item[0],
-            "atr_value": item[7],
-            "is_index": False,
-            "strategy_start_times": (),
-        }
-        for item in selected_limit_up_stocks
-    )
-    report_items.extend(
-        {
-            "code": extract_stock_code(item[0]),
-            "label": item[0],
-            "atr_value": item[7],
-            "is_index": False,
-            "strategy_start_times": (),
-        }
-        for item in selected_limit_down_stocks
     )
     return report_items
 
@@ -635,14 +625,17 @@ def main():
     # ========= PDF 檔名（全部圖合併成一份） =========
     out_pdf_path = os.path.join(PDF_DIR, f"{out_dir}_one_k_batch.pdf")
     # ========= SDK login =========
-    config = ConfigParser()
-    config.read(CONFIG_PATH)
-    normalize_config_paths(config)
-    realtime_sdk = EsunMarketdata(config)
-    realtime_sdk.login()
-    sdk = SDK(config)
-    sdk.login()
-    rest_stock = realtime_sdk.rest_client.stock
+    if SPECIFIED_DATE.strip():
+        rest_stock = CacheStock(HISTORY_CACHE_PATH)
+    else:
+        config = ConfigParser()
+        config.read(CONFIG_PATH)
+        normalize_config_paths(config)
+        realtime_sdk = EsunMarketdata(config)
+        realtime_sdk.login()
+        sdk = SDK(config)
+        sdk.login()
+        rest_stock = realtime_sdk.rest_client.stock
 
     # ========= 批次產圖：全部寫入同一個 PDF =========
     with PdfPages(out_pdf_path) as pdf:

@@ -23,17 +23,21 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import (
-    selected_limit_down_stocks,
-    selected_limit_up_stocks,
-    selected_stocks,
-)
+from Z_ORB_ONE.daily_report.history_cache import CacheStock, load_cache
+
 
 
 PDF_DIR = os.path.join(CURRENT_DIR, "pdf_folder")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # YYYYMMDD；空字串代表台北時區今日
-SPECIFIED_STOCK_CODES = [""]  # 空清單或 [""] 時使用 stock_data.py；例如 ["5055", "2377"]
+SPECIFIED_STOCK_CODES = "T"  # 僅 SPECIFIED_DATE 為空時有效；"S": selected_stocks；"T": total_stocks
+SPECIFIED_STOCK_DATA_CODES = [""]  # 僅 SPECIFIED_DATE 非空時有效；[""]: cache 全部股票；["3124", "6068"]: 指定股票；[]: 不選股票
+HISTORY_CACHE_PATH = os.path.join(
+    BASE_DIR,
+    "analysis_strategy",
+    "analysis_json_cache",
+    "analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json",
+)
 SPECIFIED_INDEX_CODES = ["IX0001", "IX0043"]  # 上市、上櫃指數固定置於個股之前
 DAILY_CANDLE_COUNT = 40
 LOOKBACK_CALENDAR_DAYS = 120
@@ -84,7 +88,8 @@ def fetch_daily_candles(rest_stock, symbol_code: str, requested_date: date) -> l
             "to": requested_date.strftime("%Y-%m-%d"),
         }
     )
-    time_module.sleep(REQUEST_INTERVAL_SECONDS)
+    if not getattr(rest_stock, "is_history_cache", False):
+        time_module.sleep(REQUEST_INTERVAL_SECONDS)
 
     rows_by_date: dict[date, dict] = {}
     for row in response_data.get("data", []) or []:
@@ -225,20 +230,70 @@ def draw_daily_ohlc(
     price_ax.format_coord = make_format_coord(rows, value_formatter)
 
 
+def load_history_stock_codes(target_date: date) -> list[str]:
+    """取得歷史快取中，指定日期有日 K 或分 K 資料的股票代碼。"""
+    cache = load_cache(HISTORY_CACHE_PATH)
+
+    candle_groups = [
+        cache[key]
+        for key in ("day_candles_by_symbol", "minute_raw_by_symbol")
+        if isinstance(cache.get(key), dict)
+    ]
+    if not candle_groups:
+        raise ValueError(f"歷史快取缺少股票日 K / 分 K 資料: {HISTORY_CACHE_PATH}")
+
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    stock_codes = []
+    seen = set()
+    for candles_by_symbol in candle_groups:
+        for label, rows in candles_by_symbol.items():
+            if not any(str(row.get("date", ""))[:10] == target_date_str for row in rows):
+                continue
+            code = extract_stock_code(label)
+            if not re.fullmatch(r"\d{4}", code):
+                raise ValueError(f"歷史快取的股票代碼必須是 4 位數字: {label!r}")
+            if code not in seen:
+                seen.add(code)
+                stock_codes.append(code)
+
+    print(f"[INFO] 歷史快取 {target_date_str}: 找到 {len(stock_codes)} 檔股票")
+    return stock_codes
+
+
 def build_report_items() -> list[dict]:
     report_items = [
         {"code": code, "label": code, "atr_value": None, "is_index": True}
         for code in SPECIFIED_INDEX_CODES
     ]
-    specified_stock_codes = [code.strip() for code in SPECIFIED_STOCK_CODES if code.strip()]
-    if specified_stock_codes:
+    if SPECIFIED_DATE.strip():
+        if not isinstance(SPECIFIED_STOCK_DATA_CODES, list):
+            raise ValueError('SPECIFIED_STOCK_DATA_CODES 須為 [""]、股票代碼清單或 []')
+        if SPECIFIED_STOCK_DATA_CODES == [""]:
+            specified_stock_codes = load_history_stock_codes(parse_specified_date(SPECIFIED_DATE))
+        else:
+            specified_stock_codes = [str(code).strip() for code in SPECIFIED_STOCK_DATA_CODES]
+            if any(not re.fullmatch(r"\d{4}", code) for code in specified_stock_codes):
+                raise ValueError('SPECIFIED_STOCK_DATA_CODES 須為 [""]、4 位數字股票代碼清單或 []')
+            specified_stock_codes = list(dict.fromkeys(specified_stock_codes))
         report_items.extend(
-            {"code": code, "label": code, "atr_value": None, "is_index": False}
+            {
+                "code": code,
+                "label": code,
+                "atr_value": None,
+                "is_index": False,
+            }
             for code in specified_stock_codes
         )
         return report_items
 
-    for stock_group in (selected_stocks, selected_limit_up_stocks, selected_limit_down_stocks):
+    if not isinstance(SPECIFIED_STOCK_CODES, str):
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    stock_list_source = SPECIFIED_STOCK_CODES.strip().upper()
+    if stock_list_source not in {"S", "T"}:
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
+    stock_groups = (selected_stocks,) if stock_list_source == 'S' else (total_stocks,)
+    for stock_group in stock_groups:
         report_items.extend(
             {
                 "code": extract_stock_code(item[0]),
@@ -255,23 +310,26 @@ def main():
     requested_date = parse_specified_date(SPECIFIED_DATE)
     report_items = build_report_items()
 
-    config = ConfigParser()
-    config.read(CONFIG_PATH)
-    normalize_config_paths(config)
-    realtime_sdk = EsunMarketdata(config)
-    realtime_sdk.login()
-    sdk = SDK(config)
-    sdk.login()
-    rest_stock = realtime_sdk.rest_client.stock
+    if SPECIFIED_DATE.strip():
+        rest_stock = CacheStock(HISTORY_CACHE_PATH)
+    else:
+        config = ConfigParser()
+        config.read(CONFIG_PATH)
+        normalize_config_paths(config)
+        realtime_sdk = EsunMarketdata(config)
+        realtime_sdk.login()
+        sdk = SDK(config)
+        sdk.login()
+        rest_stock = realtime_sdk.rest_client.stock
 
     # 以上市指數的最後一筆資料判定整份報表的最近有效交易日。
     calendar_rows = fetch_daily_candles(rest_stock, SPECIFIED_INDEX_CODES[0], requested_date)
-    if not calendar_rows:
+    if not calendar_rows and not SPECIFIED_DATE.strip():
         raise RuntimeError(
             f"{SPECIFIED_INDEX_CODES[0]} 在 {requested_date.strftime('%Y-%m-%d')} 往前 "
             f"{LOOKBACK_CALENDAR_DAYS} 天內無日K資料"
         )
-    effective_date = calendar_rows[-1]["date"]
+    effective_date = requested_date if SPECIFIED_DATE.strip() else calendar_rows[-1]["date"]
 
     os.makedirs(PDF_DIR, exist_ok=True)
     out_pdf_path = os.path.join(

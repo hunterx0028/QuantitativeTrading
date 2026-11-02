@@ -29,12 +29,20 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Z_ORB_ONE.stock_data import market_previous_close_indices
+from Z_ORB_ONE.daily_report.history_cache import CacheStock, load_cache
+
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 SPECIFIED_DATE = ""  # 指定要繪圖的日期，格式 YYYYMMDD；空值時使用今天日期
 DISPLAY_INDEX_CODES = ("IX0001", "IX0043")  # 依序以分頁顯示上市、上櫃指數
-DISPLAY_STOCK_CODES = [""]  # 要額外顯示的 4 位數股票代碼；空字串會被忽略，等同空陣列
+SPECIFIED_STOCK_CODES = "T"  # 僅 SPECIFIED_DATE 為空時有效；"S": selected_stocks；"T": total_stocks
+SPECIFIED_STOCK_DATA_CODES = [""]  # 僅 SPECIFIED_DATE 非空時有效；[""]: cache 全部股票；["3124", "6068"]: 指定股票；[]: 不選股票
+HISTORY_CACHE_PATH = os.path.join(
+    BASE_DIR,
+    "analysis_strategy",
+    "analysis_json_cache",
+    "analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json",
+)
 
 RESERVE_MARKET_INDICES = {
     "TWSE:MARKET": {
@@ -54,6 +62,7 @@ RESERVE_MARKET_INDICES = {
         "source": "historical.candles",
     },
 }
+from Z_ORB_ONE.stock_data import market_previous_close_indices
 MARKET_INDEX_METADATA = {**market_previous_close_indices, **RESERVE_MARKET_INDICES}
 
 
@@ -103,9 +112,37 @@ def normalize_stock_code(stock_code: str) -> str:
     normalized_code = str(stock_code).strip()
     if not re.fullmatch(r"\d{4}", normalized_code):
         raise ValueError(
-            f"DISPLAY_STOCK_CODES 內的股票代碼必須是 4 位數字: {stock_code!r}"
+            f"SPECIFIED_STOCK_DATA_CODES 內的股票代碼必須是 4 位數字: {stock_code!r}"
         )
     return normalized_code
+
+
+def load_history_stock_codes(target_date: date) -> list[str]:
+    """取得歷史快取中，指定日期有日 K 或分 K 資料的股票代碼。"""
+    cache = load_cache(HISTORY_CACHE_PATH)
+
+    candle_groups = [
+        cache[key]
+        for key in ("day_candles_by_symbol", "minute_raw_by_symbol")
+        if isinstance(cache.get(key), dict)
+    ]
+    if not candle_groups:
+        raise ValueError(f"歷史快取缺少股票日 K / 分 K 資料: {HISTORY_CACHE_PATH}")
+
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    stock_codes = []
+    seen = set()
+    for candles_by_symbol in candle_groups:
+        for label, rows in candles_by_symbol.items():
+            if not any(str(row.get("date", ""))[:10] == target_date_str for row in rows):
+                continue
+            code = normalize_stock_code(extract_stock_code(label))
+            if code not in seen:
+                seen.add(code)
+                stock_codes.append(code)
+
+    print(f"[INFO] 歷史快取 {target_date_str}: 找到 {len(stock_codes)} 檔股票")
+    return stock_codes
 
 
 def find_specified_index(index_code: str) -> tuple[str, dict]:
@@ -142,7 +179,8 @@ def fetch_recent_candles(rest_stock, symbol_code: str, target_date: date, lookba
             "timeframe": "1",
         }
     )
-    time_module.sleep(1)
+    if not getattr(rest_stock, "is_history_cache", False):
+        time_module.sleep(1)
 
     grouped_rows: dict[date, list[dict]] = {}
     for row in response_data.get("data", []) or []:
@@ -601,18 +639,39 @@ def add_figure_tab(notebook: ttk.Notebook, fig: Figure, tab_title: str) -> None:
     canvas.draw()
 
 
+def resolve_display_stock_codes(target_date: date) -> list[str]:
+    if SPECIFIED_DATE.strip():
+        if not isinstance(SPECIFIED_STOCK_DATA_CODES, list):
+            raise ValueError('SPECIFIED_STOCK_DATA_CODES 須為 [""]、股票代碼清單或 []')
+        if SPECIFIED_STOCK_DATA_CODES == [""]:
+            return load_history_stock_codes(target_date)
+        return list(dict.fromkeys(normalize_stock_code(code) for code in SPECIFIED_STOCK_DATA_CODES))
+
+    if not isinstance(SPECIFIED_STOCK_CODES, str):
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    stock_list_source = SPECIFIED_STOCK_CODES.strip().upper()
+    if stock_list_source not in {"S", "T"}:
+        raise ValueError('SPECIFIED_STOCK_CODES 須為 "S" 或 "T"')
+    from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
+    stock_items = selected_stocks if stock_list_source == "S" else total_stocks
+    return list(dict.fromkeys(normalize_stock_code(extract_stock_code(item[0])) for item in stock_items))
+
 def main():
     target_date = parse_specified_date(SPECIFIED_DATE)
+    display_stock_codes = resolve_display_stock_codes(target_date)
 
     # ========= SDK login =========
-    config = ConfigParser()
-    config.read(CONFIG_PATH)
-    normalize_config_paths(config)
-    realtime_sdk = EsunMarketdata(config)
-    realtime_sdk.login()
-    sdk = SDK(config)
-    sdk.login()
-    rest_stock = realtime_sdk.rest_client.stock
+    if SPECIFIED_DATE.strip():
+        rest_stock = CacheStock(HISTORY_CACHE_PATH)
+    else:
+        config = ConfigParser()
+        config.read(CONFIG_PATH)
+        normalize_config_paths(config)
+        realtime_sdk = EsunMarketdata(config)
+        realtime_sdk.login()
+        sdk = SDK(config)
+        sdk.login()
+        rest_stock = realtime_sdk.rest_client.stock
 
     root = tk.Tk()
     root.title(f"上市/上櫃指數 1分K成交量 - {target_date.strftime('%Y-%m-%d')}")
@@ -622,16 +681,23 @@ def main():
     notebook.pack(fill=tk.BOTH, expand=True)
 
     for index_code in DISPLAY_INDEX_CODES:
-        fig, tab_title = build_index_figure(rest_stock, index_code, target_date)
+        try:
+            fig, tab_title = build_index_figure(rest_stock, index_code, target_date)
+        except ValueError as exc:
+            if not SPECIFIED_DATE.strip():
+                raise
+            print(f"[WARN] Skip: {exc}")
+            continue
         add_figure_tab(notebook, fig, tab_title)
 
-    display_stock_codes = [
-        stock_code
-        for stock_code in DISPLAY_STOCK_CODES
-        if str(stock_code).strip()
-    ]
     for stock_code in display_stock_codes:
-        fig, tab_title = build_stock_figure(rest_stock, stock_code, target_date)
+        try:
+            fig, tab_title = build_stock_figure(rest_stock, stock_code, target_date)
+        except ValueError as exc:
+            if not SPECIFIED_DATE.strip():
+                raise
+            print(f"[WARN] Skip: {exc}")
+            continue
         add_figure_tab(notebook, fig, tab_title)
 
     print("[DONE] Charts opened on screen.")

@@ -49,9 +49,10 @@ OPTIMIZE_PROFIT_PER_LOWER = 5.0  # %
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 MIN_MINUTE_BARS_BEFORE_0930 = 20
-STOCK_DATA_SOURCE = "T"  # S: selected_stocks；T: total_stocks
-STOCK_LIST = []  # 非空時優先
-# 空字串：使用 stock_data.py；YYYYMMDD：讀取對應日期 cache，優先於 --to。
+STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
+# 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
+# 非空：只使用指定 cache 內全部股票與分 K，不讀 stock_data.py、不回退 API。
+# YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
 HISTORICAL_CACHE_DATE = ""
@@ -611,7 +612,7 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date):
 
 
 def get_api_cache_path(target_date):
-    """與 v17 共用原始 API cache；不要求舊策略的指數資料。"""
+    """與 v17 共用原始 API cache；一般模式補齊市場及產業指數。"""
     return Path(__file__).parent / 'analysis_json_cache' / (
         f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
     )
@@ -745,20 +746,37 @@ def main():
         from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
         if STOCK_DATA_SOURCE not in ('S', 'T'):
             raise ValueError('STOCK_DATA_SOURCE 必須為 S 或 T')
-        stocks = STOCK_LIST or (selected_stocks if STOCK_DATA_SOURCE == 'S' else total_stocks)
+        stocks = selected_stocks if STOCK_DATA_SOURCE == 'S' else total_stocks
         stock_names = list(dict.fromkeys(item[0] for item in stocks))
         raw = payload.get('minute_raw_by_symbol', {}) if isinstance(payload, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
+        from Z_ORB_ONE.analysis_strategy.shared_index_cache import complete_index_cache
+
+        index_raw = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        index_raw = dict(index_raw) if isinstance(index_raw, dict) else {}
+        rest_stock = None
+
+        def get_rest_stock():
+            nonlocal rest_stock
+            if rest_stock is None:
+                _, rest_stock = init_sdk(args.config)
+            return rest_stock
+
         missing = [name for name in stock_names if not isinstance(raw.get(name), list)]
         if missing:
-            _, rest_stock = init_sdk(args.config)
             fetched = {}
             for i, name in enumerate(missing, 1):
                 print(f'API抓取進度：{i}/{len(missing)} {name}')
-                fetched[name] = fetch_minute_candles(rest_stock, extract_symbol(name), target_date)
+                fetched[name] = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
             raw = {**raw, **fetched}
-            save_shared_api_cache(cache_path, payload, raw)
+        indices_updated = complete_index_cache(
+            stocks, index_raw, target_date, fetch_minute_candles, get_rest_stock,
+        )
+        if missing or indices_updated:
+            updated_payload = dict(payload) if isinstance(payload, dict) else {}
+            updated_payload['index_minute_raw_by_key'] = index_raw
+            save_shared_api_cache(cache_path, updated_payload, raw)
     lines = [f'v18 三階段 average 放空回測，目標日期={target_date}',
              f'STAGE_1起算={STAGE_1_START_TIME[0]:02d}:{STAGE_1_START_TIME[1]:02d} '
              f'根數={STAGE_1_MIN_BARS}/{STAGE_2_MIN_BARS}/{STAGE_3_MIN_BARS} '

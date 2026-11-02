@@ -42,8 +42,9 @@ class AvgConfig:
     INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE: int
     MARKETDATA_PRIORITY_POSITION: int
     STRATEGY_AVG: str
-    STRATEGY_START_LOWER_3: tuple[int, int]
     TRADE_SIDE_SHORT: str
+    # 舊三策略入口的相容參數；AVG/FALL 入口不再依賴 LOWER。
+    STRATEGY_START_LOWER_3: tuple[int, int] | None = None
 
 
 @dataclass
@@ -60,7 +61,6 @@ class AvgServices:
     """共用行情、交易與持久化服務；不反向匯入主程式。"""
     AVG_CANDLE_EXECUTOR: Any
     AVG_POSITION_QUOTE_EXECUTOR: Any
-    MARKET_INDEX_REST_FATAL_EVENT: Any
     TZ: Any
     TradeApiBusy: Any
     atomic_write_json: Any
@@ -77,6 +77,7 @@ class AvgServices:
     total_stocks: Any
     trade_log: Any
     try_open_position: Any
+    MARKET_INDEX_REST_FATAL_EVENT: Any = None
 
 
 @dataclass
@@ -86,7 +87,7 @@ class AvgStrategy:
     services: AvgServices
 
     def get_avg_candidate_stocks(self) -> list:
-        """不可將 LOWER 初始化過濾後的清單作為 AVG 股票池。"""
+        """每個策略使用獨立股票池副本。"""
         if self.config.AVG_STOCK_DATA_SOURCE == "T":
             return list(self.services.total_stocks)
         if self.config.AVG_STOCK_DATA_SOURCE == "S":
@@ -103,13 +104,15 @@ class AvgStrategy:
         entry_deadline_minutes = self.services.time_tuple_to_minutes(self.config.AVG_ENTRY_DEADLINE, "AVG_ENTRY_DEADLINE")
         force_close_minutes = self.services.time_tuple_to_minutes(self.config.AVG_FORCE_CLOSE_TIME, "AVG_FORCE_CLOSE_TIME")
         candles_start_minutes = self.services.time_tuple_to_minutes(self.config.AVG_CANDLES_START_TIME, "AVG_CANDLES_START_TIME")
-        lower_3_start_minutes = self.services.time_tuple_to_minutes(self.config.STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3")
         stage_1_start_minutes = self.services.time_tuple_to_minutes(self.config.AVG_STAGE_1_START_TIME, "AVG_STAGE_1_START_TIME")
         slope_cutoff_minutes = self.services.time_tuple_to_minutes(self.config.AVG_SLOPE_CUTOFF_TIME, "AVG_SLOPE_CUTOFF_TIME")
         if not entry_start_minutes <= entry_deadline_minutes < force_close_minutes:
             raise ValueError("AVG 需符合最早入場 <= 截止入場 < 強制平倉")
-        if not lower_3_start_minutes <= candles_start_minutes <= entry_start_minutes:
-            raise ValueError("AVG 分K開始時間須介於第三組 LOWER 開始時間與 AVG 最早入場時間之間")
+        if not candles_start_minutes <= entry_start_minutes:
+            raise ValueError("AVG 分K開始時間不可晚於 AVG 最早入場時間")
+        if (self.config.STRATEGY_START_LOWER_3 is not None
+                and self.services.time_tuple_to_minutes(self.config.STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3") > candles_start_minutes):
+            raise ValueError("舊三策略入口的 AVG 分K不可早於第三組 LOWER 開始時間")
         if stage_1_start_minutes > entry_deadline_minutes or slope_cutoff_minutes > entry_deadline_minutes:
             raise ValueError("AVG 階段起算及斜率檢核時間不可晚於入場截止")
         for value in (self.config.AVG_STAGE_1_MIN_BARS, self.config.AVG_STAGE_2_MIN_BARS, self.config.AVG_STAGE_3_MIN_BARS,
@@ -196,7 +199,7 @@ class AvgStrategy:
         slope = sum((x - x_mean) * (y - y_mean) for x, y in samples) / denominator
         return slope / previous_close * 100.0
 
-    def find_avg_entry_signal(self, bars: list[Dict[str, Any]], now_local: datetime) -> Optional[Dict[str, Any]]:
+    def find_avg_entry_signal(self, bars: list[Dict[str, Any]], now_local: datetime, *, candidate_only: bool = False) -> Optional[Dict[str, Any]]:
         """與 v18 find_entry 對齊：low>avg、high<avg、low>avg，之後連續 low<avg。"""
         current_minute = now_local.replace(second=0, microsecond=0)
         completed = [bar for bar in bars if bar["dt"] < current_minute]
@@ -221,6 +224,8 @@ class AvgStrategy:
                     continue
                 count = count + 1 if bar["low"] < average else 0
                 if count >= self.config.AVG_STAGE_4_MIN_BARS:
+                    if candidate_only:
+                        return {"signal_bar": bar}
                     if index + 1 >= len(bars):
                         return None
                     entry_bar = bars[index + 1]
@@ -312,7 +317,8 @@ class AvgStrategy:
             self.mark_avg_state_traded(state, signal["rejected"])
             return
         if signal:
-            if self.services.MARKET_INDEX_REST_FATAL_EVENT.is_set():
+            if (self.services.MARKET_INDEX_REST_FATAL_EVENT is not None
+                    and self.services.MARKET_INDEX_REST_FATAL_EVENT.is_set()):
                 self.mark_avg_state_traded(state, "market_index_rest_fatal")
                 return
             entry_bar = signal["entry_bar"]
@@ -367,6 +373,20 @@ class AvgStrategy:
         self.services.atomic_write_json(self.services.state_path(state.get("symbol_code_with_suf", "")), state)
 
     def process_avg_candle_round(self, states: Dict[str, Dict[str, Any]], realtime_sdk: Any, mysdk: Any) -> None:
+        now_local = self.services.now_tpe()
+        if (now_local.hour, now_local.minute) > self.config.AVG_ENTRY_DEADLINE:
+            # 收工不依賴行情成功回覆；持倉與委託仍由主迴圈繼續監控。
+            for state in states.values():
+                if (self.is_avg_strategy(state) and not state.get('traded')
+                        and not state.get('in_position')
+                        and not state.get('entry_order_pending')
+                        and not state.get('exit_order_pending')):
+                    self.mark_avg_state_traded(state, 'avg_entry_deadline_passed')
+            for future in list(self.runtime.candle_pending_futures):
+                # cancel 無法中斷已執行的 HTTP；移除追蹤，晚到結果不再處理。
+                future.cancel()
+                self.runtime.candle_pending_futures.pop(future, None)
+            return
         # 先處理已完成的請求；未完成請求留在背景執行，不阻塞即時報價與持倉風控。
         had_pending_requests = bool(self.runtime.candle_pending_futures)
         for future, state in list(self.runtime.candle_pending_futures.items()):

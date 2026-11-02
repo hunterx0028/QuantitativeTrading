@@ -47,9 +47,9 @@ Enter cert password:
 262052
 
 
-日內行情：2000 / min
-WebSocket：2000 訂閱數；3 連線數
-行情快照：2000 / min
+日內行情：600 / min
+WebSocket：300 訂閱數；2 連線數
+行情快照：600 / min
 歷史行情：60 / min
 
 交易API連線限制與異常行為規範

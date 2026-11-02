@@ -44,12 +44,14 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
     output_path = output_dir / output_name_for(strategy_filename)
     if not overwrite and output_path.exists():
         raise FileExistsError(output_path)
-    required = [input_path, source_dir / "runtime_environment.py"]
-    required += [source_dir / "strategies" / name for name in ("__init__.py", "fall.py", "avg.py", "lower.py")]
+    shared_modules = [source_dir / name for name in ("runtime_environment.py", "marketdata_transport.py")]
+    required = [input_path, *shared_modules]
+    required += [source_dir / "strategies" / name for name in
+                 ("__init__.py", "fall.py", "avg.py", "broken.py", "candidate_flow.py")]
     for path in required:
         if not path.is_file():
             raise FileNotFoundError(path)
-    payload = [input_path, source_dir / "runtime_environment.py"]
+    payload = [input_path, *shared_modules]
     payload += sorted((source_dir / "strategies").rglob("*.py"))
     for path in payload:
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
