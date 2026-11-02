@@ -5,6 +5,9 @@
 STAGE_4 須連續設定根數 low < average，確認後以緊接下一根 open 入場。
 average 僅採 API 欄位，不補算。
 """
+
+# avg 模式的回測
+
 import argparse
 import configparser
 import json

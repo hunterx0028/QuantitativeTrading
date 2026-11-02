@@ -15,6 +15,7 @@ LOWER 依序在三個決策時點檢核；啟動後每十分鐘比較股票池�
 5. 入場價加停損價差已達漲停價時不進場。
 """
 
+# lower 模式的回測
 
 import builtins
 import argparse

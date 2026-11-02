@@ -3,6 +3,9 @@
 以分K時間為分鐘起點：確認分鐘 close 完成後，持續監看，低於昨低才入場。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
+
+# fall 模式的回測
+
 import argparse
 import configparser
 import json

@@ -574,7 +574,31 @@ class LowerStrategy:
                     **self.services.state_symbol_fields(state), error_msg=repr(exc), action="retry_next_loop",
                 )
 
+    def scan_lower_candidates_if_market_passes(self, states, realtime_sdk):
+        """先以新鮮指數檢查 LOWER 資格，通過才查詢個股池。"""
+        snapshots = self.services.get_critical_market_gate_snapshots('lower_before_candidate_scan')
+        reasons = []
+        for index_key in self.services.MARKET_GATE_INDEX_KEYS:
+            result = self.get_market_strategy_decision_gate_result(index_key, snapshots.get(index_key, {}))
+            if not result.get('index_fresh') or not result.get('rebound_level_maintained'):
+                reasons.append(f"{index_key}: {result.get('lower_reason') or '指數資料無效'}")
+            elif not result.get('early_breakout_passed'):
+                reasons.append(f"{index_key}: 早盤未向下突破")
+            elif result.get('previous_close_reversal_blocked'):
+                reasons.append(f"{index_key}: 已上下穿越昨收")
+        if reasons:
+            reason = '; '.join(reasons)
+            self.services.trade_log('LOWER_CANDIDATE_SCAN_SKIPPED', reason=reason, quote_request_count=0)
+            return {
+                'scan_skipped': True, 'skip_reason': reason, 'passed': False,
+                'candidate_count': 0, 'decline_count': 0, 'decline_percent': 0.0,
+                'data_missing_count': 0, 'quote_request_count': 0, 'prices': {},
+            }
+        return self.summarize_lower_strategy_decision_candidates(states, realtime_sdk)
+
     def format_lower_decision_summary(self, summary: Dict[str, Any]) -> str:
+        if summary.get('scan_skipped'):
+            return f"個股佔比未掃描 原因={summary['skip_reason']}"
         return (
             f"數量門檻={self.config.LOWER_DECISION_DECLINE_PERCENT_THRESHOLD:.2f}% < 比例 "
             f"< {self.config.LOWER_DECISION_DECLINE_PERCENT_MAX_THRESHOLD:.2f}% "
@@ -594,7 +618,7 @@ class LowerStrategy:
     ) -> tuple[int, list[Dict[str, Any]]]:
         if lower_decision_summary is None:
             # 保留同步工具呼叫介面；實機 monitor 僅傳入已完成的背景結果。
-            lower_decision_summary = self.summarize_lower_strategy_decision_candidates(states, realtime_sdk)
+            lower_decision_summary = self.scan_lower_candidates_if_market_passes(states, realtime_sdk)
             market_snapshots = self.services.get_critical_market_gate_snapshots(f"lower_decision_{window_number}_after_scan")
         elif market_snapshots is None:
             market_snapshots, _ = self.services.get_market_gate_snapshots()
@@ -666,6 +690,12 @@ class LowerStrategy:
         lower_mode_passed = all(result["rebound_level_maintained"] for result in gate_results)
 
         if lower_mode_passed:
+            if lower_decision_summary.get('scan_skipped'):
+                # 指數可能在略過掃描後恢復；沒有個股資料仍不可啟動交易。
+                for result in gate_results:
+                    result['decision_status'] = 'WAIT' if window_number < len(self.get_lower_strategy_windows()) else 'STOP'
+                    result['decision_reason'] = lower_decision_summary['skip_reason']
+                return self.config.ENTRY_MODE_NO_TRADE, gate_results
             if not lower_decision_summary["passed"]:
                 decision_status = "WAIT" if window_number < len(self.get_lower_strategy_windows()) else "STOP"
                 for result in gate_results:
@@ -687,8 +717,10 @@ class LowerStrategy:
         return fallback_no_trade("LOWER 未成立")
 
     def fetch_lower_early_summary(self, states_snapshot, realtime_sdk):
+        summary = self.scan_lower_candidates_if_market_passes(states_snapshot, realtime_sdk)
+        # 個股查詢可能耗時，列印摘要使用掃描後重新取得的指數快照。
         snapshots = self.services.get_critical_market_gate_snapshots('lower_strategy_early_breakout_deadline_summary')
-        return snapshots, self.summarize_lower_strategy_decision_candidates(states_snapshot, realtime_sdk)
+        return snapshots, summary
 
     def lower_minute_checks_complete(self, states):
         return all(state.get('traded') or state.get('minute_bars_checked') for state in states.values())

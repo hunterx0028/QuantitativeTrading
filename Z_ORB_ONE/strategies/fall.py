@@ -2,6 +2,7 @@
 
 import math
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -304,8 +305,19 @@ def find_fall_signal(
         return None
     window = [bar for bar in bars if start <= bar["dt"] < activation]
     intervals = int((end - start).total_seconds() // 60)
-    if [b["dt"] for b in window] != [start + timedelta(minutes=i) for i in range(intervals + 1)]:
-        raise ValueError("FALL 確認窗口缺棒、重複或非整分鐘資料")
+    expected = [start + timedelta(minutes=i) for i in range(intervals + 1)]
+    actual = [b["dt"] for b in window]
+    if actual != expected:
+        counts = Counter(actual)
+        missing = [dt.isoformat() for dt in expected if dt not in counts]
+        duplicates = [dt.isoformat() for dt, count in counts.items() if count > 1]
+        off_minute = [dt.isoformat() for dt in counts if dt.second or dt.microsecond]
+        raise ValueError(
+            "FALL 確認窗口缺棒、重複或非整分鐘資料 "
+            f"expected_count={len(expected)} actual_count={len(actual)} "
+            f"missing={missing} duplicates={duplicates} off_minute={off_minute} "
+            f"out_of_order={actual != sorted(actual)}"
+        )
     first, last = Decimal(str(window[0]["close"])), Decimal(str(window[-1]["close"]))
     drop = first - last
     if drop <= 0 or drop * 100 < first * Decimal(str(min_drop_percent)):

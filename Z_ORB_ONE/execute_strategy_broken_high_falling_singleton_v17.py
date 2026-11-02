@@ -3606,8 +3606,11 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             try:
                 market_snapshots, early_summary = early_summary_future.result()
                 print_lower_strategy_early_breakout_deadline_summary(market_snapshots)
-                print(f'check:[下降={early_summary["decline_count"]}  母數={early_summary["candidate_count"]}  '
-                      f'{early_summary["decline_percent"]:.2f}%]')
+                if early_summary.get('scan_skipped'):
+                    print(f'check:[個股佔比未掃描 原因={early_summary["skip_reason"]}]')
+                else:
+                    print(f'check:[下降={early_summary["decline_count"]}  母數={early_summary["candidate_count"]}  '
+                          f'{early_summary["decline_percent"]:.2f}%]')
             except Exception as exc:
                 trade_log('LOWER_EARLY_SUMMARY_ERROR', error=True, error_msg=repr(exc))
             early_summary_future = None
@@ -3669,7 +3672,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             lower_decision_metadata = window_number, decision_dt
             lower_decision_wait_started = None
             lower_decision_future = MARKET_SCAN_EXECUTOR.submit(
-                summarize_lower_strategy_decision_candidates,
+                get_lower_strategy().scan_lower_candidates_if_market_passes,
                 {symbol: dict(st) for symbol, st in states.items()}, realtime_sdk,
             )
         if (not entry_mode_decided and lower_decision_future is None
