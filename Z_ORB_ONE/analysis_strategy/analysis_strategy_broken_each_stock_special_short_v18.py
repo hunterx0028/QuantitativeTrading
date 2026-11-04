@@ -1,10 +1,11 @@
-"""v18 三階段 average 放空回測。資料取得、費用、tick 與出場沿用 v17。
+"""v18 三階段 average 放空回測，含獲利保護及逐步追蹤停利。
 
 依序完成 low > average、high < average、low > average 的連續根數，
 每階段同一段連續分K內另須至少一根達到設定的 average 偏離百分比，
-STAGE_4 須連續設定根數 low < average，或單根 low 嚴格低於 average 下方設定 tick 數，
+STAGE_4 須連續設定根數 low < average，
 確認後以緊接下一根 open 入場。
 average 僅採 API 欄位，不補算。
+從入場棒下一根起檢查出場；本根 low 更新的保護價於下一根生效。
 """
 
 # avg 模式的回測
@@ -36,7 +37,6 @@ STAGE_1_MIN_BARS = 8
 STAGE_2_MIN_BARS = 8
 STAGE_3_MIN_BARS = 5
 STAGE_4_MIN_BARS = 2  # 第三階段完成後連續 low < average，下一根 open 入場
-STAGE_4_EARLY_ENTRY_TICKS = 2  # 0：停用幅度提前觸發，只依連續根數；>0：單根 low < average - 此數 × tick 可提前觸發，tick 依 average 價位區間
 
 STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
 STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1 - 2%)
@@ -47,7 +47,11 @@ ENTRY_START_TIME = (10, 0)  # 包含此分鐘；首次入場時間不在區間�
 ENTRY_DEADLINE = (11, 0)  # 包含此分鐘
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
-OPTIMIZE_PROFIT_PER_LOWER = 5.0  # %
+OPTIMIZE_PROFIT_PER_LOWER = 5.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
+PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比，推進保護停損
+PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比（相對入場價，尚未扣費用）
+PROFIT_BACK_PERCENT = 0.5  # 追蹤出場線：當次啟動／推進價格向上回撤百分比
+PROFIT_TARGET_PERCENT = 1.0  # 下次推進目標：當次啟動／推進價格再向下的百分比
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 MIN_MINUTE_BARS_BEFORE_0930 = 20
@@ -128,6 +132,27 @@ def calculate_limit_prices(prev_close: float):
 def calculate_stop_loss_amount_by_percent(entry_price: float, stop_loss_percent: float) -> float:
     """依入場價與停損百分比計算停損價差。"""
     return entry_price * (stop_loss_percent / 100.0)
+
+
+def get_profit_trail_tick_size(price: float) -> float:
+    """追蹤停利沿用實機 get_tick_size 的邊界規則。"""
+    for upper, tick in ((10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1)):
+        if price <= upper:
+            return tick
+    return 5
+
+
+def calculate_short_profit_trail(price: float, limit_down_price: float) -> tuple[float, float]:
+    """以當次 low 計算下一個目標及反彈出場線，各價差至少一 tick。"""
+    price_dec = Decimal(str(price))
+    tick = Decimal(str(get_profit_trail_tick_size(price)))
+    target_step = max(price_dec * Decimal(str(PROFIT_TARGET_PERCENT)) / 100, tick)
+    back_step = max(price_dec * Decimal(str(PROFIT_BACK_PERCENT)) / 100, tick)
+    raw_target = float(price_dec - target_step)
+    raw_stop = float(price_dec + back_step)
+    target = max(floor_price_to_tick(raw_target, get_profit_trail_tick_size(raw_target)), limit_down_price)
+    stop = ceil_price_to_tick(raw_stop, get_profit_trail_tick_size(raw_stop))
+    return target, stop
 
 
 def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_percent: float) -> float:
@@ -428,7 +453,7 @@ def evaluate_candidates(
 
         raw_take_profit_price = entry_price - effective_profit
         raw_stop_loss_price = entry_price + effective_stop_loss
-        # 作空停利向下取 tick，固定停損向上取 tick。
+        # 首個追蹤啟動目標向下取 tick，固定停損向上取 tick。
         adjusted_take_profit_price = floor_price_to_tick(
             raw_take_profit_price,
             get_tick_size(raw_take_profit_price),
@@ -455,6 +480,13 @@ def evaluate_candidates(
             'stop_loss_price': stop_loss_price,
         }
         result = None
+        protection_active = False
+        profit_tracking_active = False
+        trailing_stop_price = None
+        next_profit_price = take_profit_price
+        protect_trigger = Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_PROFIT_PER)) / 100)
+        raw_protected_stop = float(Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_LOSS_PER)) / 100))
+        protected_stop = ceil_price_to_tick(raw_protected_stop, get_profit_trail_tick_size(raw_protected_stop))
         first_exit_check_idx = entry_idx + 1
         for i in range(first_exit_check_idx, len(dt_values)):
             bar_time = dt_values[i]
@@ -466,14 +498,30 @@ def evaluate_candidates(
                 )
             ):
                 break
-            if high_values[i] >= stop_loss_price:
-                result = build_outcome_result('stop', entry_price, stop_loss_price)
+            # 只使用前一根結束時已生效的出場線；較低者為放空先遇到的反彈價位。
+            exit_price = stop_loss_price
+            exit_reason = 'protect_profit' if protection_active else 'stop'
+            if profit_tracking_active and trailing_stop_price < exit_price:
+                exit_price, exit_reason = trailing_stop_price, 'trailing_profit'
+            if open_values[i] >= exit_price:
+                result = build_outcome_result(exit_reason + '_gap', entry_price, float(open_values[i]))
                 result['exit_dt'] = dt_values[i]
                 break
-            if low_values[i] <= take_profit_price:
-                result = build_outcome_result('target', entry_price, take_profit_price)
+            if high_values[i] >= exit_price:
+                result = build_outcome_result(exit_reason, entry_price, exit_price)
                 result['exit_dt'] = dt_values[i]
                 break
+            # 本根未出場，才以 low 啟動／推進；新價位只供其後分K使用。
+            low = float(low_values[i])
+            if (not protection_active
+                    and Decimal(str(low)) <= protect_trigger and protected_stop < stop_loss_price):
+                stop_loss_price = protected_stop
+                protection_active = True
+            if low <= next_profit_price:
+                next_profit_price, new_trailing_stop = calculate_short_profit_trail(low, limit_down_price)
+                trailing_stop_price = (min(trailing_stop_price, new_trailing_stop)
+                                       if profit_tracking_active else new_trailing_stop)
+                profit_tracking_active = True
         if result is None:
             settlement_idx = None
             for i, dtv in enumerate(dt_values):
@@ -526,12 +574,7 @@ def find_entry(today_bars):
             if (bar['dt'].hour, bar['dt'].minute) < SLOPE_CUTOFF_TIME:
                 continue
             count = count + 1 if bar['low'] < average else 0
-            early_entry = False
-            if STAGE_4_EARLY_ENTRY_TICKS > 0:
-                early_entry_threshold = (Decimal(str(average))
-                                         - Decimal(str(get_tick_size(average))) * STAGE_4_EARLY_ENTRY_TICKS)
-                early_entry = Decimal(str(bar['low'])) < early_entry_threshold
-            if count >= STAGE_4_MIN_BARS or early_entry:
+            if count >= STAGE_4_MIN_BARS:
                 if index + 1 >= len(today_bars):
                     return None
                 entry_bar = today_bars[index + 1]
@@ -681,8 +724,11 @@ def is_normalized_slope_allowed(slope):
 
 
 def validate_settings():
-    if type(STAGE_4_EARLY_ENTRY_TICKS) is not int or STAGE_4_EARLY_ENTRY_TICKS < 0:
-        raise ValueError('STAGE_4_EARLY_ENTRY_TICKS 必須為非負整數（0 表示停用幅度提前觸發）')
+    for value in (PROTECT_PROFIT_PER, PROTECT_LOSS_PER, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
+        if not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError('獲利保護及追蹤停利百分比必須介於 0 與 100 之間')
+    if PROTECT_LOSS_PER >= PROTECT_PROFIT_PER:
+        raise ValueError('保護毛利百分比必須小於獲利保護啟動百分比')
     if not math.isfinite(MAX_NORMALIZED_SLOPE):
         raise ValueError('正規化斜率門檻必須為有限數值')
     for value in (STAGE_1_AMPLITUDE_PERCENT, STAGE_2_AMPLITUDE_PERCENT,
@@ -793,7 +839,9 @@ def main():
              f'{STAGE_2_AMPLITUDE_PERCENT:g}%/{STAGE_3_AMPLITUDE_PERCENT:g}% '
              f'最早入場={ENTRY_START_TIME[0]:02d}:{ENTRY_START_TIME[1]:02d} '
              f'入場截止={ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} '
-             f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 停利={OPTIMIZE_PROFIT_PER_LOWER:g}% '
+             f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 追蹤停利啟動={OPTIMIZE_PROFIT_PER_LOWER:g}% '
+             f'獲利保護固定啟用（浮盈{PROTECT_PROFIT_PER:g}%後保住{PROTECT_LOSS_PER:g}%毛利） '
+             f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
              f'入場前高低價差須大於昨收的{MIN_PRE_ENTRY_RANGE_PERCENT:g}% '
              f'正規化斜率須<{MAX_NORMALIZED_SLOPE:+g}%/分鐘 '
              f'STAGE_4=連續{STAGE_4_MIN_BARS}根low低於average，下一根open入場']

@@ -38,7 +38,7 @@ from Z_ORB_ONE.stock_data import (
 
 # 可指定多個區塊，例如 ["U", "D"]；重複股票保留首次出現的資料。
 # S: selected_stocks，T: total_stocks，U: selected_limit_up_stocks，D: selected_limit_down_stocks
-MONITOR_STOCK_BLOCKS = ["U","D"]
+MONITOR_STOCK_BLOCKS = ["S","T","U","D"]
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 TZ = pytz.timezone("Asia/Taipei")

@@ -77,7 +77,6 @@ TRADE_SIDE_LONG = 'LONG'
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
 
-PROTECT_PROFIT_SWITCH = True # 所有策略共用：False 不啟動獲利保護；True 啟動獲利保護
 PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
 PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
 
@@ -96,7 +95,6 @@ AVG_STAGE_1_MIN_BARS = 8
 AVG_STAGE_2_MIN_BARS = 8
 AVG_STAGE_3_MIN_BARS = 5
 AVG_STAGE_4_MIN_BARS = 2
-AVG_STAGE_4_EARLY_ENTRY_TICKS = 2  # 0：停用幅度提前觸發，只依連續根數；>0：單根 low < average - 此數 × tick 可提前觸發，tick 依 average 價位區間
 AVG_STAGE_1_AMPLITUDE_PERCENT = 1.0
 AVG_STAGE_2_AMPLITUDE_PERCENT = 1.0
 AVG_STAGE_3_AMPLITUDE_PERCENT = 1.0
@@ -113,7 +111,6 @@ AVG_STOP_LOSS_PERCENT = 2.0
 AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
 AVG_ENTRY_ORDER_QUANTITY = 1
-AVG_PROTECT_PROFIT_SWITCH = True
 AVG_PROTECT_PROFIT_PER = 2.5
 AVG_PROTECT_LOSS_PER = 1.5
 AVG_PROFIT_BACK_PERCENT = 0.5
@@ -129,11 +126,9 @@ FALL_MAX_DEVIATION_RATIO = 0.25
 FALL_ENTRY_DEADLINE = (11, 50)  # 含此分鐘
 FALL_ENTRY_CONFIRM_BARS = 2  # 訊號成立後連續完整分K的 low 嚴格低於昨收
 FALL_CANDLE_PUBLISH_DELAY_SECONDS = 15
-FALL_STOP_LOSS_PERCENT = 2.2
 FALL_TAKE_PROFIT_PERCENT = 5.0
 FALL_FORCE_CLOSE_TIME = (12, 50)
 FALL_ENTRY_ORDER_QUANTITY = 1
-FALL_PROTECT_PROFIT_SWITCH = True
 FALL_PROTECT_PROFIT_PER = 2.5
 FALL_PROTECT_LOSS_PER = 1.5
 FALL_PROFIT_BACK_PERCENT = 0.5
@@ -291,11 +286,9 @@ def get_fall_config() -> FallConfig:
         max_missing_signal_bars=FALL_MAX_MISSING_SIGNAL_BARS,
         entry_deadline=FALL_ENTRY_DEADLINE,
         candle_publish_delay_seconds=FALL_CANDLE_PUBLISH_DELAY_SECONDS,
-        stop_loss_percent=FALL_STOP_LOSS_PERCENT,
         take_profit_percent=FALL_TAKE_PROFIT_PERCENT,
         force_close_time=FALL_FORCE_CLOSE_TIME,
         entry_order_quantity=FALL_ENTRY_ORDER_QUANTITY,
-        protect_profit_switch=FALL_PROTECT_PROFIT_SWITCH,
         protect_profit_per=FALL_PROTECT_PROFIT_PER,
         protect_loss_per=FALL_PROTECT_LOSS_PER,
         profit_back_percent=FALL_PROFIT_BACK_PERCENT,
@@ -492,7 +485,6 @@ def get_avg_strategy() -> AvgStrategy:
             AVG_STAGE_3_AMPLITUDE_PERCENT=AVG_STAGE_3_AMPLITUDE_PERCENT,
             AVG_STAGE_3_MIN_BARS=AVG_STAGE_3_MIN_BARS,
             AVG_STAGE_4_MIN_BARS=AVG_STAGE_4_MIN_BARS,
-            AVG_STAGE_4_EARLY_ENTRY_TICKS=AVG_STAGE_4_EARLY_ENTRY_TICKS,
             AVG_STOCK_DATA_SOURCE=STOCK_DATA_SOURCE,
             AVG_STOP_LOSS_PERCENT=AVG_STOP_LOSS_PERCENT,
             AVG_TAKE_PROFIT_PERCENT=AVG_TAKE_PROFIT_PERCENT,
@@ -810,6 +802,7 @@ def _apply_entry_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, An
         state["entry_price"] = accumulated_value / accumulated_shares
         state["entry_filled_qty"] = filled_lots
         state["entry_fill_confirmed"] = True
+        state.setdefault("entry_first_fill_time", now_tpe().isoformat())
         state["entry_fully_filled"] = accumulated_shares >= expected_shares
         state["entry_order_pending"] = not state["entry_fully_filled"]
         state["in_position"] = True
@@ -1149,15 +1142,13 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
 
-    if is_protect_profit_enabled(state):
-        _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
-        if state.get("side") == TRADE_SIDE_LONG:
-            protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
-        else:
-            protect_profit_text = f"{entry_price * (1 - protect_profit_per / 100.0):.2f}"
+    _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
+    if state.get("side") == TRADE_SIDE_LONG:
+        protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
     else:
-        protect_profit_text = "停用"
-    print(f"停損：{flat_price:.2f}，保本：{protect_profit_text}，停利：{profit_price:.2f}")
+        protect_profit_text = f"{entry_price * (1 - protect_profit_per / 100.0):.2f}"
+    stop_text = "入場次根完整分K high>average，均價上方第一個tick為參考價" if is_fall_strategy(state) and flat_price <= 0 else f"{flat_price:.2f}"
+    print(f"停損：{stop_text}，保本：{protect_profit_text}，停利：{profit_price:.2f}")
 
 
 def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
@@ -1183,10 +1174,14 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
             )
-            state["flat_price"] = min(
-                ceil_price_to_tick_value(entry_price + open_stop_loss),
-                state.get("limit_up_price", 0),
-            )
+            if is_fall_strategy(state):
+                # FALL 不使用百分比停損；0 表示尚未啟動獲利保護，校正成交價時不放寬已生效保護價。
+                state["flat_price"] = float(state.get("flat_price", 0) or 0)
+            else:
+                state["flat_price"] = min(
+                    ceil_price_to_tick_value(entry_price + open_stop_loss),
+                    state.get("limit_up_price", 0),
+                )
         else:
             state["profit_price"] = max(entry_price - open_profit_target, state.get("limit_down_price", 0))
             state["flat_price"] = min(entry_price + open_stop_loss, state.get("limit_up_price", 0))
@@ -1466,6 +1461,7 @@ def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk
             state["qty"] = mat_qty
             state["entry_filled_qty"] = mat_qty
             state["entry_fill_confirmed"] = True
+            state.setdefault("entry_first_fill_time", now_tpe().isoformat())
             state["entry_fully_filled"] = entry_order_qty > 0 and mat_qty >= entry_order_qty
             state["entry_order_pending"] = not state["entry_fully_filled"]
             state["in_position"] = True
@@ -1697,7 +1693,7 @@ def get_stock_rest_client(realtime_sdk: EsunMarketdata):
 def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> None:
     avg_count = len(get_avg_candidate_stocks())
     print(f"共用股票池 {avg_count} 檔；未歸屬股票每分鐘取分K，候選及持倉報價每 {QUOTE_ROUND_INTERVAL_SECONDS:g} 秒一輪")
-    print(f"同棒策略優先順序：{STRATEGY_PRIORITY}；候選成立後當日固定策略並停止分K")
+    print(f"同棒策略優先順序：{STRATEGY_PRIORITY}；歸屬固定，FALL 持倉每分鐘續查完整分K作均價停損")
     print(f"共用行情節流：每 {STOCK_REST_REQUEST_INTERVAL_SECONDS:g} 秒最多啟動一筆，約 {60 / STOCK_REST_REQUEST_INTERVAL_SECONDS:.0f} 次／分鐘")
     print(f"日內行情額度：每分鐘 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} 次；超額需求依優先序排隊")
 
@@ -1973,7 +1969,7 @@ def get_current_entry_mode() -> int:
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if is_fall_strategy(state):
-        return FALL_STOP_LOSS_PERCENT, FALL_TAKE_PROFIT_PERCENT
+        return 0.0, FALL_TAKE_PROFIT_PERCENT  # FALL 停損改依完整分K均價；0 不作百分比入場空間篩選
     if is_avg_strategy(state):
         return AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT
     raise ValueError("未支援的策略，無法取得停損停利設定")
@@ -1985,14 +1981,6 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
     if is_avg_strategy(state):
         return AVG_PROTECT_LOSS_PER, AVG_PROTECT_PROFIT_PER
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
-
-
-def is_protect_profit_enabled(state: Dict[str, Any] | None = None) -> bool:
-    if is_fall_strategy(state):
-        return FALL_PROTECT_PROFIT_SWITCH
-    if is_avg_strategy(state):
-        return AVG_PROTECT_PROFIT_SWITCH
-    return PROTECT_PROFIT_SWITCH
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
@@ -2135,7 +2123,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
     if side == TRADE_SIDE_SHORT:
         limit_up_price = state.get("limit_up_price", 0)  # 漲停
-        if (entry_ref_px + open_stop_loss) >= limit_up_price:
+        if not is_fall_strategy(state) and (entry_ref_px + open_stop_loss) >= limit_up_price:
             state["traded"] = True
             state["entry_time"] = now_tpe().isoformat()
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -2239,7 +2227,11 @@ def try_close_position(state: Dict[str, Any], mysdk):
                 print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
         return
 
-    # 實機特有風控：保本與逐步獲利不納入回測對齊檢查。
+    if is_fall_strategy(state) and state.get("fall_average_stop_triggered"):
+        submit_exit_order(state, mysdk, "fall_average_stop")
+        return
+
+    # 獲利保護及逐步追蹤停利仍使用即時報價。
     _protect_profit_stop(state)         # 獲利達標後，把停損推進到保住獲利的位置
 
     sl = reached_stop_to_flat(state)    # 至停損點
@@ -2295,9 +2287,6 @@ def mark_exit_order_pending(state: Dict[str, Any], order_no: str, exit_reason: s
 
 def _protect_profit_stop(state: Dict[str, Any]):
     """獲利達標後，將 flat_price 推進到至少保住指定獲利的位置。"""
-    if not is_protect_profit_enabled(state):
-        return
-
     side = state.get("side")
     if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         return
@@ -2324,7 +2313,9 @@ def _protect_profit_stop(state: Dict[str, Any]):
     else:
         protect_trigger_price = entry_price * (1 - protect_profit_per / 100.0)
         protected_flat_price = entry_price * (1 - protect_loss_per / 100.0)
-        should_update = px <= protect_trigger_price and protected_flat_price < current_flat_price
+        should_update = px <= protect_trigger_price and (
+            protected_flat_price < current_flat_price
+            or (is_fall_strategy(state) and current_flat_price <= 0))
 
     if should_update:
         state["flat_price"] = protected_flat_price
@@ -2345,7 +2336,7 @@ def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
         return False
 
     if side == TRADE_SIDE_SHORT:
-        return px >= flat_price # 只要價格大於停損點就平倉
+        return flat_price > 0 and px >= flat_price # FALL 的 0 表示尚未啟動獲利保護
     if side == TRADE_SIDE_LONG:
         return px <= flat_price
     return False

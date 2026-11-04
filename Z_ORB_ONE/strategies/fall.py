@@ -5,11 +5,41 @@ import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 
 
 class FallWindowError(ValueError):
     """固定確認窗口無效；當日 FALL 不成立，其他策略仍可評估。"""
+
+
+def fall_tick_size(price):
+    """與 v24 的合法報價區間一致。"""
+    for upper, tick in ((10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1)):
+        if price < upper:
+            return tick
+    return 5
+
+
+def find_fall_average_stop(bars, entry_time, now):
+    """僅檢查已成交入場棒之後的完整分K；無效 average 不補算。"""
+    start = entry_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    end = now.replace(second=0, microsecond=0)
+    counts = Counter(bar['dt'] for bar in bars)
+    for bar in bars:
+        dt = bar['dt']
+        if not start <= dt < end or dt.second or dt.microsecond or counts[dt] != 1:
+            continue
+        try:
+            average = Decimal(str(bar.get('average')))
+            high = Decimal(str(bar['high']))
+        except (ValueError, TypeError, ArithmeticError):
+            continue
+        if not average.is_finite() or average <= 0 or not high.is_finite() or high <= average:
+            continue
+        tick = Decimal(str(fall_tick_size(float(average))))
+        price = float(((average / tick).to_integral_value(rounding=ROUND_FLOOR) + 1) * tick)
+        return dict(bar_time=dt.isoformat(), average=float(average), high=float(high), reference_price=price)
+    return None
 
 
 @dataclass
@@ -192,11 +222,9 @@ class FallConfig:
     max_deviation_ratio: float
     entry_deadline: tuple[int, int]
     candle_publish_delay_seconds: float
-    stop_loss_percent: float
     take_profit_percent: float
     force_close_time: tuple[int, int]
     entry_order_quantity: int
-    protect_profit_switch: bool
     protect_profit_per: float
     protect_loss_per: float
     profit_back_percent: float
@@ -215,7 +243,7 @@ class FallConfig:
             raise ValueError("FALL 需滿足 09:00 <= 起點 < 確認 < 監看起點 <= 截止 < 平倉 <= 13:30")
         if self.stock_data_source not in ("T", "S") or self.entry_order_quantity != 1:
             raise ValueError("FALL 股票池須為 T/S，每檔限一張")
-        for value in (self.min_drop_percent, self.stop_loss_percent, self.take_profit_percent,
+        for value in (self.min_drop_percent, self.take_profit_percent,
                       self.protect_profit_per, self.protect_loss_per,
                       self.profit_back_percent, self.profit_target_percent):
             if not math.isfinite(value) or not 0 < value < 100:

@@ -18,23 +18,8 @@ pip install esun_trade-2.2.0-cp37-abi3-win_amd64.whl
 # 行情SDK, 版本 2.2.0
 pip install esun_marketdata-2.2.0-cp37-abi3-win_amd64.whl
 
-pip install yfinance
-
-pip install pandas
-pip install pandas-stubs
-
-pip install statsmodels
-
-pip install Pillow
-pip install opencv-python
-pip install easyocr
-
-pip install schedule
-
-pip install pyarrow
-pip install fastparquet
-
-pip install matplotlib
+# 目前專案程式直接使用的套件；其餘相依套件由 pip 自動安裝
+pip install numpy matplotlib pytz requests urllib3 keyring
 
 
 # 換電腦時可能需要在 pycharm 的 Termianl 下切換到 esunTradeAPI 資料夾，執行 esunAPILogin.py
