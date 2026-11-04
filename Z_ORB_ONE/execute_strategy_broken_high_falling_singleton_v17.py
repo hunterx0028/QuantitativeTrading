@@ -72,6 +72,7 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 STRATEGY_AVG = 'AVG'
 STRATEGY_FALL = 'FALL'
 STRATEGY_BROKEN = 'BROKEN'
+
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
@@ -91,7 +92,7 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 STOCK_DATA_SOURCE = "T"
 STRATEGY_PRIORITY = ["FALL", "AVG", "BROKEN"]
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
-AVG_CANDLES_START_TIME = (9, 52)  # AVG 獨立監看開始時間
+AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率與 09:30 前根數先分階段檢查
 AVG_STAGE_1_START_TIME = (9, 0)
 AVG_STAGE_1_MIN_BARS = 8
 AVG_STAGE_2_MIN_BARS = 8
@@ -119,15 +120,16 @@ AVG_PROTECT_LOSS_PER = 1.5
 AVG_PROFIT_BACK_PERCENT = 0.5
 AVG_PROFIT_TARGET_PERCENT = 1.0
 
-# FALL 設定；候選當日策略歸屬固定。
+# FALL 設定；候選當日策略歸屬固定。完整分K連續跌破昨收確認後，合法即時報價低於昨收才入場。
 # 共用股票池由 STOCK_DATA_SOURCE 決定。
 FALL_SIGNAL_START_TIME = (9, 0)
 FALL_SIGNAL_END_TIME = (9, 10)  # 包含此根 close，09:11 後才能開始篩選
 FALL_MIN_DROP_PERCENT = 1.0
 FALL_MAX_DEVIATION_RATIO = 0.25
 FALL_ENTRY_DEADLINE = (11, 50)  # 含此分鐘
+FALL_ENTRY_CONFIRM_BARS = 2  # 訊號成立後連續完整分K的 low 嚴格低於昨收
 FALL_CANDLE_PUBLISH_DELAY_SECONDS = 15
-FALL_STOP_LOSS_PERCENT = 2.0
+FALL_STOP_LOSS_PERCENT = 2.2
 FALL_TAKE_PROFIT_PERCENT = 5.0
 FALL_FORCE_CLOSE_TIME = (12, 50)
 FALL_ENTRY_ORDER_QUANTITY = 1
@@ -140,7 +142,6 @@ FALL_PROFIT_TARGET_PERCENT = 1.0
 # BROKEN：v31 分K條件；候選成立後以即時報價入場。
 BROKEN_SIGNAL_START_TIME = (9, 0)
 BROKEN_SIGNAL_END_TIME = (9, 20)
-BROKEN_ENTRY_START_TIME = (9, 21)
 BROKEN_SIGNAL_DEADLINE = (11, 0)  # 最後一根確認棒的時間（含）
 BROKEN_ENTRY_DEADLINE = (11, 1)  # 即時報價入場最晚 11:01:59
 BROKEN_DROP_PERCENT = 1.5
@@ -280,7 +281,7 @@ def is_broken_strategy(state):
 
 def get_broken_config():
     return BrokenConfig(BROKEN_SIGNAL_START_TIME, BROKEN_SIGNAL_END_TIME,
-                        BROKEN_ENTRY_START_TIME, BROKEN_SIGNAL_DEADLINE,
+                        BROKEN_SIGNAL_DEADLINE,
                         BROKEN_DROP_PERCENT, BROKEN_CONFIRM_BARS)
 
 
@@ -346,6 +347,8 @@ def get_fall_config() -> FallConfig:
 
 
 def validate_fall_config():
+    if type(FALL_ENTRY_CONFIRM_BARS) is not int or FALL_ENTRY_CONFIRM_BARS < 1:
+        raise ValueError('FALL_ENTRY_CONFIRM_BARS 必須為正整數')
     get_fall_config().validate(time_tuple_to_minutes)
 
 
@@ -2101,7 +2104,7 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_broken_strategy(state):
-        return BROKEN_ENTRY_START_TIME
+        return get_broken_config().entry_start
     if is_fall_strategy(state):
         minutes = FALL_SIGNAL_END_TIME[0] * 60 + FALL_SIGNAL_END_TIME[1] + 1
         return divmod(minutes, 60)
@@ -2127,9 +2130,10 @@ def try_open_position(state: Dict[str, Any], mysdk):
         return  # 當日停止新風險；保留已送出的委託與持倉對帳。
     if is_fall_strategy(state):
         if (state.get("symbol_code_with_suf") not in FALL_RUNTIME.candidate_symbols
+                or not state.get("fall_entry_confirmed_time")
                 or not finite_positive(state.get("last_price"))
-                or not finite_positive(state.get("yesterday_low_price"))
-                or float(state["last_price"]) >= float(state["yesterday_low_price"])):
+                or not finite_positive(state.get("yesterday_close_price"))
+                or float(state["last_price"]) >= float(state["yesterday_close_price"])):
             return
     elif is_broken_strategy(state):
         if not state.get("broken_signal_time"):

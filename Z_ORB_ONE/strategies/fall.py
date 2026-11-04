@@ -8,6 +8,10 @@ from datetime import timedelta
 from decimal import Decimal
 
 
+class FallWindowError(ValueError):
+    """固定確認窗口無效；當日 FALL 不成立，其他策略仍可評估。"""
+
+
 @dataclass
 class FallRuntime:
     """單次執行的 FALL 狀態；由主程式建立並管理執行緒生命週期。
@@ -268,7 +272,10 @@ def evaluate_fall_quote(state, quote, *, now, finite_positive, check_open_status
                  best_bid_price=bid, best_ask_price=ask)
     if state.get("in_position"):
         return "close"
-    if check_open_status(state) and float(px) < float(state["yesterday_low_price"]):
+    # 合法報價嚴格低於昨收，即已到昨收下方第一個合法 tick 或更低。
+    if (check_open_status(state) and state.get('fall_entry_confirmed_time')
+            and finite_positive(state.get("yesterday_close_price"))
+            and float(px) < float(state["yesterday_close_price"])):
         state["entry_trigger_price"] = float(px)
         return "open"
     return "hold"
@@ -288,7 +295,7 @@ def evaluate_fall_candidate(row, ticker, existing, *, finite_positive):
         return "ticker_error"
     up, down, can_trade, disposition = ticker
     if not can_trade or disposition is None or disposition or not all(
-            finite_positive(p) for p in (up, down, row[3], row[4])):
+            finite_positive(p) for p in (up, down, row[3], row[5])):
         return "ineligible"
     return "eligible"
 
@@ -312,7 +319,7 @@ def find_fall_signal(
         missing = [dt.isoformat() for dt in expected if dt not in counts]
         duplicates = [dt.isoformat() for dt, count in counts.items() if count > 1]
         off_minute = [dt.isoformat() for dt in counts if dt.second or dt.microsecond]
-        raise ValueError(
+        raise FallWindowError(
             "FALL 確認窗口缺棒、重複或非整分鐘資料 "
             f"expected_count={len(expected)} actual_count={len(actual)} "
             f"missing={missing} duplicates={duplicates} off_minute={off_minute} "

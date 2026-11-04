@@ -10,13 +10,17 @@ import math
 class BrokenConfig:
     signal_start: tuple
     signal_end: tuple
-    entry_start: tuple
     signal_deadline: tuple
     drop_percent: float
     confirm_bars: int
 
+    @property
+    def entry_start(self):
+        """確認棒自窗口結束的下一分鐘起算，不另設參數。"""
+        return divmod(self.signal_end[0] * 60 + self.signal_end[1] + 1, 60)
+
     def validate(self):
-        times = [self.signal_start, self.signal_end, self.entry_start, self.signal_deadline]
+        times = [self.signal_start, self.signal_end, self.signal_deadline]
         if any(len(t) != 2 or any(type(v) is not int for v in t)
                or not (0 <= t[0] <= 23 and 0 <= t[1] <= 59) for t in times):
             raise ValueError("BROKEN 時間格式錯誤")
@@ -28,7 +32,7 @@ class BrokenConfig:
             raise ValueError("BROKEN_DROP_PERCENT 必須介於 0 與 100")
 
     def find_candidate(self, bars, previous_close, now):
-        """回傳 (訊號, 當日此策略已失效)。缺窗口資料可於下一輪重試。"""
+        """回傳 (訊號, 當日此策略已失效)。確認窗口結束後缺棒即當日失效。"""
         base = now.replace(second=0, microsecond=0)
         start = base.replace(hour=self.signal_start[0], minute=self.signal_start[1])
         end = base.replace(hour=self.signal_end[0], minute=self.signal_end[1])
@@ -41,7 +45,7 @@ class BrokenConfig:
         window = [bar for bar in completed if start <= bar['dt'] < end + timedelta(minutes=1)]
         expected = [start + timedelta(minutes=i) for i in range(int((end-start).total_seconds()//60)+1)]
         if [bar['dt'] for bar in window] != expected:
-            return None, False
+            return None, True
         if any(Decimal(str(bar['low'])) <= previous for bar in window):
             return None, True
         trigger = previous * (1 - Decimal(str(self.drop_percent))/100)

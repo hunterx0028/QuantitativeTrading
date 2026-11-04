@@ -11,14 +11,13 @@
 | `strategies/avg.py` | AVG 股票池副本、設定驗證、分 K 解析、斜率、四階段訊號、候選與持倉報價排程 |
 | `strategies/broken.py` | BROKEN 昨收上方窗口與連續跌破分 K 確認 |
 | `strategies/candidate_flow.py` | 三策略共用背景分 K、當日歸屬、即時報價及整輪耗時紀錄 |
-| `strategies/lower.py` | LOWER 市場門檻、決策窗口、候選統計、產業濾網、進場檢查、下降比例出場與查詢排程 |
 | `runtime_environment.py` | 本機檔案／S3 準備、延後載入股票池、互動／非互動登入及登出清理 |
 | `marketdata_transport.py` | 日內行情 HTTP 連線及讀取逾時；需與主程式放在同一層 |
 | `docker_space/generate_docker_strategy.py` | 檢查語法、同步共用程式與策略檔案、產生小型 Docker 入口 |
 
 各策略透過明確的設定、當日狀態及共用服務介面取得依賴，不反向匯入主程式。共用交易狀態及鎖仍由主程式協調。
 
-為保留原本調參習慣，`FALL_*`、`AVG_*`、`LOWER_*` 等參數仍在主程式。策略接收目前參數的快照；當日狀態則共用同一份 runtime。
+為保留原本調參習慣，`FALL_*`、`AVG_*`、`BROKEN_*` 等參數仍在主程式。策略接收目前參數的快照；當日狀態則共用同一份 runtime。
 
 `stock_data.py` 不會在主程式或策略模組匯入時被讀取。只有呼叫 `main()` 後，完成環境準備才載入股票池。仍維持每日只啟動一次、不支援盤中恢復的原有前提。
 
@@ -53,7 +52,6 @@ strategies/
     avg.py
     broken.py
     candidate_flow.py
-    lower.py
 ```
 
 **必須將這整套程式放進實際 Docker build 目錄，不能只複製 Docker 入口或 strategies。** 若實際 Dockerfile 在其他目錄，請把上述檔案一起複製過去。`external/`、`wheels/`、`requirements.txt` 沿用原本配置。

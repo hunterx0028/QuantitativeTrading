@@ -1,6 +1,6 @@
 """v24 開盤緩跌放空回測。
 
-以分K時間為分鐘起點：確認分鐘 close 完成後，持續監看，低於昨低才入場。
+以分K時間為分鐘起點：緩跌訊號成立後，連續完整分K的 low 低於昨收，次分鐘 open 入場。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
 
@@ -25,12 +25,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
 SIGNAL_START_TIME = (9, 0)
-SIGNAL_END_TIME = (9, 10)  # 包含此根 close；下一分鐘起監看跌破昨低
-ENTRY_DEADLINE = (11, 50)  # 包含此分鐘；之後即使跌破昨低也不入場
+SIGNAL_END_TIME = (9, 10)  # 包含此根 close；下一分鐘起監看跌破昨收
+ENTRY_DEADLINE = (11, 50)  # 包含此分鐘；之後即使跌破昨收也不入場
+ENTRY_CONFIRM_BARS = 2  # 連續完整分K的 low 嚴格低於昨收，次分鐘 open 入場
 MIN_DROP_PERCENT = 1.0  # 首尾 close 至少下跌此百分比，不設上限
 MAX_DEVIATION_RATIO = 0.25  # 每根 close 偏離首尾連線的上限，占整段下跌價差的比例
 
-OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
+OPTIMIZE_LOSS_PER_LOWER = 2.2  # 固定停損百分比，亦用於漲停入場限制
 OPTIMIZE_PROFIT_PER_LOWER = 5.0  # %
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
@@ -40,7 +41,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "xxxxxxxx"
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -92,9 +93,9 @@ def ceil_price_to_tick(price: float, tick: float) -> float:
     return float(ceiled_units * tick_dec)
 
 
-def price_below_previous_low(previous_low: float) -> float:
-    """昨低以下第一個合法報價；跨價位區間時使用下方區間的 tick。"""
-    price = Decimal(str(previous_low))
+def price_below_previous_close(previous_close: float) -> float:
+    """昨收以下第一個合法報價；跨價位區間時使用下方區間的 tick。"""
+    price = Decimal(str(previous_close))
     tick = Decimal(str(get_tick_size(float(price - Decimal('0.001')))))
     return float(((price / tick).to_integral_value(rounding=ROUND_CEILING) - 1) * tick)
 
@@ -516,25 +517,46 @@ def find_decline_signal(today_bars):
     }
 
 
-def find_entry(today_bars, previous_low):
-    """訊號成立後至進場截止分鐘（含），首次 low 嚴格低於昨低時入場。"""
+def find_entry(today_bars, previous_close):
+    """訊號成立後累計連續跌破棒，次分鐘 open 入場，入場時間不得超過截止。"""
     metrics = find_decline_signal(today_bars)
     if metrics is None:
         return None
-    trigger_price = price_below_previous_low(previous_low)
     deadline_dt = metrics['activation_dt'].replace(
         hour=ENTRY_DEADLINE[0], minute=ENTRY_DEADLINE[1])
+    counts = {}
+    for bar in today_bars:
+        counts[bar['dt']] = counts.get(bar['dt'], 0) + 1
+    consecutive_count = 0
+    previous_dt = None
+    previous = Decimal(str(previous_close))
     for entry_bar in today_bars:
         if entry_bar['dt'] < metrics['activation_dt']:
             continue
         if entry_bar['dt'] > deadline_dt:
             break
-        if entry_bar['low'] < previous_low and entry_bar['low'] <= trigger_price:
-            entry_price = min(float(entry_bar['open']), trigger_price)
-            return entry_bar, entry_price, {
-                **metrics, 'previous_low': previous_low,
-                'entry_intrabar': entry_bar['open'] > trigger_price,
-            }
+        dt = entry_bar['dt']
+        if (dt.second or dt.microsecond or counts[dt] != 1
+                or Decimal(str(entry_bar['low'])) >= previous):
+            consecutive_count = 0
+            previous_dt = None
+            continue
+        if previous_dt is None or dt != previous_dt + timedelta(minutes=1):
+            consecutive_count = 0
+        consecutive_count += 1
+        previous_dt = dt
+        if consecutive_count < ENTRY_CONFIRM_BARS:
+            continue
+        next_dt = dt + timedelta(minutes=1)
+        if next_dt > deadline_dt:
+            return None
+        next_bars = [bar for bar in today_bars if bar['dt'] == next_dt]
+        if len(next_bars) != 1:
+            return None
+        return next_bars[0], float(next_bars[0]['open']), {
+            **metrics, 'previous_close': previous_close,
+            'entry_intrabar': False,
+        }
     return None
 
 
@@ -554,7 +576,7 @@ def count_testable_stock_dates(bars_by_date, target_date):
 
 
 def collect_trade_candidates(stock_name, bars_by_date, target_date):
-    """每檔每日鎖定緩跌訊號，僅取其後首次跌破昨低的進場機會。"""
+    """每檔每日鎖定緩跌訊號，僅取其後首次跌破昨收的進場機會。"""
     candidates = []
     for date_key in sorted(bars_by_date):
         current_date = date.fromisoformat(date_key)
@@ -564,7 +586,7 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date):
         if not today or not yesterday:
             continue
         previous = compute_yesterday_stats(yesterday)
-        found = find_entry(today, previous['low'])
+        found = find_entry(today, previous['close'])
         if found is None:
             continue
         entry_bar, entry_price, metrics = found
@@ -607,6 +629,8 @@ def save_shared_api_cache(cache_path, payload, raw):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(updated, ensure_ascii=False), encoding='utf-8')
 def validate_settings():
+    if type(ENTRY_CONFIRM_BARS) is not int or ENTRY_CONFIRM_BARS < 1:
+        raise ValueError('ENTRY_CONFIRM_BARS 必須為正整數')
     for value in (SIGNAL_START_TIME, SIGNAL_END_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
         if (len(value) != 2 or any(type(part) is not int for part in value)
                 or not 0 <= value[0] <= 23 or not 0 <= value[1] <= 59):
@@ -713,8 +737,8 @@ def main():
              f'最低跌幅={MIN_DROP_PERCENT:g}% 最大偏離/整段跌幅={MAX_DEVIATION_RATIO:.0%} '
              f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 停利={OPTIMIZE_PROFIT_PER_LOWER:g}% '
              f'進場截止={ENTRY_DEADLINE}（含） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
-             '確認時間 close 完成後，下一分鐘起監看；low 嚴格低於昨低，於昨低下一檔入場，跳空則用 open。',
-             '監看到進場截止分鐘（含）；盤中入場當根 high/low 順序不明，保守以停損優先，不將當根 open 當成入場後跳空。',
+             f'確認時間 close 完成後，下一分鐘起累計連續 {ENTRY_CONFIRM_BARS} 根完整分K的 low 嚴格低於昨收，最後確認棒次分鐘 open 入場；缺棒、重複時間、非整分鐘或 low >= 昨收均中斷計數。',
+             '入場不得晚於進場截止分鐘（含）；缺少入場分K則當日略過。同根停損停利皆觸及，以停損優先。',
              '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。']
     results = []
     testable_count = 0

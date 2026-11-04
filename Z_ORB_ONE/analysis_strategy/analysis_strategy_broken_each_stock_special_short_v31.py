@@ -1,12 +1,12 @@
 """v31 昨收上方跌破百分之二放空回測。
 
 SIGNAL_START_TIME～SIGNAL_END_TIME low 全部高於昨收；
-ENTRY_START_TIME～ENTRY_DEADLINE 首次連續 TRIGGER_CONFIRM_BARS 根 low 跌破
+SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 首次連續 TRIGGER_CONFIRM_BARS 根 low 跌破
 TRIGGER_DROP_PERCENT 門檻，最後確認棒的次分鐘 open 放空。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
 
-# fall 模式的回測
+# broken 模式的回測
 
 import argparse
 import configparser
@@ -30,7 +30,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
 SIGNAL_START_TIME = (9, 0)
 SIGNAL_END_TIME = (9, 20)  # 含此分鐘
-ENTRY_START_TIME = (9, 21)
 ENTRY_DEADLINE = (11, 0)  # 訊號截止（含），最晚於截止時間的次分鐘 open 入場
 TRIGGER_DROP_PERCENT = 1.5
 TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 low 嚴格低於門檻；1 還原原策略
@@ -44,7 +43,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "xxxxxxxx"
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -498,7 +497,7 @@ def find_entry(today_bars, previous_close):
     if any(Decimal(str(bar['low'])) <= previous for bar in window):
         return None
     trigger = previous * (1 - Decimal(str(TRIGGER_DROP_PERCENT)) / 100)
-    start = window[-1]['dt'].replace(hour=ENTRY_START_TIME[0], minute=ENTRY_START_TIME[1])
+    start = window[-1]['dt'] + timedelta(minutes=1)
     deadline = start.replace(hour=ENTRY_DEADLINE[0], minute=ENTRY_DEADLINE[1])
     consecutive_count = 0
     previous_confirm_dt = None
@@ -605,13 +604,13 @@ def save_shared_api_cache(cache_path, payload, raw):
 def validate_settings():
     if type(TRIGGER_CONFIRM_BARS) is not int or TRIGGER_CONFIRM_BARS < 1:
         raise ValueError('TRIGGER_CONFIRM_BARS 必須為正整數')
-    for value in (SIGNAL_START_TIME, SIGNAL_END_TIME, ENTRY_START_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
+    for value in (SIGNAL_START_TIME, SIGNAL_END_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
         if (len(value) != 2 or any(type(part) is not int for part in value)
                 or not 0 <= value[0] <= 23 or not 0 <= value[1] <= 59):
             raise ValueError('時間需為合法的 (時, 分)')
     start = SIGNAL_START_TIME[0] * 60 + SIGNAL_START_TIME[1]
     end = SIGNAL_END_TIME[0] * 60 + SIGNAL_END_TIME[1]
-    entry_start = ENTRY_START_TIME[0] * 60 + ENTRY_START_TIME[1]
+    entry_start = end + 1
     deadline = ENTRY_DEADLINE[0] * 60 + ENTRY_DEADLINE[1]
     close = INTRADAY_COMPARE_END_LOWER[0] * 60 + INTRADAY_COMPARE_END_LOWER[1]
     if not 9 * 60 <= start <= end < entry_start <= deadline < close <= 13 * 60 + 30:
@@ -736,12 +735,12 @@ def main():
     index_changes = build_index_changes(index_raw)
     lines = [f'v31 昨收上方跌破百分之二放空回測，目標日期={target_date}',
              f'起點={SIGNAL_START_TIME} 確認時間={SIGNAL_END_TIME} '
-             f'訊號起點={ENTRY_START_TIME} 跌破昨收={TRIGGER_DROP_PERCENT:g}% 連續確認根數={TRIGGER_CONFIRM_BARS} '
+             f'訊號起點=確認時間次分鐘 跌破昨收={TRIGGER_DROP_PERCENT:g}% 連續確認根數={TRIGGER_CONFIRM_BARS} '
              f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 停利={OPTIMIZE_PROFIT_PER_LOWER:g}% '
              f'訊號截止={ENTRY_DEADLINE}（含，次分鐘 open 入場） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
              f'{SIGNAL_START_TIME[0]:02d}:{SIGNAL_START_TIME[1]:02d}～'
              f'{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K完整且 low 全部嚴格高於昨收；昨收為前一有資料交易日最後一根 close。',
-             f'{ENTRY_START_TIME[0]:02d}:{ENTRY_START_TIME[1]:02d}～'
+             f'確認時間次分鐘～'
              f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 首次連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 low < 昨收 × (1 - {TRIGGER_DROP_PERCENT:g}%)，最後確認棒須在訊號截止內，其次分鐘 open 入場；缺次分鐘 K 當日略過，每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
              '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。',
              f'指數漲跌幅：上市 IX0001／上櫃 IX0043，{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K收盤相對前一交易日收盤；缺資料顯示 N/A。']

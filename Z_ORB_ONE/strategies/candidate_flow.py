@@ -3,13 +3,16 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from threading import Lock
+from .fall import FallWindowError
 
 
 class SharedCandidateFlow:
     def __init__(self, namespace):
         self.namespace = namespace
         self.rows = {}
+        self.fall_rows = {}
         self.disabled = {}
+        self.avg_checks = {}
         self.candles = {}
         self.quotes = {}
         self.last_scan = None
@@ -77,33 +80,68 @@ class SharedCandidateFlow:
         a = self.api
         a.atomic_write_json(a.state_path(state["symbol_code_with_suf"]), state)
 
+    def check_avg_eligibility(self, symbol, completed, previous_close, now, disabled):
+        """固定時段條件各檢查一次；通過後保存結果，供後續型態檢核使用。"""
+        a = self.api
+        checks = self.avg_checks.setdefault(symbol, {})
+        hm = now.hour, now.minute
+        if 'slope' not in checks and hm >= a.AVG_SLOPE_CUTOFF_TIME:
+            slope = a.get_avg_strategy().calculate_avg_normalized_slope(completed, previous_close)
+            if slope is None or slope >= a.AVG_MAX_NORMALIZED_SLOPE:
+                disabled.add(a.STRATEGY_AVG)
+                a.trade_log("AVG_SLOPE_REJECTED", symbol=symbol, normalized_slope=slope)
+                return checks
+            checks['slope'] = slope
+        if 'count' not in checks and hm >= (9, 30):
+            count = sum((b['dt'].hour, b['dt'].minute) < (9, 30) for b in completed)
+            if count < a.AVG_MIN_MINUTE_BARS_BEFORE_0930:
+                disabled.add(a.STRATEGY_AVG)
+                a.trade_log("AVG_MINUTE_BARS_REJECTED", symbol=symbol, count=count)
+                return checks
+            checks['count'] = count
+        return checks
+
     def evaluate(self, symbol, response, ticker, states, now):
         a = self.api
+        if symbol in self.fall_rows:
+            self.confirm_fall_entry(states[symbol], response, now)
+            return
         if symbol in states or symbol not in self.rows:
+            return
+        # 回傳可能跨過截止時間；先排除過期策略，再使用這輪分K評估。
+        disabled = self.disabled.setdefault(symbol, set())
+        for strategy, deadline in ((a.STRATEGY_FALL, a.FALL_ENTRY_DEADLINE),
+                                   (a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE),
+                                   (a.STRATEGY_BROKEN, a.BROKEN_ENTRY_DEADLINE)):
+            if (now.hour, now.minute) > deadline:
+                disabled.add(strategy)
+        if len(disabled) == len(a.STRATEGY_PRIORITY):
+            self.rows.pop(symbol)
             return
         row = self.rows[symbol]
         bars = a.parse_avg_candles(response.get("data"), now)
         completed = [b for b in bars if b["dt"] < now.replace(second=0, microsecond=0)]
-        if not completed:
-            raise ValueError("缺少完成分K")
-        disabled = self.disabled.setdefault(symbol, set())
         signals = []
         fall_end = now.replace(hour=a.FALL_SIGNAL_END_TIME[0], minute=a.FALL_SIGNAL_END_TIME[1], second=0, microsecond=0)
         # 即使其他策略稍後成立，也必須先確認較早的 FALL 窗口。
         if a.STRATEGY_FALL not in disabled and now >= fall_end + timedelta(minutes=1, seconds=a.FALL_CANDLE_PUBLISH_DELAY_SECONDS):
-            signal = a.find_fall_signal(completed, now)
+            try:
+                signal = a.find_fall_signal(completed, now)
+            except FallWindowError as exc:
+                # 固定窗口無效只排除 FALL；不可中斷 AVG、BROKEN 的本輪檢核。
+                disabled.add(a.STRATEGY_FALL)
+                a.trade_log("FALL_WINDOW_REJECTED", symbol=symbol,
+                            reason=str(exc), action="disable_fall_for_day")
+                signal = None
             if signal:
                 signals.append((fall_end, a.STRATEGY_FALL, signal))
             else:
                 disabled.add(a.STRATEGY_FALL)
-        avg = a.get_avg_strategy()
-        if a.STRATEGY_AVG not in disabled and (now.hour, now.minute) >= a.AVG_CANDLES_START_TIME:
-            count = sum((b["dt"].hour, b["dt"].minute) < (9, 30) for b in completed)
-            slope = avg.calculate_avg_normalized_slope(completed, float(row[5]))
-            if count < a.AVG_MIN_MINUTE_BARS_BEFORE_0930 or slope is None or slope >= a.AVG_MAX_NORMALIZED_SLOPE:
-                disabled.add(a.STRATEGY_AVG)
-            else:
-                signal = avg.find_avg_entry_signal(completed, now, candidate_only=True)
+        if a.STRATEGY_AVG not in disabled:
+            checks = self.check_avg_eligibility(symbol, completed, float(row[5]), now, disabled)
+            if (a.STRATEGY_AVG not in disabled and 'slope' in checks and 'count' in checks
+                    and (now.hour, now.minute) >= a.AVG_CANDLES_START_TIME):
+                signal = a.get_avg_strategy().find_avg_entry_signal(completed, now, candidate_only=True)
                 if signal:
                     dt = signal["signal_bar"]["dt"]
                     prior = [b for b in completed if b["dt"] <= dt]
@@ -112,7 +150,7 @@ class SharedCandidateFlow:
                         disabled.add(a.STRATEGY_AVG)
                     else:
                         signals.append((dt, a.STRATEGY_AVG, {
-                            "avg_signal_bar_time": dt.isoformat(), "avg_normalized_slope": slope,
+                            "avg_signal_bar_time": dt.isoformat(), "avg_normalized_slope": checks['slope'],
                             "avg_pre_entry_range": float(spread)}))
         if a.STRATEGY_BROKEN not in disabled:
             signal, rejected = a.get_broken_config().find_candidate(completed, row[5], now)
@@ -137,8 +175,48 @@ class SharedCandidateFlow:
                 a.FALL_RUNTIME.candidate_symbols.add(symbol)
             a.refresh_active_order_states(states)
         self.rows.pop(symbol)
+        if strategy == a.STRATEGY_FALL:
+            self.fall_rows[symbol] = row
+            self.confirm_fall_entry(state, response, now)
         self.persist(state)
         a.trade_log("STRATEGY_LOCKED", symbol=symbol, strategy=strategy, candidate_time=dt.isoformat())
+
+    def confirm_fall_entry(self, state, response, now):
+        """候選歸屬不變；持續使用完整分K確認連續跌破昨收。"""
+        a = self.api
+        symbol = state['symbol_code_with_suf']
+        if state.get('fall_entry_confirmed_time') or state.get('traded') or state.get('in_position'):
+            self.fall_rows.pop(symbol, None)
+            return
+        if (now.hour, now.minute) > a.FALL_ENTRY_DEADLINE:
+            self.fall_rows.pop(symbol, None)
+            return
+        start = now.replace(hour=a.FALL_SIGNAL_END_TIME[0], minute=a.FALL_SIGNAL_END_TIME[1],
+                            second=0, microsecond=0) + timedelta(minutes=1)
+        completed = [bar for bar in a.parse_avg_candles(response.get('data'), now)
+                     if start <= bar['dt'] < now.replace(second=0, microsecond=0)]
+        counts = {}
+        for bar in completed:
+            counts[bar['dt']] = counts.get(bar['dt'], 0) + 1
+        count, last = 0, None
+        previous = Decimal(str(state['yesterday_close_price']))
+        for bar in completed:
+            dt = bar['dt']
+            if (dt.second or dt.microsecond or counts[dt] != 1
+                    or Decimal(str(bar['low'])) >= previous):
+                count, last = 0, None
+                continue
+            if last is None or dt != last + timedelta(minutes=1):
+                count = 0
+            count += 1
+            last = dt
+            if count >= a.FALL_ENTRY_CONFIRM_BARS:
+                state['fall_entry_confirmed_time'] = (dt + timedelta(minutes=1)).isoformat()
+                self.fall_rows.pop(symbol, None)
+                self.persist(state)
+                a.trade_log('FALL_ENTRY_CONFIRMED', symbol=symbol, confirm_bars=count,
+                            confirmed_time=state['fall_entry_confirmed_time'])
+                return
 
     def apply_quote(self, state, quote, sdk, now):
         a = self.api
@@ -160,7 +238,9 @@ class SharedCandidateFlow:
             elif high >= state["limit_up_price"] or low <= state["limit_down_price"]:
                 state.update(traded=True, exit_reason="limit_price_touched_before_entry")
             elif (a.is_avg_strategy(state) or a.is_broken_strategy(state)
-                  or float(px) < float(state["yesterday_low_price"])):
+                  or (state.get('fall_entry_confirmed_time')
+                      and a.finite_positive(state.get("yesterday_close_price"))
+                      and float(px) < float(state["yesterday_close_price"]))):
                 state.update(entry_trigger_price=float(px), entry_signal_price=float(px), entry_signal_time=now.isoformat())
                 a.try_open_position(state, sdk)
         self.persist(state)
@@ -179,14 +259,21 @@ class SharedCandidateFlow:
                 a.trade_log("CANDIDATE_SCAN_ERROR", error=True, symbol=symbol, error_msg=repr(exc))
         self.print_scan_timing()
         minute = now.strftime("%Y-%m-%d %H:%M")
-        start = min(a.AVG_CANDLES_START_TIME,
+        start = min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME, (9, 30),
                     divmod(a.FALL_SIGNAL_END_TIME[0] * 60 + a.FALL_SIGNAL_END_TIME[1] + 1, 60),
                     divmod(a.BROKEN_SIGNAL_END_TIME[0] * 60 + a.BROKEN_SIGNAL_END_TIME[1] + 1, 60))
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND
                 and (now.hour, now.minute) >= start):
             self.last_scan = minute
-            for symbol, row in list(self.rows.items()):
+            for symbol, row in list({**self.rows, **self.fall_rows}.items()):
+                if symbol in self.fall_rows:
+                    state = states[symbol]
+                    if (state.get('traded') or state.get('in_position')
+                            or state.get('fall_entry_confirmed_time')
+                            or (now.hour, now.minute) > a.FALL_ENTRY_DEADLINE):
+                        self.fall_rows.pop(symbol, None)
+                        continue
                 disabled = self.disabled.setdefault(symbol, set())
                 for strategy, deadline in ((a.STRATEGY_FALL, a.FALL_ENTRY_DEADLINE),
                                            (a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE),
@@ -194,7 +281,7 @@ class SharedCandidateFlow:
                     if (now.hour, now.minute) > deadline:
                         disabled.add(strategy)
                 if len(disabled) == len(a.STRATEGY_PRIORITY):
-                    self.rows.pop(symbol)
+                    self.rows.pop(symbol, None)
                 else:
                     if self.scan_timing is None:
                         self.scan_timing = dict(minute=minute, started_at=a.now_tpe(),
