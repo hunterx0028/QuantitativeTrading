@@ -9,15 +9,14 @@
 | `execute_strategy_broken_high_falling_singleton_v17.py` | 共用入口 `main()`、市場分流、股票歸屬、行情限流、下單、撤單、成交回報、對帳與共用持倉風控 |
 | `strategies/fall.py` | FALL 訊號、候選註冊、當日狀態、篩選排程、報價輪詢與監控流程 |
 | `strategies/avg.py` | AVG 股票池副本、設定驗證、分 K 解析、斜率、四階段訊號、候選與持倉報價排程 |
-| `strategies/broken.py` | BROKEN 昨收上方窗口與連續跌破分 K 確認 |
-| `strategies/candidate_flow.py` | 三策略共用背景分 K、當日歸屬、即時報價及整輪耗時紀錄 |
+| `strategies/candidate_flow.py` | AVG、FALL 共用背景分 K、當日歸屬、即時報價及整輪耗時紀錄 |
 | `runtime_environment.py` | 本機檔案／S3 準備、延後載入股票池、互動／非互動登入及登出清理 |
 | `marketdata_transport.py` | 日內行情 HTTP 連線及讀取逾時；需與主程式放在同一層 |
 | `docker_space/generate_docker_strategy.py` | 檢查語法、同步共用程式與策略檔案、產生小型 Docker 入口 |
 
 各策略透過明確的設定、當日狀態及共用服務介面取得依賴，不反向匯入主程式。共用交易狀態及鎖仍由主程式協調。
 
-為保留原本調參習慣，`FALL_*`、`AVG_*`、`BROKEN_*` 等參數仍在主程式。策略接收目前參數的快照；當日狀態則共用同一份 runtime。
+實機只執行 FALL、AVG，`STRATEGY_PRIORITY` 預設為 `["FALL", "AVG"]`。為保留原本調參習慣，`FALL_*`、`AVG_*` 等參數仍在主程式。策略接收目前參數的快照；當日狀態則共用同一份 runtime。
 
 `stock_data.py` 不會在主程式或策略模組匯入時被讀取。只有呼叫 `main()` 後，完成環境準備才載入股票池。仍維持每日只啟動一次、不支援盤中恢復的原有前提。
 
@@ -50,7 +49,6 @@ strategies/
     __init__.py
     fall.py
     avg.py
-    broken.py
     candidate_flow.py
 ```
 

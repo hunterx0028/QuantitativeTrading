@@ -11,6 +11,14 @@ from typing import Any, Dict, List, Tuple, Optional
 import requests
 
 
+def average_tick_size(price: float) -> float:
+    """與 v18 get_tick_size 相同，依 average 所在價位區間決定提前觸發價差。"""
+    for upper, tick in ((10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1)):
+        if price < upper:
+            return tick
+    return 5
+
+
 @dataclass(frozen=True)
 class AvgConfig:
     AVG_CANDLES_START_TIME: tuple[int, int]
@@ -45,6 +53,7 @@ class AvgConfig:
     TRADE_SIDE_SHORT: str
     # 舊三策略入口的相容參數；AVG/FALL 入口不再依賴 LOWER。
     STRATEGY_START_LOWER_3: tuple[int, int] | None = None
+    AVG_STAGE_4_EARLY_ENTRY_TICKS: int = 2
 
 
 @dataclass
@@ -95,6 +104,9 @@ class AvgStrategy:
         raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
 
     def validate_avg_config(self) -> None:
+        if (type(self.config.AVG_STAGE_4_EARLY_ENTRY_TICKS) is not int
+                or self.config.AVG_STAGE_4_EARLY_ENTRY_TICKS < 0):
+            raise ValueError("AVG_STAGE_4_EARLY_ENTRY_TICKS 必須為非負整數（0 表示停用幅度提前觸發）")
         if self.config.AVG_STOCK_DATA_SOURCE not in ("T", "S"):
             raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
         for name in ("AVG_STAGE_1_START_TIME", "AVG_CANDLES_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
@@ -223,7 +235,13 @@ class AvgStrategy:
                 if minute < self.config.AVG_SLOPE_CUTOFF_TIME:
                     continue
                 count = count + 1 if bar["low"] < average else 0
-                if count >= self.config.AVG_STAGE_4_MIN_BARS:
+                early_entry = False
+                if self.config.AVG_STAGE_4_EARLY_ENTRY_TICKS > 0:
+                    early_entry_threshold = (Decimal(str(average))
+                                             - Decimal(str(average_tick_size(average)))
+                                             * self.config.AVG_STAGE_4_EARLY_ENTRY_TICKS)
+                    early_entry = Decimal(str(bar["low"])) < early_entry_threshold
+                if count >= self.config.AVG_STAGE_4_MIN_BARS or early_entry:
                     if candidate_only:
                         return {"signal_bar": bar}
                     if index + 1 >= len(bars):

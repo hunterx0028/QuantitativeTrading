@@ -2,7 +2,8 @@
 
 依序完成 low > average、high < average、low > average 的連續根數，
 每階段同一段連續分K內另須至少一根達到設定的 average 偏離百分比，
-STAGE_4 須連續設定根數 low < average，確認後以緊接下一根 open 入場。
+STAGE_4 須連續設定根數 low < average，或單根 low 嚴格低於 average 下方設定 tick 數，
+確認後以緊接下一根 open 入場。
 average 僅採 API 欄位，不補算。
 """
 
@@ -35,6 +36,7 @@ STAGE_1_MIN_BARS = 8
 STAGE_2_MIN_BARS = 8
 STAGE_3_MIN_BARS = 5
 STAGE_4_MIN_BARS = 2  # 第三階段完成後連續 low < average，下一根 open 入場
+STAGE_4_EARLY_ENTRY_TICKS = 2  # 0：停用幅度提前觸發，只依連續根數；>0：單根 low < average - 此數 × tick 可提前觸發，tick 依 average 價位區間
 
 STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
 STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1 - 2%)
@@ -524,7 +526,12 @@ def find_entry(today_bars):
             if (bar['dt'].hour, bar['dt'].minute) < SLOPE_CUTOFF_TIME:
                 continue
             count = count + 1 if bar['low'] < average else 0
-            if count >= STAGE_4_MIN_BARS:
+            early_entry = False
+            if STAGE_4_EARLY_ENTRY_TICKS > 0:
+                early_entry_threshold = (Decimal(str(average))
+                                         - Decimal(str(get_tick_size(average))) * STAGE_4_EARLY_ENTRY_TICKS)
+                early_entry = Decimal(str(bar['low'])) < early_entry_threshold
+            if count >= STAGE_4_MIN_BARS or early_entry:
                 if index + 1 >= len(today_bars):
                     return None
                 entry_bar = today_bars[index + 1]
@@ -674,6 +681,8 @@ def is_normalized_slope_allowed(slope):
 
 
 def validate_settings():
+    if type(STAGE_4_EARLY_ENTRY_TICKS) is not int or STAGE_4_EARLY_ENTRY_TICKS < 0:
+        raise ValueError('STAGE_4_EARLY_ENTRY_TICKS 必須為非負整數（0 表示停用幅度提前觸發）')
     if not math.isfinite(MAX_NORMALIZED_SLOPE):
         raise ValueError('正規化斜率門檻必須為有限數值')
     for value in (STAGE_1_AMPLITUDE_PERCENT, STAGE_2_AMPLITUDE_PERCENT,

@@ -1,6 +1,7 @@
 """v24 開盤緩跌放空回測。
 
-以分K時間為分鐘起點：緩跌訊號成立後，連續完整分K的 low 低於昨收，次分鐘 open 入場。
+以分K時間為分鐘起點：緩跌訊號成立後，連續完整分K的 low 低於昨收；
+確認後從次分鐘起等待 low 低於昨收，以昨收下方第一個合法 tick 模擬入場。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
 
@@ -24,10 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
-SIGNAL_START_TIME = (9, 0)
-SIGNAL_END_TIME = (9, 10)  # 包含此根 close；下一分鐘起監看跌破昨收
+SIGNAL_START_TIME = (9, 3)
+SIGNAL_END_TIME = (9, 13)  # 包含此根 close；下一分鐘起監看跌破昨收
+MAX_MISSING_SIGNAL_BARS = 1  # 訊號窗口（含起訖）最多允許缺少的分K數；0 表示不可缺棒，不補價
 ENTRY_DEADLINE = (11, 50)  # 包含此分鐘；之後即使跌破昨收也不入場
-ENTRY_CONFIRM_BARS = 2  # 連續完整分K的 low 嚴格低於昨收，次分鐘 open 入場
+ENTRY_CONFIRM_BARS = 2  # 連續完整分K的 low 嚴格低於昨收，確認後次分鐘起等待再次跌破
 MIN_DROP_PERCENT = 1.0  # 首尾 close 至少下跌此百分比，不設上限
 MAX_DEVIATION_RATIO = 0.25  # 每根 close 偏離首尾連線的上限，占整段下跌價差的比例
 
@@ -325,7 +327,7 @@ def build_outcome_result(
 
 
 def get_signal_window(today_bars):
-    """僅要求起點至確認分鐘逐分鐘完整且唯一，不依賴之後入場資料。"""
+    """窗口缺棒不得超限，至少保留兩根；重複、非整分鐘及亂序仍排除。"""
     if not today_bars:
         return None
     day = today_bars[0]['dt'].date()
@@ -335,8 +337,11 @@ def get_signal_window(today_bars):
     relevant = [bar for bar in today_bars if start <= bar['dt'] < end + timedelta(minutes=1)]
     expected = [start + timedelta(minutes=i)
                 for i in range(int((end - start).total_seconds() // 60) + 1)]
-    # 不補價、不順延；非整分鐘與重複時間同樣排除。
-    if [bar['dt'] for bar in relevant] != expected:
+    actual = [bar['dt'] for bar in relevant]
+    # 首尾也可缺棒；不補價、不移動固定窗口，以實際存在的首尾 close 判斷跌幅。
+    if (len(actual) < 2 or actual != sorted(set(actual))
+            or not set(actual).issubset(expected)
+            or len(set(expected) - set(actual)) > MAX_MISSING_SIGNAL_BARS):
         return None
     return relevant
 
@@ -502,23 +507,29 @@ def find_decline_signal(today_bars):
     drop = first - last
     if drop <= 0 or drop * 100 < first * Decimal(str(MIN_DROP_PERCENT)):
         return None
-    intervals = len(bars) - 1
+    intervals = int((bars[-1]['dt'] - bars[0]['dt']).total_seconds() // 60)
     # 交叉相乘避開除法誤差，等於容許帶與最低跌幅時都通過。
-    deviations = [abs((Decimal(str(bar['close'])) - first) * intervals + drop * i)
-                  for i, bar in enumerate(bars)]
+    deviations = [abs((Decimal(str(bar['close'])) - first) * intervals
+                      + drop * int((bar['dt'] - bars[0]['dt']).total_seconds() // 60))
+                  for bar in bars]
     max_deviation = max(deviations)
     denominator = drop * intervals
     if max_deviation > denominator * Decimal(str(MAX_DEVIATION_RATIO)):
         return None
     return {
-        'activation_dt': bars[-1]['dt'] + timedelta(minutes=1),
+        'activation_dt': bars[-1]['dt'].replace(hour=SIGNAL_END_TIME[0], minute=SIGNAL_END_TIME[1])
+                         + timedelta(minutes=1),
         'drop_percent': float(drop / first * 100),
         'max_deviation_ratio': float(max_deviation / denominator),
     }
 
 
 def find_entry(today_bars, previous_close):
-    """訊號成立後累計連續跌破棒，次分鐘 open 入場，入場時間不得超過截止。"""
+    """連續跌破確認後，次分鐘起等待 low < 昨收，以昨收下方一 tick 模擬成交。
+
+    確認完成後不因價格回升重設資格。僅有分K，固定 tick 為成交假設，
+    包含開盤已跳空低於該價的情境，不代表實機市價單能以此價成交。
+    """
     metrics = find_decline_signal(today_bars)
     if metrics is None:
         return None
@@ -530,12 +541,21 @@ def find_entry(today_bars, previous_close):
     consecutive_count = 0
     previous_dt = None
     previous = Decimal(str(previous_close))
+    confirmed = False
     for entry_bar in today_bars:
         if entry_bar['dt'] < metrics['activation_dt']:
             continue
         if entry_bar['dt'] > deadline_dt:
             break
         dt = entry_bar['dt']
+        if confirmed:
+            if (not dt.second and not dt.microsecond and counts[dt] == 1
+                    and Decimal(str(entry_bar['low'])) < previous):
+                return entry_bar, price_below_previous_close(previous_close), {
+                    **metrics, 'previous_close': previous_close,
+                    'entry_intrabar': True,
+                }
+            continue
         if (dt.second or dt.microsecond or counts[dt] != 1
                 or Decimal(str(entry_bar['low'])) >= previous):
             consecutive_count = 0
@@ -547,16 +567,7 @@ def find_entry(today_bars, previous_close):
         previous_dt = dt
         if consecutive_count < ENTRY_CONFIRM_BARS:
             continue
-        next_dt = dt + timedelta(minutes=1)
-        if next_dt > deadline_dt:
-            return None
-        next_bars = [bar for bar in today_bars if bar['dt'] == next_dt]
-        if len(next_bars) != 1:
-            return None
-        return next_bars[0], float(next_bars[0]['open']), {
-            **metrics, 'previous_close': previous_close,
-            'entry_intrabar': False,
-        }
+        confirmed = True
     return None
 
 
@@ -629,6 +640,8 @@ def save_shared_api_cache(cache_path, payload, raw):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(updated, ensure_ascii=False), encoding='utf-8')
 def validate_settings():
+    if type(MAX_MISSING_SIGNAL_BARS) is not int or MAX_MISSING_SIGNAL_BARS < 0:
+        raise ValueError('MAX_MISSING_SIGNAL_BARS 必須為非負整數')
     if type(ENTRY_CONFIRM_BARS) is not int or ENTRY_CONFIRM_BARS < 1:
         raise ValueError('ENTRY_CONFIRM_BARS 必須為正整數')
     for value in (SIGNAL_START_TIME, SIGNAL_END_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):

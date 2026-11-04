@@ -201,9 +201,12 @@ class FallConfig:
     protect_loss_per: float
     profit_back_percent: float
     profit_target_percent: float
+    max_missing_signal_bars: int = 1
 
     def validate(self, time_to_minutes):
         """時間格式沿用主程式的共用驗證器，保留既有驗證規則。"""
+        if type(self.max_missing_signal_bars) is not int or self.max_missing_signal_bars < 0:
+            raise ValueError("FALL_MAX_MISSING_SIGNAL_BARS 必須為非負整數")
         start = time_to_minutes(self.signal_start_time, "FALL_SIGNAL_START_TIME")
         end = time_to_minutes(self.signal_end_time, "FALL_SIGNAL_END_TIME")
         deadline = time_to_minutes(self.entry_deadline, "FALL_ENTRY_DEADLINE")
@@ -229,6 +232,7 @@ class FallConfig:
             signal_end_time=self.signal_end_time,
             min_drop_percent=self.min_drop_percent,
             max_deviation_ratio=self.max_deviation_ratio,
+            max_missing_signal_bars=self.max_missing_signal_bars,
         )
 
 
@@ -302,9 +306,9 @@ def evaluate_fall_candidate(row, ticker, existing, *, finite_positive):
 
 def find_fall_signal(
     bars, now_local, *, signal_start_time, signal_end_time,
-    min_drop_percent, max_deviation_ratio,
+    min_drop_percent, max_deviation_ratio, max_missing_signal_bars=1,
 ):
-    """以首尾 close 連線及逐根最大偏離判斷，只使用完成分 K。"""
+    """容許窗口缺棒，以現有首尾 close 與實際分鐘間隔判斷；不補價、不提前啟用。"""
     start = now_local.replace(hour=signal_start_time[0], minute=signal_start_time[1], second=0, microsecond=0)
     end = start.replace(hour=signal_end_time[0], minute=signal_end_time[1])
     activation = end + timedelta(minutes=1)
@@ -314,14 +318,17 @@ def find_fall_signal(
     intervals = int((end - start).total_seconds() // 60)
     expected = [start + timedelta(minutes=i) for i in range(intervals + 1)]
     actual = [b["dt"] for b in window]
-    if actual != expected:
+    if (len(actual) < 2 or actual != sorted(set(actual))
+            or not set(actual).issubset(expected)
+            or len(set(expected) - set(actual)) > max_missing_signal_bars):
         counts = Counter(actual)
         missing = [dt.isoformat() for dt in expected if dt not in counts]
         duplicates = [dt.isoformat() for dt, count in counts.items() if count > 1]
         off_minute = [dt.isoformat() for dt in counts if dt.second or dt.microsecond]
         raise FallWindowError(
-            "FALL 確認窗口缺棒、重複或非整分鐘資料 "
+            "FALL 確認窗口缺棒超限、少於兩根、重複、非整分鐘或亂序資料 "
             f"expected_count={len(expected)} actual_count={len(actual)} "
+            f"max_missing_signal_bars={max_missing_signal_bars} "
             f"missing={missing} duplicates={duplicates} off_minute={off_minute} "
             f"out_of_order={actual != sorted(actual)}"
         )
@@ -329,8 +336,10 @@ def find_fall_signal(
     drop = first - last
     if drop <= 0 or drop * 100 < first * Decimal(str(min_drop_percent)):
         return None
-    maximum = max(abs((Decimal(str(b["close"])) - first) * intervals + drop * i)
-                  for i, b in enumerate(window))
+    intervals = int((window[-1]['dt'] - window[0]['dt']).total_seconds() // 60)
+    maximum = max(abs((Decimal(str(b["close"])) - first) * intervals
+                      + drop * int((b['dt'] - window[0]['dt']).total_seconds() // 60))
+                  for b in window)
     if maximum > drop * intervals * Decimal(str(max_deviation_ratio)):
         return None
     return {"fall_signal_time": end.isoformat(), "fall_activation_time": activation.isoformat(),
