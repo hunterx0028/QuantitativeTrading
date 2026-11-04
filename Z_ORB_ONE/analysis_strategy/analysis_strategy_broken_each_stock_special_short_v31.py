@@ -1,8 +1,9 @@
 """v31 昨收上方跌破百分之二放空回測。
 
-SIGNAL_START_TIME～SIGNAL_END_TIME low 全部高於昨收；
-SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 首次連續 TRIGGER_CONFIRM_BARS 根 low 跌破
-TRIGGER_DROP_PERCENT 門檻，最後確認棒的次分鐘 open 放空。
+SIGNAL_START_TIME～SIGNAL_END_TIME 分 K 必須逐分鐘完整且唯一，low 全部高於昨收；
+區間最高 high 減最低 low 不得超過昨收的 MAX_SIGNAL_RANGE_PERCENT%。
+SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 連續 TRIGGER_CONFIRM_BARS 根 low、close 均跌破
+TRIGGER_DROP_PERCENT 門檻，確認後於次分鐘 open 放空，不限制 open 與門檻的關係。
 固定啟用獲利保護與追蹤停利；本根 low 更新的保護價下一根生效，反彈觸價按出場線、跳空按 open 平倉。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
@@ -31,10 +32,11 @@ if str(PROJECT_ROOT) not in sys.path:
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
 SIGNAL_START_TIME = (9, 0)
 SIGNAL_END_TIME = (9, 20)  # 含此分鐘
+MAX_SIGNAL_RANGE_PERCENT = 3.3  # 訊號窗口最高 high 減最低 low，不得超過昨收的此百分比（含等於）
 ENTRY_DEADLINE = (11, 0)  # 訊號截止（含），最晚於截止時間的次分鐘 open 入場
 TRIGGER_DROP_PERCENT = 1.5
-TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 low 嚴格低於門檻；1 還原原策略
-OPTIMIZE_LOSS_PER_LOWER = 2.5  # 固定停損百分比，亦用於漲停入場限制
+TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 low 與 close 均嚴格低於門檻
+OPTIMIZE_LOSS_PER_LOWER = 1.5  # 固定停損百分比，亦用於漲停入場限制
 OPTIMIZE_PROFIT_PER_LOWER = 5.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
 PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比，固定啟動獲利保護
 PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比（相對入場價，尚未扣費用）
@@ -346,7 +348,7 @@ def build_outcome_result(
 
 
 def get_signal_window(today_bars):
-    """僅要求起點至確認分鐘逐分鐘完整且唯一，不依賴之後入場資料。"""
+    """窗口內要求分 K 逐分鐘完整且唯一，不補價、不順延。"""
     if not today_bars:
         return None
     day = today_bars[0]['dt'].date()
@@ -356,7 +358,7 @@ def get_signal_window(today_bars):
     relevant = [bar for bar in today_bars if start <= bar['dt'] < end + timedelta(minutes=1)]
     expected = [start + timedelta(minutes=i)
                 for i in range(int((end - start).total_seconds() // 60) + 1)]
-    # 不補價、不順延；非整分鐘與重複時間同樣排除。
+    # 缺棒、重複、非整分鐘及時間順序異常均排除。
     if [bar['dt'] for bar in relevant] != expected:
         return None
     return relevant
@@ -472,6 +474,7 @@ def evaluate_candidates(
             'previous_close': candidate['previous_close'],
             'signal_dt': candidate['signal_dt'],
             'trigger_price': candidate['trigger_price'],
+            'signal_range_percent': candidate['signal_range_percent'],
             'effective_stop_loss': effective_stop_loss,
             'stop_loss_price': stop_loss_price,
         }
@@ -533,22 +536,28 @@ def evaluate_candidates(
 
 
 def find_entry(today_bars, previous_close):
-    """取首次連續分 K 確認訊號；最後確認棒次分鐘缺棒時整日略過。"""
+    """low、close 連續確認後於次分鐘 open 入場，不再以 open 過濾或重新計數。"""
     window = get_signal_window(today_bars)
     if window is None:
         return None
     previous = Decimal(str(previous_close))
     if any(Decimal(str(bar['low'])) <= previous for bar in window):
         return None
+    signal_range = (Decimal(str(max(bar['high'] for bar in window)))
+                    - Decimal(str(min(bar['low'] for bar in window))))
+    if signal_range > previous * Decimal(str(MAX_SIGNAL_RANGE_PERCENT)) / 100:
+        return None
     trigger = previous * (1 - Decimal(str(TRIGGER_DROP_PERCENT)) / 100)
-    start = window[-1]['dt'] + timedelta(minutes=1)
+    start = window[0]['dt'].replace(
+        hour=SIGNAL_END_TIME[0], minute=SIGNAL_END_TIME[1]) + timedelta(minutes=1)
     deadline = start.replace(hour=ENTRY_DEADLINE[0], minute=ENTRY_DEADLINE[1])
     consecutive_count = 0
     previous_confirm_dt = None
     for bar in today_bars:
         if not start <= bar['dt'] <= deadline:
             continue
-        if Decimal(str(bar['low'])) >= trigger:
+        if (Decimal(str(bar['low'])) >= trigger
+                or Decimal(str(bar['close'])) >= trigger):
             consecutive_count = 0
             previous_confirm_dt = None
             continue
@@ -569,10 +578,11 @@ def find_entry(today_bars, previous_close):
             return None
         entry_bar = next_bars[0]
         return entry_bar, float(entry_bar['open']), {
-            'activation_dt': window[-1]['dt'] + timedelta(minutes=1),
+            'activation_dt': start,
             'signal_dt': signal_dt,
             'previous_close': previous_close,
             'trigger_price': float(trigger),
+            'signal_range_percent': float(signal_range / previous * 100),
             'entry_intrabar': False,
         }
     return None
@@ -593,7 +603,7 @@ def count_testable_stock_dates(bars_by_date, target_date):
 
 
 def collect_trade_candidates(stock_name, bars_by_date, target_date):
-    """每檔每日僅取首個跌破門檻訊號的次分鐘 open。"""
+    """每檔每日僅取首次通過連續確認訊號的次分鐘 open。"""
     candidates = []
     for date_key in sorted(bars_by_date):
         current_date = date.fromisoformat(date_key)
@@ -619,7 +629,7 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date):
 
 
 def get_api_cache_path(target_date):
-    """與 v17 共用原始 API cache；一般模式補齊市場及產業指數。"""
+    """與 v17 共用原始 API cache；僅補齊股票資料。"""
     return Path(__file__).parent / 'analysis_json_cache' / (
         f'analysis_strategy_broken_each_stock_special_short_api_cache_{target_date:%Y%m%d}.json'
     )
@@ -642,10 +652,11 @@ def save_shared_api_cache(cache_path, payload, raw):
     updated = dict(payload) if isinstance(payload, dict) else {}
     updated['stock_names'] = list(dict.fromkeys([*updated.get('stock_names', []), *raw]))
     updated['minute_raw_by_symbol'] = raw
-    updated.setdefault('index_minute_raw_by_key', {})
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(updated, ensure_ascii=False), encoding='utf-8')
 def validate_settings():
+    if not math.isfinite(MAX_SIGNAL_RANGE_PERCENT) or MAX_SIGNAL_RANGE_PERCENT < 0:
+        raise ValueError('MAX_SIGNAL_RANGE_PERCENT 必須為有限非負數')
     for value in (PROTECT_PROFIT_PER, PROTECT_LOSS_PER, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('獲利保護及追蹤停利百分比必須介於 0 與 100 之間')
@@ -669,33 +680,9 @@ def validate_settings():
             raise ValueError('跌幅及停損停利百分比必須介於 0 與 100 之間')
 
 
-def build_index_changes(index_raw):
-    """SIGNAL_END_TIME 分 K close 相對前一交易日最後一根 close 的漲跌幅。"""
-    changes = {}
-    for key, code in (('TWSE:MARKET', 'IX0001'), ('TPEX:MARKET', 'IX0043')):
-        bars_by_date = parse_bars(index_raw.get(key) or index_raw.get(code, []))
-        changes[code] = {}
-        for day in sorted(bars_by_date):
-            today, yesterday = get_target_and_yesterday(bars_by_date, date.fromisoformat(day))
-            at_signal_end = [bar for bar in today
-                             if (bar['dt'].hour, bar['dt'].minute) == SIGNAL_END_TIME
-                             and bar['dt'].second == 0 and bar['dt'].microsecond == 0]
-            if len(at_signal_end) == 1 and yesterday:
-                previous_close = yesterday[-1]['close']
-                changes[code][day] = (at_signal_end[0]['close'] / previous_close - 1) * 100
-    return changes
-
-
-def format_result_line(stock_name, date_str, signal, result, index_changes=None):
-    suffix = stock_name.rsplit('.', 1)[-1].upper()
-    index_code = {'TW': 'IX0001', 'TWO': 'IX0043'}.get(suffix)
-    change = (index_changes or {}).get(index_code, {}).get(date_str)
-    index_text = (
-        f'{index_code}:{change:+.2f}% ' if change is not None
-        else f'{index_code or "INDEX"}:N/A '
-    )
+def format_result_line(stock_name, date_str, signal, result):
     prefix = (
-        f'{date_str} {index_text}{stock_name} 昨收={signal["previous_close"]:.2f} '
+        f'{date_str} 價差={signal["signal_range_percent"]:.4f}% {stock_name} 昨收={signal["previous_close"]:.2f} '
         f'門檻={signal["trigger_price"]:.4f} 訊號={signal["signal_dt"]:%H:%M} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
@@ -722,7 +709,6 @@ def main():
     else:
         target_date = date.fromisoformat(args.to) if args.to else date.today()
         cache_path = get_api_cache_path(target_date)
-    index_raw = {}
     payload = None
     if cache_path.exists():
         try:
@@ -752,10 +738,6 @@ def main():
         raw = payload.get('minute_raw_by_symbol', {}) if isinstance(payload, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
-        from Z_ORB_ONE.analysis_strategy.shared_index_cache import complete_index_cache
-
-        index_raw = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
-        index_raw = dict(index_raw) if isinstance(index_raw, dict) else {}
         rest_stock = None
 
         def get_rest_stock():
@@ -771,17 +753,9 @@ def main():
                 print(f'API抓取進度：{i}/{len(missing)} {name}')
                 fetched[name] = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
             raw = {**raw, **fetched}
-        indices_updated = complete_index_cache(
-            stocks, index_raw, target_date, fetch_minute_candles, get_rest_stock,
-        )
-        if missing or indices_updated:
-            updated_payload = dict(payload) if isinstance(payload, dict) else {}
-            updated_payload['index_minute_raw_by_key'] = index_raw
-            save_shared_api_cache(cache_path, updated_payload, raw)
-    if HISTORICAL_CACHE_DATE:
-        index_raw = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        if missing:
+            save_shared_api_cache(cache_path, payload, raw)
 
-    index_changes = build_index_changes(index_raw)
     lines = [f'v31 昨收上方跌破百分之二放空回測，目標日期={target_date}',
              f'起點={SIGNAL_START_TIME} 確認時間={SIGNAL_END_TIME} '
              f'訊號起點=確認時間次分鐘 跌破昨收={TRIGGER_DROP_PERCENT:g}% 連續確認根數={TRIGGER_CONFIRM_BARS} '
@@ -790,11 +764,10 @@ def main():
              f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
              f'訊號截止={ENTRY_DEADLINE}（含，次分鐘 open 入場） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
              f'{SIGNAL_START_TIME[0]:02d}:{SIGNAL_START_TIME[1]:02d}～'
-             f'{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K完整且 low 全部嚴格高於昨收；昨收為前一有資料交易日最後一根 close。',
+             f'{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K須逐分鐘完整且唯一，low 全部嚴格高於昨收；區間最高 high 減最低 low 須 <= 昨收 × {MAX_SIGNAL_RANGE_PERCENT:g}%；昨收為前一有資料交易日最後一根 close。',
              f'確認時間次分鐘～'
-             f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 首次連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 low < 昨收 × (1 - {TRIGGER_DROP_PERCENT:g}%)，最後確認棒須在訊號截止內，其次分鐘 open 入場；缺次分鐘 K 當日略過，每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
-             '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。',
-             f'指數漲跌幅：上市 IX0001／上櫃 IX0043，{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K收盤相對前一交易日收盤；缺資料顯示 N/A。']
+             f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 low、close 均 < 昨收 × (1 - {TRIGGER_DROP_PERCENT:g}%)，最後確認棒須在訊號截止內，次分鐘 open 入場，不限制 open 是否低於門檻。缺次分鐘 K 當日略過，每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
+             '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。']
     results = []
     testable_count = 0
     for name in stock_names:
@@ -806,7 +779,7 @@ def main():
         lines.insert(0, f'歷史 cache 模式：{target_date}，使用 cache 全部股票，可檢驗股票－日期數={testable_count:,}')
     results.sort(key=lambda pair: (pair[0]['entry_dt'], pair[0]['name']))
     for signal, result in results:
-        lines.append(format_result_line(signal['name'], signal['date_str'], signal, result, index_changes))
+        lines.append(format_result_line(signal['name'], signal['date_str'], signal, result))
     for day in sorted({signal['date_str'] for signal, _ in results}):
         lines.append(summarize_results(day, [pair for pair in results if pair[0]['date_str'] == day]))
     lines.append(summarize_results('總計', results))

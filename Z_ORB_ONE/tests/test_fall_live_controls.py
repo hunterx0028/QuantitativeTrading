@@ -31,7 +31,7 @@ def live_functions():
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     ns[target.id] = value
-    names = {'get_fall_config', 'validate_fall_config', 'is_fall_strategy',
+    names = {'get_fall_config', 'validate_fall_config', 'is_fall_strategy', 'is_broken_strategy',
              'get_optimize_loss_profit_percent', 'get_protect_loss_profit_percent',
              'get_tick_size', 'floor_price_to_tick_value', 'ceil_price_to_tick_value',
              'recalc_entry_position_prices', '_protect_profit_stop', 'reached_stop_to_flat',
@@ -92,7 +92,6 @@ class LiveFallTests(unittest.TestCase):
                 bars = [dict(dt=activation, low=low)]
                 flow = SharedCandidateFlow(self.api)
                 state = self.state(in_position=False)
-                flow.fall_rows['1234.TW'] = []
                 flow.confirm_fall_entry(state, {'data': bars}, activation + timedelta(minutes=1, seconds=15))
                 self.assertNotIn('fall_entry_confirmed_time', state)
 

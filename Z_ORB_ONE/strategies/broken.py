@@ -13,6 +13,7 @@ class BrokenConfig:
     signal_deadline: tuple
     drop_percent: float
     confirm_bars: int
+    max_signal_range_percent: float = 3.3
 
     @property
     def entry_start(self):
@@ -30,9 +31,11 @@ class BrokenConfig:
             raise ValueError("BROKEN_CONFIRM_BARS 必須為正整數")
         if not math.isfinite(self.drop_percent) or not 0 < self.drop_percent < 100:
             raise ValueError("BROKEN_DROP_PERCENT 必須介於 0 與 100")
+        if not math.isfinite(self.max_signal_range_percent) or self.max_signal_range_percent < 0:
+            raise ValueError("BROKEN_MAX_SIGNAL_RANGE_PERCENT 必須為有限非負數")
 
-    def find_candidate(self, bars, previous_close, now):
-        """回傳 (訊號, 當日此策略已失效)。確認窗口結束後缺棒即當日失效。"""
+    def check_window(self, bars, previous_close, now):
+        """固定窗口僅需檢核一次；回傳 (窗口資料, 當日此策略已失效)。"""
         base = now.replace(second=0, microsecond=0)
         start = base.replace(hour=self.signal_start[0], minute=self.signal_start[1])
         end = base.replace(hour=self.signal_end[0], minute=self.signal_end[1])
@@ -48,7 +51,24 @@ class BrokenConfig:
             return None, True
         if any(Decimal(str(bar['low'])) <= previous for bar in window):
             return None, True
-        trigger = previous * (1 - Decimal(str(self.drop_percent))/100)
+        spread = (Decimal(str(max(bar['high'] for bar in window)))
+                  - Decimal(str(min(bar['low'] for bar in window))))
+        if spread > previous * Decimal(str(self.max_signal_range_percent)) / 100:
+            return None, True
+        return {'broken_activation_time': (end + timedelta(minutes=1)).isoformat(),
+                'broken_trigger_price': float(previous * (1 - Decimal(str(self.drop_percent)) / 100)),
+                'broken_signal_range_percent': float(spread / previous * 100)}, False
+
+    def find_candidate(self, bars, previous_close, now, *, window_metrics=None):
+        """已完成分K確認即保留資格；不要求次根 open，也不因跨分鐘失效。"""
+        if window_metrics is None:
+            window_metrics, rejected = self.check_window(bars, previous_close, now)
+            if window_metrics is None:
+                return None, rejected
+        base = now.replace(second=0, microsecond=0)
+        completed = [bar for bar in bars if bar['dt'] < base]
+        # 使用昨收與參數重新建立 Decimal 門檻，不以快取 float 判斷邊界。
+        trigger = Decimal(str(previous_close)) * (1 - Decimal(str(self.drop_percent))/100)
         entry_start = base.replace(hour=self.entry_start[0], minute=self.entry_start[1])
         deadline = base.replace(hour=self.signal_deadline[0], minute=self.signal_deadline[1])
         counts = Counter(bar['dt'] for bar in completed)
@@ -57,7 +77,8 @@ class BrokenConfig:
             dt = bar['dt']
             if not entry_start <= dt <= deadline:
                 continue
-            if Decimal(str(bar['low'])) >= trigger:
+            if (Decimal(str(bar['low'])) >= trigger
+                    or Decimal(str(bar['close'])) >= trigger):
                 count, last = 0, None
                 continue
             if dt.second or dt.microsecond or counts[dt] != 1:
@@ -67,7 +88,8 @@ class BrokenConfig:
             count += 1
             last = dt
             if count >= self.confirm_bars:
+                entry_time = dt + timedelta(minutes=1)
                 return {'broken_signal_time': dt.isoformat(),
-                        'broken_activation_time': (end+timedelta(minutes=1)).isoformat(),
-                        'broken_trigger_price': float(trigger)}, False
+                        'broken_entry_time': entry_time.isoformat(),
+                        **window_metrics}, False
         return None, False

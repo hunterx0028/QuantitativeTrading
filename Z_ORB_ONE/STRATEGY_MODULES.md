@@ -9,14 +9,19 @@
 | `execute_strategy_broken_high_falling_singleton_v17.py` | 共用入口 `main()`、市場分流、股票歸屬、行情限流、下單、撤單、成交回報、對帳與共用持倉風控 |
 | `strategies/fall.py` | FALL 訊號、候選註冊、當日狀態、篩選排程、報價輪詢與監控流程 |
 | `strategies/avg.py` | AVG 股票池副本、設定驗證、分 K 解析、斜率、四階段訊號、候選與持倉報價排程 |
-| `strategies/candidate_flow.py` | AVG、FALL 共用背景分 K、當日歸屬、即時報價及整輪耗時紀錄 |
+| `strategies/broken.py` | BROKEN 固定窗口、價差上限、low/close 連續確認及當分鐘 open 檢查 |
+| `strategies/candidate_flow.py` | 三策略共用背景分 K、獨立候選與淘汰、送單仲裁、即時報價及整輪耗時紀錄 |
 | `runtime_environment.py` | 本機檔案／S3 準備、延後載入股票池、互動／非互動登入及登出清理 |
 | `marketdata_transport.py` | 日內行情 HTTP 連線及讀取逾時；需與主程式放在同一層 |
 | `docker_space/generate_docker_strategy.py` | 檢查語法、同步共用程式與策略檔案、產生小型 Docker 入口 |
 
 各策略透過明確的設定、當日狀態及共用服務介面取得依賴，不反向匯入主程式。共用交易狀態及鎖仍由主程式協調。
 
-實機只執行 FALL、AVG，`STRATEGY_PRIORITY` 預設為 `["FALL", "AVG"]`。為保留原本調參習慣，`FALL_*`、`AVG_*` 等參數仍在主程式。策略接收目前參數的快照；當日狀態則共用同一份 runtime。
+實機執行 FALL、AVG、BROKEN，`STRATEGY_PRIORITY` 預設為 `["FALL", "AVG", "BROKEN"]`。`FALL_*`、`AVG_*`、`BROKEN_*` 參數仍在主程式。
+
+同一股票的候選可並存，候選不取得交易歸屬、不寫入共用交易狀態檔。固定窗口失敗只停用對應策略；BROKEN 窗口通過後快取結果，不逐輪重算。三策略分K確認完成後保留進場資格至各自截止時間，每15秒以即時報價判斷入場，不因跨分鐘失效。AVG 首次確認棒的次分鐘若早於 AVG_ENTRY_START_TIME，當日只停用 AVG；剛好等於開始時間可通過。BROKEN 不再檢查次根 open；連續 low、close 確認後，只需等即時價嚴格低於跌破門檻。每檔每輪只抓一份分K及一份即時報價供所有候選使用；已確認候選不等待新分K，只有其他仍待確認的策略需要續查。跨分鐘回傳僅使用請求當時已完成的分K。BROKEN 沿用確認截止11:00、最晚入場11:01的設定。
+
+完整進場條件同輪成立時依 `FALL > AVG > BROKEN` 選擇，較高順位候選尚未就緒不阻擋其他策略。送單前暫時註冊唯一狀態，供成交回報及對帳查找；若未送單（例如交易 API Busy），釋放暫時狀態並保留其他候選。已嘗試送單後固定當日歸屬，包含拒單、委託中、結果未知及已成交，不切換策略或重送。風控與平倉均依實際送單策略執行。`STRATEGY_CANDIDATE` 記錄候選，`STRATEGY_LOCKED` 僅在嘗試送單後記錄。
 
 FALL 僅依 `FALL_ENTRY_CONFIRM_BARS` 連續確認根數判斷。只計訊號窗口結束後、low 嚴格低於昨收的完整分K；單根跌幅再大也不能提前確認。
 
@@ -53,6 +58,7 @@ strategies/
     __init__.py
     fall.py
     avg.py
+    broken.py
     candidate_flow.py
 ```
 
