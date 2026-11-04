@@ -38,3 +38,4 @@ execute_strategy_broken_high_falling_docker_v17.py
 /Z_ORB_ONE/docker_space/runtime_environment.py
 /Z_ORB_ONE/docker_space/marketdata_transport.py
 /Z_ORB_ONE/docker_space/strategies/
+/Z_ORB_ONE/tests/
