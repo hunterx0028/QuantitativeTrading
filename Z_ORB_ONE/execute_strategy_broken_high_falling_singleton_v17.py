@@ -90,6 +90,10 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
 STRATEGY_PRIORITY = ["FALL", "AVG", "BROKEN"]
+# 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
+ENABLE_AVG = True
+ENABLE_FALL = False
+ENABLE_BROKEN = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率與 09:30 前根數先分階段檢查
 AVG_STAGE_1_START_TIME = (9, 0)
@@ -2109,7 +2113,24 @@ def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = N
     return max(times)
 
 
+def is_strategy_enabled(strategy_type: str) -> bool:
+    """策略開關僅控制新進場，不影響持倉平倉。"""
+    return {
+        STRATEGY_AVG: ENABLE_AVG,
+        STRATEGY_FALL: ENABLE_FALL,
+        STRATEGY_BROKEN: ENABLE_BROKEN,
+    }.get(strategy_type, False)
+
+
+def validate_strategy_switches() -> None:
+    for name in ('ENABLE_AVG', 'ENABLE_FALL', 'ENABLE_BROKEN'):
+        if type(globals()[name]) is not bool:
+            raise ValueError(f'{name} 必須為 True/False')
+
+
 def try_open_position(state: Dict[str, Any], mysdk):
+    if not is_strategy_enabled(state.get('strategy_type')):
+        return
     # 候選可並存；共享流程在送單前登記唯一狀態，其他策略不得繞過交易歸屬。
     with ORDER_STATE_LOCK:
         owner = ACTIVE_ORDER_STATES.get(state.get('symbol_code_with_suf'))
@@ -2954,14 +2975,23 @@ def main(*, runtime_mode: str | None = None):
     sdk = None
 
     try:
+        validate_strategy_switches()
+        for strategy in (STRATEGY_AVG, STRATEGY_FALL, STRATEGY_BROKEN):
+            print(f'[STRATEGY_SWITCH] {strategy}={"ON" if is_strategy_enabled(strategy) else "OFF"}')
+        if not any(is_strategy_enabled(s) for s in (STRATEGY_AVG, STRATEGY_FALL, STRATEGY_BROKEN)):
+            print('所有策略已關閉，今日不啟動交易。')
+            return
         stock_data = environment.prepare_stock_data()
         selected_stocks = stock_data.selected_stocks
         market_previous_close_indices = stock_data.market_previous_close_indices
         total_stocks = stock_data.total_stocks
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
-        validate_avg_config()
-        validate_fall_config()
-        validate_broken_config()
+        if ENABLE_AVG:
+            validate_avg_config()
+        if ENABLE_FALL:
+            validate_fall_config()
+        if ENABLE_BROKEN:
+            validate_broken_config()
         wait_until_main_start_time()
         TRADE_API_DEGRADED_EVENT.clear()
         AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})

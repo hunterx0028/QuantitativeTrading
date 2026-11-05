@@ -89,6 +89,14 @@ def merge_cache(cache_dir=DEFAULT_CACHE_DIR):
     print(f'完成：{target}\n來源檔數={len(sources)} 股票數={len(minute)} '
           f'股票分K數={sum(len(rows) for rows in minute.values())} '
           f'重複筆數={duplicates} 其中內容衝突={conflicts}')
+    # 去重索引的 key 已正規化為台北時間；同股票同日期只累計一次。
+    daily_stock_counts = {}
+    for rows in tables.get('minute_raw_by_symbol', {}).values():
+        for day in {key[:10] for key in rows}:
+            daily_stock_counts[day] = daily_stock_counts.get(day, 0) + 1
+    print('每日可待測不重複股票數（當日至少一筆分K，未套用策略篩選）：')
+    for day, count in sorted(daily_stock_counts.items()):
+        print(f'{day} 可待測股票數={count}')
     return target
 
 

@@ -5,7 +5,7 @@
 STAGE_4 須連續設定根數 low < average，
 確認後以緊接下一根 open 入場。
 average 僅採 API 欄位，不補算。
-從入場棒下一根起檢查出場；本根 low 更新的保護價於下一根生效。
+從入場棒起檢查出場；本根 low 更新的保護價於下一根生效。
 """
 
 # avg 模式的回測
@@ -487,7 +487,8 @@ def evaluate_candidates(
         protect_trigger = Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_PROFIT_PER)) / 100)
         raw_protected_stop = float(Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_LOSS_PER)) / 100))
         protected_stop = ceil_price_to_tick(raw_protected_stop, get_profit_trail_tick_size(raw_protected_stop))
-        first_exit_check_idx = entry_idx + 1
+        # 入場棒 open 已成交，該棒即須檢查固定停損；low 更新的保護價仍於下一根生效。
+        first_exit_check_idx = entry_idx
         for i in range(first_exit_check_idx, len(dt_values)):
             bar_time = dt_values[i]
             if (

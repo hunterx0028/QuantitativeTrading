@@ -64,9 +64,15 @@ class SharedCandidateFlow:
             raise ValueError(f"STRATEGY_PRIORITY 必須各包含 {sorted(supported)} 一次")
         if a.STOCK_DATA_SOURCE not in ("T", "S"):
             raise ValueError("STOCK_DATA_SOURCE 必須為 T/S")
-        for row in a.total_stocks if a.STOCK_DATA_SOURCE == "T" else a.selected_stocks:
-            self.rows[a.get_pure_symbol(row[0])[1]] = row
+        if any(self.strategy_enabled(strategy) for strategy in a.STRATEGY_PRIORITY):
+            for row in a.total_stocks if a.STOCK_DATA_SOURCE == "T" else a.selected_stocks:
+                self.rows[a.get_pure_symbol(row[0])[1]] = row
         self.initialized = True
+
+    def strategy_enabled(self, strategy):
+        # 舊版入口未提供開關時，維持所有策略開啟的既有行為。
+        check = self.namespace.get('is_strategy_enabled')
+        return check(strategy) if check is not None else True
 
     def fetch_candles(self, row, sdk):
         a = self.api
@@ -119,6 +125,8 @@ class SharedCandidateFlow:
         """只淘汰失效策略；全部失效或已有委託才停止該股票的候選掃描。"""
         a = self.api
         disabled = self.disabled.setdefault(symbol, set())
+        disabled.update(strategy for strategy in a.STRATEGY_PRIORITY
+                        if not self.strategy_enabled(strategy))
         for strategy, deadline in self.strategy_deadlines():
             if (now.hour, now.minute) > deadline:
                 disabled.add(strategy)
@@ -153,7 +161,7 @@ class SharedCandidateFlow:
         candidates = self.candidates.get(symbol, {})
         disabled = self.disabled.get(symbol, set())
         for strategy in a.STRATEGY_PRIORITY:
-            if strategy in disabled:
+            if strategy in disabled or not self.strategy_enabled(strategy):
                 continue
             state = candidates.get(strategy)
             if state is None or (strategy == a.STRATEGY_FALL and not state.get('fall_entry_confirmed_time')):
