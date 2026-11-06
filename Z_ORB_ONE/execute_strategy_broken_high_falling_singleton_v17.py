@@ -2151,11 +2151,11 @@ def try_open_position(state: Dict[str, Any], mysdk):
                 or float(state["last_price"]) >= float(state["yesterday_close_price"])):
             return
     elif is_broken_strategy(state):
+        # 即時價與門檻的比較統一由SharedCandidateFlow處理，此處不重複檢查。
         if (not state.get('broken_entry_time')
                 or datetime.fromisoformat(state['broken_entry_time']) > now_tpe()
                 or not finite_positive(state.get('broken_trigger_price'))
-                or not finite_positive(state.get('last_price'))
-                or Decimal(str(state['last_price'])) >= Decimal(str(state['broken_trigger_price']))):
+                or not finite_positive(state.get('last_price'))):
             return
     elif is_avg_strategy(state):
         if not AVG_RUNTIME.session_state.get("active"):

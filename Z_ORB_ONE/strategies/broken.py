@@ -77,8 +77,7 @@ class BrokenConfig:
             dt = bar['dt']
             if not entry_start <= dt <= deadline:
                 continue
-            if (Decimal(str(bar['low'])) >= trigger
-                    or Decimal(str(bar['close'])) >= trigger):
+            if Decimal(str(bar['close'])) >= trigger:
                 count, last = 0, None
                 continue
             if dt.second or dt.microsecond or counts[dt] != 1:

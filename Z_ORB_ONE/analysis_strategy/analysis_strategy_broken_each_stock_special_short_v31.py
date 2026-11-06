@@ -2,8 +2,8 @@
 
 SIGNAL_START_TIME～SIGNAL_END_TIME 分 K 必須逐分鐘完整且唯一，low 全部高於昨收；
 區間最高 high 減最低 low 不得超過昨收的 MAX_SIGNAL_RANGE_PERCENT%。
-SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 連續 TRIGGER_CONFIRM_BARS 根 low、close 均跌破
-TRIGGER_DROP_PERCENT 門檻，確認後於次分鐘 open 放空，不限制 open 與門檻的關係。
+SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 連續 TRIGGER_CONFIRM_BARS 根 close 嚴格跌破
+TRIGGER_DROP_PERCENT 門檻，確認後保留資格，從次分鐘起等待首根 open 嚴格低於門檻才放空。
 固定啟用獲利保護與追蹤停利；本根 low 更新的保護價下一根生效，反彈觸價按出場線、跳空按 open 平倉。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
@@ -35,7 +35,7 @@ SIGNAL_END_TIME = (9, 20)  # 含此分鐘
 MAX_SIGNAL_RANGE_PERCENT = 3.3  # 訊號窗口最高 high 減最低 low，不得超過昨收的此百分比（含等於）
 ENTRY_DEADLINE = (11, 0)  # 訊號截止（含），最晚於截止時間的次分鐘 open 入場
 TRIGGER_DROP_PERCENT = 1.5
-TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 low 與 close 均嚴格低於門檻
+TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 close 嚴格低於門檻
 OPTIMIZE_LOSS_PER_LOWER = 1.5  # 固定停損百分比，亦用於漲停入場限制
 OPTIMIZE_PROFIT_PER_LOWER = 5.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
 PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比，固定啟動獲利保護
@@ -475,6 +475,7 @@ def evaluate_candidates(
             'signal_dt': candidate['signal_dt'],
             'trigger_price': candidate['trigger_price'],
             'signal_range_percent': candidate['signal_range_percent'],
+            'signal_high_to_entry_open_gap_percent': candidate['signal_high_to_entry_open_gap_percent'],
             'effective_stop_loss': effective_stop_loss,
             'stop_loss_price': stop_loss_price,
         }
@@ -536,14 +537,15 @@ def evaluate_candidates(
 
 
 def find_entry(today_bars, previous_close):
-    """low、close 連續確認後於次分鐘 open 入場，不再以 open 過濾或重新計數。"""
+    """close 連續確認後鎖定資格，等待首根open低於門檻，最晚截止次分鐘。"""
     window = get_signal_window(today_bars)
     if window is None:
         return None
     previous = Decimal(str(previous_close))
     if any(Decimal(str(bar['low'])) <= previous for bar in window):
         return None
-    signal_range = (Decimal(str(max(bar['high'] for bar in window)))
+    signal_high = Decimal(str(max(bar['high'] for bar in window)))
+    signal_range = (signal_high
                     - Decimal(str(min(bar['low'] for bar in window))))
     if signal_range > previous * Decimal(str(MAX_SIGNAL_RANGE_PERCENT)) / 100:
         return None
@@ -556,8 +558,7 @@ def find_entry(today_bars, previous_close):
     for bar in today_bars:
         if not start <= bar['dt'] <= deadline:
             continue
-        if (Decimal(str(bar['low'])) >= trigger
-                or Decimal(str(bar['close'])) >= trigger):
+        if Decimal(str(bar['close'])) >= trigger:
             consecutive_count = 0
             previous_confirm_dt = None
             continue
@@ -572,17 +573,29 @@ def find_entry(today_bars, previous_close):
         previous_confirm_dt = signal_dt
         if consecutive_count < TRIGGER_CONFIRM_BARS:
             continue
-        next_dt = signal_dt + timedelta(minutes=1)
-        next_bars = [other for other in today_bars if other['dt'] == next_dt]
-        if len(next_bars) != 1:
+        # 確認資格鎖定，不因之後close反彈而重算；缺分鐘不補價，續看下一根open。
+        entry_bar = None
+        for pending_bar in today_bars:
+            entry_dt = pending_bar['dt']
+            if not signal_dt < entry_dt <= deadline + timedelta(minutes=1):
+                continue
+            if (entry_dt.second or entry_dt.microsecond
+                    or sum(other['dt'] == entry_dt for other in today_bars) != 1):
+                return None
+            if Decimal(str(pending_bar['open'])) < trigger:
+                entry_bar = pending_bar
+                break
+        if entry_bar is None:
             return None
-        entry_bar = next_bars[0]
         return entry_bar, float(entry_bar['open']), {
             'activation_dt': start,
             'signal_dt': signal_dt,
             'previous_close': previous_close,
             'trigger_price': float(trigger),
             'signal_range_percent': float(signal_range / previous * 100),
+            # （固定訊號窗口最高價 - 實際入場棒open）÷ 昨收 × 100，保留正負號。
+            'signal_high_to_entry_open_gap_percent': float(
+                (signal_high - Decimal(str(entry_bar['open']))) / previous * 100),
             'entry_intrabar': False,
         }
     return None
@@ -603,7 +616,7 @@ def count_testable_stock_dates(bars_by_date, target_date):
 
 
 def collect_trade_candidates(stock_name, bars_by_date, target_date):
-    """每檔每日僅取首次通過連續確認訊號的次分鐘 open。"""
+    """每檔每日僅取首次連續確認後，首根低於門檻的open。"""
     candidates = []
     for date_key in sorted(bars_by_date):
         current_date = date.fromisoformat(date_key)
@@ -682,7 +695,9 @@ def validate_settings():
 
 def format_result_line(stock_name, date_str, signal, result):
     prefix = (
-        f'{date_str} 價差={signal["signal_range_percent"]:.4f}% {stock_name} 昨收={signal["previous_close"]:.2f} '
+        f'{date_str} 價差={signal["signal_range_percent"]:.4f}% '
+        f'區間={signal["signal_high_to_entry_open_gap_percent"]:.4f}% '
+        f'{stock_name} 昨收={signal["previous_close"]:.2f} '
         f'門檻={signal["trigger_price"]:.4f} 訊號={signal["signal_dt"]:%H:%M} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
@@ -762,11 +777,11 @@ def main():
              f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 追蹤停利啟動={OPTIMIZE_PROFIT_PER_LOWER:g}% '
              f'獲利保護固定啟用（浮盈{PROTECT_PROFIT_PER:g}%後保住{PROTECT_LOSS_PER:g}%毛利） '
              f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
-             f'訊號截止={ENTRY_DEADLINE}（含，次分鐘 open 入場） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
+             f'訊號截止={ENTRY_DEADLINE}（含，最晚入場為截止次分鐘open） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
              f'{SIGNAL_START_TIME[0]:02d}:{SIGNAL_START_TIME[1]:02d}～'
              f'{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K須逐分鐘完整且唯一，low 全部嚴格高於昨收；區間最高 high 減最低 low 須 <= 昨收 × {MAX_SIGNAL_RANGE_PERCENT:g}%；昨收為前一有資料交易日最後一根 close。',
              f'確認時間次分鐘～'
-             f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 low、close 均 < 昨收 × (1 - {TRIGGER_DROP_PERCENT:g}%)，最後確認棒須在訊號截止內，次分鐘 open 入場，不限制 open 是否低於門檻。缺次分鐘 K 當日略過，每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
+             f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 close < 昨收 × (1 - {TRIGGER_DROP_PERCENT:g}%)，最後確認棒須在訊號截止內。確認後保留資格，從次分鐘起等待首根open嚴格低於門檻入場，最晚至截止次分鐘；open等於或高於門檻、缺棒則繼續等待，不重新計數，逾時略過。每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
              '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。']
     results = []
     testable_count = 0

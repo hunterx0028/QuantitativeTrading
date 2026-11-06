@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from esun_marketdata import EsunMarketdata
 
 SLOPE_CUTOFF_TIME = (9, 20)  # 此時間完成開盤至此前（不含）的 average 斜率檢核
+MAX_MISSING_SLOPE_BARS = 5  # 09:00（含）至截止時間（不含）允許缺少的分K數；average無效亦計入，0表示不可缺棒
 MAX_NORMALIZED_SLOPE = 0.06  # %／分鐘；昨收正規化斜率須嚴格小於此值才允許入場
 
 # IDE 直接執行時在此調整；三階段各自獨立設定。
@@ -692,16 +693,22 @@ def save_shared_api_cache(cache_path, payload, raw):
 
 
 def calculate_early_average_slope(today_bars):
-    """09:00 起、截止時間之前的 API average 對實際分鐘數作最小平方法回歸。"""
+    """缺棒在容許範圍內才以有效 average 對實際分鐘數回歸，不補值。"""
     samples = []
+    seen_minutes = set()
+    expected_count = SLOPE_CUTOFF_TIME[0] * 60 + SLOPE_CUTOFF_TIME[1] - 9 * 60
     for bar in today_bars:
         dt = bar['dt']
         if not (9, 0) <= (dt.hour, dt.minute) < SLOPE_CUTOFF_TIME:
             continue
+        minute = dt.hour * 60 + dt.minute
+        if dt.second or dt.microsecond or minute in seen_minutes:
+            return None  # 重複或非整分鐘資料不能用來抵銷缺棒。
+        seen_minutes.add(minute)
         average = parse_average(bar.get('average'))
         if average is not None:
-            samples.append((dt.hour * 60 + dt.minute + dt.second / 60, average))
-    if len(samples) < 2:
+            samples.append((minute, average))
+    if expected_count - len(samples) > MAX_MISSING_SLOPE_BARS or len(samples) < 2:
         return None
     x = np.array([sample[0] for sample in samples], dtype=float)
     y = np.array([sample[1] for sample in samples], dtype=float)
@@ -725,6 +732,8 @@ def is_normalized_slope_allowed(slope):
 
 
 def validate_settings():
+    if type(MAX_MISSING_SLOPE_BARS) is not int or MAX_MISSING_SLOPE_BARS < 0:
+        raise ValueError('MAX_MISSING_SLOPE_BARS 必須為非負整數')
     for value in (PROTECT_PROFIT_PER, PROTECT_LOSS_PER, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('獲利保護及追蹤停利百分比必須介於 0 與 100 之間')
@@ -754,6 +763,8 @@ def validate_settings():
         raise ValueError('STAGE_1 起算時間不可晚於入場截止時間')
     if SLOPE_CUTOFF_TIME > ENTRY_DEADLINE:
         raise ValueError('斜率檢核時間不可晚於入場截止時間')
+    if SLOPE_CUTOFF_TIME[0] * 60 + SLOPE_CUTOFF_TIME[1] - 9 * 60 < 2:
+        raise ValueError('斜率區間從09:00起至少須包含2分鐘')
     for value in (OPTIMIZE_LOSS_PER_LOWER, OPTIMIZE_PROFIT_PER_LOWER):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('停損停利百分比必須介於 0 與 100 之間')
@@ -845,6 +856,7 @@ def main():
              f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
              f'入場前高低價差須大於昨收的{MIN_PRE_ENTRY_RANGE_PERCENT:g}% '
              f'正規化斜率須<{MAX_NORMALIZED_SLOPE:+g}%/分鐘 '
+             f'斜率區間=09:00至{SLOPE_CUTOFF_TIME[0]:02d}:{SLOPE_CUTOFF_TIME[1]:02d}（不含截止），最多缺{MAX_MISSING_SLOPE_BARS}根（含average無效，不補值，至少2筆有效資料） '
              f'STAGE_4=連續{STAGE_4_MIN_BARS}根low低於average，下一根open入場']
     results = []
     testable_count = 0

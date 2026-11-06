@@ -379,7 +379,9 @@ class SharedCandidateFlow:
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
                     continue
             else:
-                if (not state.get('broken_entry_time') or datetime.fromisoformat(state['broken_entry_time']) > now
+                # BROKEN 的即時價門檻集中於此；不符時保留候選，等待後續報價。
+                if (not state.get('broken_entry_time')
+                        or datetime.fromisoformat(state['broken_entry_time']) > now
                         or Decimal(str(px)) >= Decimal(str(state['broken_trigger_price']))):
                     continue
             loss_percent, _ = a.get_optimize_loss_profit_percent(state)
