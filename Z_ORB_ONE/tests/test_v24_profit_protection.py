@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from test_v18_profit_protection import load_functions
+from backtest_test_support import load_functions
 
 
 SOURCE = Path(__file__).resolve().parents[1] / 'analysis_strategy' / 'analysis_strategy_broken_each_stock_special_short_v24.py'

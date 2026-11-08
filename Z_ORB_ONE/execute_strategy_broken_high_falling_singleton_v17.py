@@ -30,8 +30,6 @@ stock_data = None
 selected_stocks = []
 market_previous_close_indices = {}
 total_stocks = []
-from strategies.fall import FallConfig, FallRuntime, evaluate_fall_quote
-from strategies.fall import fetch_screen_result, fetch_quote_snapshot
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.broken import BrokenConfig
@@ -70,7 +68,6 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 # 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_AVG = 'AVG'
-STRATEGY_FALL = 'FALL'
 STRATEGY_BROKEN = 'BROKEN'
 
 TRADE_SIDE_SHORT = 'SHORT'
@@ -89,13 +86,12 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["FALL", "AVG", "BROKEN"]
+STRATEGY_PRIORITY = ["AVG", "BROKEN"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
-ENABLE_FALL = False
 ENABLE_BROKEN = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
-AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率與 09:30 前根數先分階段檢查
+AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
 AVG_STAGE_1_START_TIME = (9, 0)
 AVG_STAGE_1_MIN_BARS = 8
 AVG_STAGE_2_MIN_BARS = 8
@@ -112,7 +108,6 @@ AVG_ENTRY_DEADLINE = (11, 0)
 AVG_CANDLE_POLL_SECOND = 15  # 每分鐘於此秒數取一次完整分K，例如 09:33:15
 AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS = 0.105  # 最多約 9.5 次請求／秒
 AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
-AVG_MIN_MINUTE_BARS_BEFORE_0930 = 20
 AVG_STOP_LOSS_PERCENT = 2.0
 AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
@@ -122,30 +117,12 @@ AVG_PROTECT_LOSS_PER = 1.5
 AVG_PROFIT_BACK_PERCENT = 0.5
 AVG_PROFIT_TARGET_PERCENT = 1.0
 
-# FALL 設定；候選不占用股票。完整分K連續跌破昨收確認後，合法即時報價低於昨收才入場。
-# 共用股票池由 STOCK_DATA_SOURCE 決定。
-FALL_SIGNAL_START_TIME = (9, 3)
-FALL_SIGNAL_END_TIME = (9, 13)  # 包含此根 close，09:11 後才能開始篩選
-FALL_MAX_MISSING_SIGNAL_BARS = 1  # 訊號窗口（含起訖）最多允許缺少的分K數；0 表示不可缺棒，不補價
-FALL_MIN_DROP_PERCENT = 1.0
-FALL_MAX_DEVIATION_RATIO = 0.25
-FALL_ENTRY_DEADLINE = (11, 50)  # 含此分鐘
-FALL_ENTRY_CONFIRM_BARS = 2  # 訊號成立後連續完整分K的 low 嚴格低於昨收
-FALL_CANDLE_PUBLISH_DELAY_SECONDS = 15
-FALL_TAKE_PROFIT_PERCENT = 5.0
-FALL_FORCE_CLOSE_TIME = (12, 50)
-FALL_ENTRY_ORDER_QUANTITY = 1
-FALL_PROTECT_PROFIT_PER = 2.5
-FALL_PROTECT_LOSS_PER = 1.5
-FALL_PROFIT_BACK_PERCENT = 0.5
-FALL_PROFIT_TARGET_PERCENT = 1.0
-
 # BROKEN：對齊回測 v31；確認棒截止含 11:00，資格保留至最晚 11:01 入場。
 BROKEN_SIGNAL_START_TIME = (9, 0)
 BROKEN_SIGNAL_END_TIME = (9, 20)
 BROKEN_MAX_SIGNAL_RANGE_PERCENT = 3.3
 BROKEN_ENTRY_DEADLINE = (11, 0)
-BROKEN_TRIGGER_DROP_PERCENT = 1.5
+BROKEN_TRIGGER_DROP_PERCENT = 15.0  # 昨收至跌停價的向下距離為100；15表示該距離的15%
 BROKEN_TRIGGER_CONFIRM_BARS = 3
 BROKEN_STOP_LOSS_PERCENT = 1.5
 BROKEN_TAKE_PROFIT_PERCENT = 5.0
@@ -191,9 +168,7 @@ ORDER_RESULTS_PENDING_FUTURE: Optional[Future] = None
 MARKETDATA_STOP_EVENT = threading.Event()
 
 AVG_RUNTIME = AvgRuntime()
-FALL_RUNTIME = FallRuntime()
-FALL_SCREEN_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fall-screen")
-FALL_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fall-quote")
+CANDIDATE_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="candidate-quote")
 # 所有日內 stock REST 共用節流，保留 600/min 額度餘裕，避免兩套背景工作互相超額。
 STOCK_REST_REQUEST_INTERVAL_SECONDS = 0.125
 MARKETDATA_HTTP_TIMEOUT_SECONDS = 5.0  # 日內行情 HTTP 逾時預算（秒）；分K、即時報價及 ticker 共用
@@ -275,10 +250,6 @@ class RateLimitedStockRest:
         return getattr(self.client, name)
 
 
-def is_fall_strategy(state):
-    return bool(state and state.get("strategy_type") == STRATEGY_FALL)
-
-
 def is_broken_strategy(state):
     return bool(state and state.get("strategy_type") == STRATEGY_BROKEN)
 
@@ -309,7 +280,7 @@ def validate_broken_config():
 def all_order_states(states):
     """市場計算仍用原 states，委託與對帳採每檔唯一的交易擁有者。"""
     with ORDER_STATE_LOCK:
-        return {**states, **FALL_RUNTIME.states}
+        return dict(states)
 
 
 def refresh_active_order_states(states):
@@ -318,137 +289,10 @@ def refresh_active_order_states(states):
         ACTIVE_ORDER_STATES.update(all_order_states(states))
 
 
-def get_fall_config() -> FallConfig:
-    """從現有調參入口建立設定快照，避免模組持有過期的參數副本。"""
-    return FallConfig(
-        stock_data_source=STOCK_DATA_SOURCE,
-        signal_start_time=FALL_SIGNAL_START_TIME,
-        signal_end_time=FALL_SIGNAL_END_TIME,
-        min_drop_percent=FALL_MIN_DROP_PERCENT,
-        max_deviation_ratio=FALL_MAX_DEVIATION_RATIO,
-        max_missing_signal_bars=FALL_MAX_MISSING_SIGNAL_BARS,
-        entry_deadline=FALL_ENTRY_DEADLINE,
-        candle_publish_delay_seconds=FALL_CANDLE_PUBLISH_DELAY_SECONDS,
-        take_profit_percent=FALL_TAKE_PROFIT_PERCENT,
-        force_close_time=FALL_FORCE_CLOSE_TIME,
-        entry_order_quantity=FALL_ENTRY_ORDER_QUANTITY,
-        protect_profit_per=FALL_PROTECT_PROFIT_PER,
-        protect_loss_per=FALL_PROTECT_LOSS_PER,
-        profit_back_percent=FALL_PROFIT_BACK_PERCENT,
-        profit_target_percent=FALL_PROFIT_TARGET_PERCENT,
-    )
-
-
-def validate_fall_config():
-    if type(FALL_ENTRY_CONFIRM_BARS) is not int or FALL_ENTRY_CONFIRM_BARS < 1:
-        raise ValueError('FALL_ENTRY_CONFIRM_BARS 必須為正整數')
-    get_fall_config().validate(time_tuple_to_minutes)
-
-
-def initialize_fall_session():
-    validate_fall_config()
-    FALL_RUNTIME.reset()
-    count = FALL_RUNTIME.initialize_universe(
-        total_stocks if STOCK_DATA_SOURCE == "T" else selected_stocks,
-        get_pure_symbol,
-    )
-    trade_log("FALL_UNIVERSE", source=STOCK_DATA_SOURCE, count=count)
-
-
-def find_fall_signal(bars, now_local):
-    """沿用主程式參數，將純訊號計算交給 FALL 模組。"""
-    return get_fall_config().find_signal(bars, now_local)
-
-
-def fetch_fall_screen_result(row, realtime_sdk):
-    return fetch_screen_result(
-        row, realtime_sdk, get_pure_symbol=get_pure_symbol,
-        get_stock_rest_client=get_stock_rest_client, now=now_tpe,
-        parse_candles=parse_avg_candles, find_signal=find_fall_signal,
-        get_up_down_price=get_up_down_price,
-    )
-
-
-def register_fall_candidate(row, signal, ticker, states):
-    FALL_RUNTIME.register_candidate(
-        row, signal, ticker, states, get_pure_symbol=get_pure_symbol,
-        all_order_states=all_order_states, finite_positive=finite_positive,
-        build_initial_state=build_initial_state, entry_order_quantity=FALL_ENTRY_ORDER_QUANTITY,
-        strategy_type=STRATEGY_FALL, trade_side_short=TRADE_SIDE_SHORT,
-        order_state_lock=ORDER_STATE_LOCK, refresh_active_order_states=refresh_active_order_states,
-        persist_state=lambda symbol, state: atomic_write_json(state_path(symbol), state),
-        trade_log=trade_log,
-    )
-
-
-def fall_work_pending():
-    return FALL_RUNTIME.work_pending()
-
-
-def process_fall_round(states, realtime_sdk, mysdk, *, request_quotes):
-    now_local = now_tpe()
-    FALL_RUNTIME.process_screen_round(
-        states, realtime_sdk, now_local=now_local, config=get_fall_config(),
-        get_pure_symbol=get_pure_symbol, register_candidate=register_fall_candidate,
-        screen_executor=FALL_SCREEN_EXECUTOR, fetch_screen_result=fetch_fall_screen_result,
-        trade_log=trade_log,
-    )
-
-    # 獨立於 AVG 分K循環，持倉/未知委託始終保留。
-    FALL_RUNTIME.process_position_round(
-        mysdk, now_local=now_local, entry_deadline=FALL_ENTRY_DEADLINE,
-        order_state_lock=ORDER_STATE_LOCK, monotonic=time.monotonic,
-        quote_round_interval_seconds=QUOTE_ROUND_INTERVAL_SECONDS,
-        force_close_time_reached=force_close_time_reached, close_position=try_close_position,
-        check_open_status=check_open_status,
-        persist_state=lambda symbol, state: atomic_write_json(state_path(symbol), state),
-        apply_quote=apply_fall_quote, trade_log=trade_log,
-    )
-
-
-def fetch_fall_quote(symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_CANDIDATE):
-    return fetch_quote_snapshot(
-        symbol, realtime_sdk, priority, monotonic=time.monotonic,
-        get_realtime_price=get_realtime_price,
-    )
-
-
-def poll_fall_quotes_once(realtime_sdk):
-    """只抓行情與發布最新快照；不得在行情執行緒操作委託或交易狀態。"""
-    FALL_RUNTIME.poll_quotes_once(
-        realtime_sdk, now=now_tpe, order_state_lock=ORDER_STATE_LOCK,
-        entry_deadline=FALL_ENTRY_DEADLINE, quote_round_interval_seconds=QUOTE_ROUND_INTERVAL_SECONDS,
-        fetch_quote=fetch_fall_quote, position_executor=AVG_POSITION_QUOTE_EXECUTOR,
-        candidate_executor=FALL_QUOTE_EXECUTOR, position_priority=MARKETDATA_PRIORITY_POSITION,
-        candidate_priority=MARKETDATA_PRIORITY_CANDIDATE, trade_log=trade_log,
-    )
-
-
-def start_fall_quote_poller(realtime_sdk):
-    def worker():
-        while not FALL_RUNTIME.quote_poller_stop_event.is_set():
-            try:
-                poll_fall_quotes_once(realtime_sdk)
-            except Exception as exc:
-                trade_log("FALL_QUOTE_POLLER_ERROR", error=True, error_msg=repr(exc))
-            FALL_RUNTIME.quote_poller_stop_event.wait(0.5)
-    thread = threading.Thread(target=worker, name="fall-quotes", daemon=True)
-    thread.start()
-    return thread
-
-
-def apply_fall_quote(state, quote, mysdk):
-    action = evaluate_fall_quote(
-        state, quote, now=now_tpe,
-        finite_positive=finite_positive, check_open_status=check_open_status,
-    )
-    if action == "invalid":
-        return
-    if action == "close":
-        try_close_position(state, mysdk)
-    elif action == "open":
-        try_open_position(state, mysdk)
-    atomic_write_json(state_path(state["symbol_code_with_suf"]), state)
+def fetch_candidate_quote(symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_CANDIDATE):
+    """共用候選行情工作只取資料，並保留請求開始時間。"""
+    requested_at = time.monotonic()
+    return get_realtime_price(symbol, realtime_sdk, priority=priority), requested_at
 
 
 class OrderOutcomeUnknown(RuntimeError):
@@ -513,7 +357,6 @@ def get_avg_strategy() -> AvgStrategy:
             AVG_ENTRY_START_TIME=AVG_ENTRY_START_TIME,
             AVG_FORCE_CLOSE_TIME=AVG_FORCE_CLOSE_TIME,
             AVG_MAX_NORMALIZED_SLOPE=AVG_MAX_NORMALIZED_SLOPE,
-            AVG_MIN_MINUTE_BARS_BEFORE_0930=AVG_MIN_MINUTE_BARS_BEFORE_0930,
             AVG_MIN_PRE_ENTRY_RANGE_PERCENT=AVG_MIN_PRE_ENTRY_RANGE_PERCENT,
             AVG_PROFIT_BACK_PERCENT=AVG_PROFIT_BACK_PERCENT,
             AVG_PROFIT_TARGET_PERCENT=AVG_PROFIT_TARGET_PERCENT,
@@ -1133,10 +976,8 @@ def validate_avg_config() -> None:
 
 
 def resolve_session_entry_mode(now_local: datetime) -> Optional[int]:
-    """AVG 於自身監看時間啟動；FALL 篩選須先完成以確定候選歸屬。"""
+    """AVG 於自身監看時間啟動；各策略候選由共用流程獨立評估。"""
     if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
-        return None
-    if not FALL_RUNTIME.session_state['screen_complete']:
         return None
     if (now_local.hour, now_local.minute) > AVG_ENTRY_DEADLINE:
         return ENTRY_MODE_NO_TRADE
@@ -1192,7 +1033,7 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
         protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
     else:
         protect_profit_text = f"{entry_price * (1 - protect_profit_per / 100.0):.2f}"
-    stop_text = "入場次根完整分K high>average，均價上方第一個tick為參考價" if is_fall_strategy(state) and flat_price <= 0 else f"{flat_price:.2f}"
+    stop_text = f"{flat_price:.2f}"
     print(f"停損：{stop_text}，保本：{protect_profit_text}，停利：{profit_price:.2f}")
 
 
@@ -1214,19 +1055,15 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_fall_strategy(state) or is_broken_strategy(state):
+        if is_avg_strategy(state) or is_broken_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
             )
-            if is_fall_strategy(state):
-                # FALL 不使用百分比停損；0 表示尚未啟動獲利保護，校正成交價時不放寬已生效保護價。
-                state["flat_price"] = float(state.get("flat_price", 0) or 0)
-            else:
-                state["flat_price"] = min(
-                    ceil_price_to_tick_value(entry_price + open_stop_loss),
-                    state.get("limit_up_price", 0),
-                )
+            state["flat_price"] = min(
+                ceil_price_to_tick_value(entry_price + open_stop_loss),
+                state.get("limit_up_price", 0),
+            )
         else:
             state["profit_price"] = max(entry_price - open_profit_target, state.get("limit_down_price", 0))
             state["flat_price"] = min(entry_price + open_stop_loss, state.get("limit_up_price", 0))
@@ -1244,7 +1081,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
 
 
 def get_realtime_price(stock_id: str, realtime_sdk, *, priority=MARKETDATA_PRIORITY_CANDIDATE):
-    # FALL 與 AVG 持倉使用同一報價入口與共用節流。
+    # 候選與持倉使用同一報價入口與共用節流。
     round_key = int((time.time() - 5) // QUOTE_ROUND_INTERVAL_SECONDS)
     with QUOTE_CACHE_LOCK:
         cached = QUOTE_ROUND_CACHE.get(stock_id)
@@ -1738,7 +1575,7 @@ def get_stock_rest_client(realtime_sdk: EsunMarketdata):
 def print_rest_quote_rate_limit_estimate(states: Dict[str, Dict[str, Any]]) -> None:
     avg_count = len(get_avg_candidate_stocks())
     print(f"共用股票池 {avg_count} 檔；未歸屬股票每分鐘取分K，候選及持倉報價每 {QUOTE_ROUND_INTERVAL_SECONDS:g} 秒一輪")
-    print(f"同棒策略優先順序：{STRATEGY_PRIORITY}；歸屬固定，FALL 持倉每分鐘續查完整分K作均價停損")
+    print(f"同棒策略優先順序：{STRATEGY_PRIORITY}；歸屬固定，持倉使用即時報價風控")
     print(f"共用行情節流：每 {STOCK_REST_REQUEST_INTERVAL_SECONDS:g} 秒最多啟動一筆，約 {60 / STOCK_REST_REQUEST_INTERVAL_SECONDS:.0f} 次／分鐘")
     print(f"日內行情額度：每分鐘 {INTRADAY_MARKET_DATA_RATE_LIMIT_PER_MINUTE} 次；超額需求依優先序排隊")
 
@@ -1829,9 +1666,6 @@ def atomic_write_json(path: str, data: Dict[str, Any], *, strict: bool = False):
     - 對 Windows / OneDrive 可能的鎖定 (PermissionError) 做重試與 fallback（先嘗試刪除目標檔，再替換；最後備援以複製內容覆蓋）。
     - 確保臨時檔在任何情況下都會適當清理，避免殘留。
     """
-    # FALL 與 AVG 狀態分檔，不得互相覆蓋委託狀態。
-    if is_fall_strategy(data) and path.endswith('.SymbolState.json'):
-        path = path[:-len('.SymbolState.json')] + '.FALL.SymbolState.json'
     abs_path = os.path.abspath(path)
     ensure_dir(os.path.dirname(abs_path))
 
@@ -2015,8 +1849,6 @@ def get_current_entry_mode() -> int:
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if is_broken_strategy(state):
         return BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT
-    if is_fall_strategy(state):
-        return 0.0, FALL_TAKE_PROFIT_PERCENT  # FALL 停損改依完整分K均價；0 不作百分比入場空間篩選
     if is_avg_strategy(state):
         return AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT
     raise ValueError("未支援的策略，無法取得停損停利設定")
@@ -2025,8 +1857,6 @@ def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, floa
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
     if is_broken_strategy(state):
         return BROKEN_PROTECT_LOSS_PER, BROKEN_PROTECT_PROFIT_PER
-    if is_fall_strategy(state):
-        return FALL_PROTECT_LOSS_PER, FALL_PROTECT_PROFIT_PER
     if is_avg_strategy(state):
         return AVG_PROTECT_LOSS_PER, AVG_PROTECT_PROFIT_PER
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
@@ -2035,8 +1865,6 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_broken_strategy(state):
         return BROKEN_FORCE_CLOSE_TIME
-    if is_fall_strategy(state):
-        return FALL_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
         return AVG_FORCE_CLOSE_TIME
     return FORCE_EXIT_TIME
@@ -2045,8 +1873,6 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
     if strategy_type == STRATEGY_BROKEN or is_broken_strategy(state):
         return BROKEN_ENTRY_ORDER_QUANTITY
-    if strategy_type == STRATEGY_FALL or is_fall_strategy(state):
-        return FALL_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
         return AVG_ENTRY_ORDER_QUANTITY
     return 0
@@ -2084,8 +1910,6 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if is_broken_strategy(state):
         return divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)
-    if is_fall_strategy(state):
-        return FALL_ENTRY_DEADLINE
     if is_avg_strategy(state):
         return AVG_ENTRY_DEADLINE
     return AVG_ENTRY_DEADLINE
@@ -2093,13 +1917,9 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        fall_start = divmod(FALL_SIGNAL_END_TIME[0] * 60 + FALL_SIGNAL_END_TIME[1] + 1, 60)
-        return min(fall_start, AVG_ENTRY_START_TIME, get_broken_config().entry_start)
+        return min(AVG_ENTRY_START_TIME, get_broken_config().entry_start)
     if is_broken_strategy(state):
         return get_broken_config().entry_start
-    if is_fall_strategy(state):
-        minutes = FALL_SIGNAL_END_TIME[0] * 60 + FALL_SIGNAL_END_TIME[1] + 1
-        return divmod(minutes, 60)
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
         return AVG_ENTRY_START_TIME
     return AVG_ENTRY_START_TIME
@@ -2107,7 +1927,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [FALL_ENTRY_DEADLINE, AVG_ENTRY_DEADLINE,
+    times = [AVG_ENTRY_DEADLINE,
              divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
@@ -2117,13 +1937,12 @@ def is_strategy_enabled(strategy_type: str) -> bool:
     """策略開關僅控制新進場，不影響持倉平倉。"""
     return {
         STRATEGY_AVG: ENABLE_AVG,
-        STRATEGY_FALL: ENABLE_FALL,
         STRATEGY_BROKEN: ENABLE_BROKEN,
     }.get(strategy_type, False)
 
 
 def validate_strategy_switches() -> None:
-    for name in ('ENABLE_AVG', 'ENABLE_FALL', 'ENABLE_BROKEN'):
+    for name in ('ENABLE_AVG', 'ENABLE_BROKEN'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
 
@@ -2142,15 +1961,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
         return
     if TRADE_API_DEGRADED_EVENT.is_set():
         return  # 當日停止新風險；保留已送出的委託與持倉對帳。
-    if is_fall_strategy(state):
-        if (not state.get('fall_candidate')
-                or not state.get("fall_entry_confirmed_time")
-                or datetime.fromisoformat(state['fall_entry_confirmed_time']) > now_tpe()
-                or not finite_positive(state.get("last_price"))
-                or not finite_positive(state.get("yesterday_close_price"))
-                or float(state["last_price"]) >= float(state["yesterday_close_price"])):
-            return
-    elif is_broken_strategy(state):
+    if is_broken_strategy(state):
         # 即時價與門檻的比較統一由SharedCandidateFlow處理，此處不重複檢查。
         if (not state.get('broken_entry_time')
                 or datetime.fromisoformat(state['broken_entry_time']) > now_tpe()
@@ -2175,8 +1986,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
     entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：trigger price
     qty = state.get("qty", 1)
 
-    # 入場安全條件：若入場前當日曾觸及任一漲跌停，立即取消當日交易。
-    # 這也避免入場前留下的整日 high/low 在成交後誤觸發停利判斷。
+    # BROKEN 保留入場前觸及漲跌停的排除。
     try:
         high_price = float(state.get("high_price"))
         low_price = float(state.get("low_price"))
@@ -2215,7 +2025,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
     if side == TRADE_SIDE_SHORT:
         limit_up_price = state.get("limit_up_price", 0)  # 漲停
-        if not is_fall_strategy(state) and (entry_ref_px + open_stop_loss) >= limit_up_price:
+        if (entry_ref_px + open_stop_loss) >= limit_up_price:
             state["traded"] = True
             state["entry_time"] = now_tpe().isoformat()
             atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
@@ -2321,10 +2131,6 @@ def try_close_position(state: Dict[str, Any], mysdk):
                 print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
         return
 
-    if is_fall_strategy(state) and state.get("fall_average_stop_triggered"):
-        submit_exit_order(state, mysdk, "fall_average_stop")
-        return
-
     # 獲利保護及逐步追蹤停利仍使用即時報價。
     _protect_profit_stop(state)         # 獲利達標後，把停損推進到保住獲利的位置
 
@@ -2409,9 +2215,7 @@ def _protect_profit_stop(state: Dict[str, Any]):
         protected_flat_price = entry_price * (1 - protect_loss_per / 100.0)
         if is_broken_strategy(state):
             protected_flat_price = ceil_price_to_tick_value(protected_flat_price)
-        should_update = px <= protect_trigger_price and (
-            protected_flat_price < current_flat_price
-            or (is_fall_strategy(state) and current_flat_price <= 0))
+        should_update = px <= protect_trigger_price and protected_flat_price < current_flat_price
 
     if should_update:
         state["flat_price"] = protected_flat_price
@@ -2432,7 +2236,7 @@ def reached_stop_to_flat(state: Dict[str, Any]) -> bool:
         return False
 
     if side == TRADE_SIDE_SHORT:
-        return flat_price > 0 and px >= flat_price # FALL 的 0 表示尚未啟動獲利保護
+        return flat_price > 0 and px >= flat_price
     if side == TRADE_SIDE_LONG:
         return px <= flat_price
     return False
@@ -2512,8 +2316,6 @@ def _advance_profit_trail(state: Dict[str, Any]):
     side = state.get("side")
     target_percent = AVG_PROFIT_TARGET_PERCENT if is_avg_strategy(state) else PROFIT_TARGET_PERCENT
     back_percent = AVG_PROFIT_BACK_PERCENT if is_avg_strategy(state) else PROFIT_BACK_PERCENT
-    if is_fall_strategy(state):
-        target_percent, back_percent = FALL_PROFIT_TARGET_PERCENT, FALL_PROFIT_BACK_PERCENT
     if is_broken_strategy(state):
         target_percent, back_percent = BROKEN_PROFIT_TARGET_PERCENT, BROKEN_PROFIT_BACK_PERCENT
     target_step = calculate_profit_trail_step(px, target_percent)
@@ -2757,15 +2559,11 @@ def initialize_states(
     force_rebuild_state: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     if strategy_type != STRATEGY_AVG:
-        raise ValueError("initialize_states 僅供 AVG；FALL 使用獨立註冊流程")
+        raise ValueError("initialize_states 僅供 AVG")
     states: Dict[str, Dict[str, Any]] = {}
     filtered_stocks: List[Tuple[str, int, float, float, float, float, str, float, Tuple[int, int]]] = []
     for symbolStr, qty, v1, v2, v3, v4, industry_code, volatility_value, streak_tuple in stocks:
         _, code_with_suf = get_pure_symbol(symbolStr)
-        if (code_with_suf in FALL_RUNTIME.candidate_symbols
-                or code_with_suf in FALL_RUNTIME.screen_pending_symbols):
-            trade_log("AVG_CANDIDATE_RESERVED_FOR_FALL", symbol=code_with_suf)
-            continue
         normalized_industry_code = str(industry_code).zfill(2)
         market_index_key, market_index_config = "", {}
 
@@ -2953,7 +2751,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
         # print(f"========= 開始下一輪 {nxt.strftime('%Y-%m-%d %H:%M:%S')} =========")
 
 
-
 # ============ 呼叫 ============
 def main(*, runtime_mode: str | None = None):
     """本機與 Docker 共用入口；此程式只支援每日啟動一次。"""
@@ -2970,15 +2767,14 @@ def main(*, runtime_mode: str | None = None):
     sys.stdout = TeeStream(original_stdout, capture_buffer)
     sys.stderr = TeeStream(original_stderr, capture_buffer)
     states = {}
-    fall_quote_thread = None
     realtime_sdk = None
     sdk = None
 
     try:
         validate_strategy_switches()
-        for strategy in (STRATEGY_AVG, STRATEGY_FALL, STRATEGY_BROKEN):
+        for strategy in (STRATEGY_AVG, STRATEGY_BROKEN):
             print(f'[STRATEGY_SWITCH] {strategy}={"ON" if is_strategy_enabled(strategy) else "OFF"}')
-        if not any(is_strategy_enabled(s) for s in (STRATEGY_AVG, STRATEGY_FALL, STRATEGY_BROKEN)):
+        if not any(is_strategy_enabled(s) for s in (STRATEGY_AVG, STRATEGY_BROKEN)):
             print('所有策略已關閉，今日不啟動交易。')
             return
         stock_data = environment.prepare_stock_data()
@@ -2988,8 +2784,6 @@ def main(*, runtime_mode: str | None = None):
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         if ENABLE_AVG:
             validate_avg_config()
-        if ENABLE_FALL:
-            validate_fall_config()
         if ENABLE_BROKEN:
             validate_broken_config()
         wait_until_main_start_time()
@@ -3020,7 +2814,6 @@ def main(*, runtime_mode: str | None = None):
             trade_log("LOGIN_ERROR", error=True, api="trade", error_msg=repr(exc))
             raise
 
-        FALL_RUNTIME.reset()
         states = {}  # 候選條件成立後才建立固定策略的交易狀態。
         refresh_active_order_states(states)
         # SharedCandidateFlow 負責所有策略的背景行情排程。
@@ -3051,12 +2844,9 @@ def main(*, runtime_mode: str | None = None):
         except Exception as exc:
             trade_log("SHUTDOWN_AUDIT_FAILED", error=True, error_msg=repr(exc))
         MARKETDATA_STOP_EVENT.set()
-        FALL_RUNTIME.quote_poller_stop_event.set()
         for executor in (AVG_CANDLE_EXECUTOR, AVG_POSITION_QUOTE_EXECUTOR, MARKET_SCAN_EXECUTOR,
-                         FALL_SCREEN_EXECUTOR, FALL_QUOTE_EXECUTOR):
+                         CANDIDATE_QUOTE_EXECUTOR):
             executor.shutdown(wait=False, cancel_futures=True)
-        if fall_quote_thread is not None:
-            fall_quote_thread.join(timeout=2.0)
         environment.safe_logout_sdk("Esun Trade SDK", sdk)
         environment.safe_logout_sdk("EsunMarketdata", realtime_sdk)
         sys.stdout = original_stdout

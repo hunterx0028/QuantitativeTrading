@@ -21,7 +21,6 @@ class AvgConfig:
     AVG_ENTRY_START_TIME: tuple[int, int]
     AVG_FORCE_CLOSE_TIME: tuple[int, int]
     AVG_MAX_NORMALIZED_SLOPE: float
-    AVG_MIN_MINUTE_BARS_BEFORE_0930: int
     AVG_MIN_PRE_ENTRY_RANGE_PERCENT: float
     AVG_PROFIT_BACK_PERCENT: float
     AVG_PROFIT_TARGET_PERCENT: float
@@ -43,7 +42,7 @@ class AvgConfig:
     MARKETDATA_PRIORITY_POSITION: int
     STRATEGY_AVG: str
     TRADE_SIDE_SHORT: str
-    # 舊三策略入口的相容參數；AVG/FALL 入口不再依賴 LOWER。
+    # 舊三策略入口的相容參數；AVG/BROKEN 入口不再依賴 LOWER。
     STRATEGY_START_LOWER_3: tuple[int, int] | None = None
 
 
@@ -116,7 +115,7 @@ class AvgStrategy:
         if stage_1_start_minutes > entry_deadline_minutes or slope_cutoff_minutes > entry_deadline_minutes:
             raise ValueError("AVG 階段起算及斜率檢核時間不可晚於入場截止")
         for value in (self.config.AVG_STAGE_1_MIN_BARS, self.config.AVG_STAGE_2_MIN_BARS, self.config.AVG_STAGE_3_MIN_BARS,
-                      self.config.AVG_STAGE_4_MIN_BARS, self.config.AVG_MIN_MINUTE_BARS_BEFORE_0930):
+                      self.config.AVG_STAGE_4_MIN_BARS):
             if type(value) is not int or value <= 0:
                 raise ValueError("AVG 分K根數必須為正整數")
         if type(self.config.AVG_ENTRY_ORDER_QUANTITY) is not int or self.config.AVG_ENTRY_ORDER_QUANTITY != 1:
@@ -300,14 +299,7 @@ class AvgStrategy:
         state["last_price"] = current["close"]
         state["last_price_time"] = now_local.isoformat()
 
-        before_0930 = sum(1 for bar in bars if (bar["dt"].hour, bar["dt"].minute) < (9, 30))
-        state["minute_bars_before_0930"] = before_0930
-        state["minute_bars_checked"] = True
-        state["minute_bars_eligible"] = before_0930 >= self.config.AVG_MIN_MINUTE_BARS_BEFORE_0930
-
-        if not state["minute_bars_eligible"]:
-            self.mark_avg_state_traded(state, "insufficient_minute_bars_before_0930", count=before_0930)
-            return
+        state["minute_bars_eligible"] = True
         slope = self.calculate_avg_normalized_slope(bars, float(state.get("yesterday_close_price", 0) or 0))
         if slope is None or not slope < self.config.AVG_MAX_NORMALIZED_SLOPE:
             self.mark_avg_state_traded(state, "avg_slope_rejected", normalized_slope=slope)

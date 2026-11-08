@@ -40,6 +40,8 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
                      overwrite: bool = OVERWRITE_OUTPUT) -> list[Path]:
     """Validate and copy application code; runtime files remain external/S3."""
     source_dir, output_dir = Path(source_dir).resolve(), Path(output_dir).resolve()
+    if source_dir == output_dir or source_dir.is_relative_to(output_dir):
+        raise ValueError("Output directory must not contain the application source directory")
     input_path = source_dir / strategy_filename
     output_path = output_dir / output_name_for(strategy_filename)
     if not overwrite and output_path.exists():
@@ -47,7 +49,7 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
     shared_modules = [source_dir / name for name in ("runtime_environment.py", "marketdata_transport.py")]
     required = [input_path, *shared_modules]
     required += [source_dir / "strategies" / name for name in
-                 ("__init__.py", "fall.py", "avg.py", "broken.py", "candidate_flow.py")]
+                 ("__init__.py", "avg.py", "broken.py", "candidate_flow.py")]
     for path in required:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -57,6 +59,19 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
     entry_point = transform_singleton_to_docker(input_path.read_text(encoding="utf-8"), strategy_filename)
     compile(entry_point, str(output_path), "exec")
+    # strategies 是產生的程式副本；來源移除的模組不應繼續留在部署目錄。
+    strategy_output = output_dir / "strategies"
+    expected = {path.relative_to(source_dir / "strategies")
+                for path in payload if path.is_relative_to(source_dir / "strategies")}
+    stale_modules = [path for path in strategy_output.rglob("*.py")
+                     if path.relative_to(strategy_output) not in expected]
+    # 在任何寫入／刪除前驗證完整路徑，避免符號連結把操作導向輸出目錄外。
+    for destination in [output_path, *(output_dir / path.relative_to(source_dir) for path in payload),
+                        *stale_modules]:
+        resolved = destination.resolve()
+        if (not resolved.is_relative_to(output_dir)
+                or resolved.is_relative_to(source_dir / "strategies")):
+            raise ValueError(f"Unsafe output path: {destination}")
     destinations = []
     for path in payload:
         destination = output_dir / path.relative_to(source_dir)
@@ -68,6 +83,8 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text(entry_point, encoding="utf-8", newline="\n")
     destinations.append(output_path)
+    for path in stale_modules:
+        path.unlink()
     return destinations
 
 

@@ -1,8 +1,8 @@
-"""BROKEN：昨收上方窗口成立後，等待連續完整分K跌破百分比門檻。"""
+"""BROKEN：昨收上方窗口成立後，向跌停方向跌破門檻；昨收至跌停距離為100。"""
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 import math
 
 
@@ -29,12 +29,27 @@ class BrokenConfig:
             raise ValueError("BROKEN 時間需滿足 起點 <= 確認 < 觸發起點 <= 訊號截止")
         if type(self.confirm_bars) is not int or self.confirm_bars < 1:
             raise ValueError("BROKEN_CONFIRM_BARS 必須為正整數")
-        if not math.isfinite(self.drop_percent) or not 0 < self.drop_percent < 100:
-            raise ValueError("BROKEN_DROP_PERCENT 必須介於 0 與 100")
+        if not math.isfinite(self.drop_percent) or not 0 < self.drop_percent <= 100:
+            raise ValueError("BROKEN_DROP_PERCENT 必須大於0且不超過100（昨收至跌停距離為100）")
         if not math.isfinite(self.max_signal_range_percent) or self.max_signal_range_percent < 0:
             raise ValueError("BROKEN_MAX_SIGNAL_RANGE_PERCENT 必須為有限非負數")
 
-    def check_window(self, bars, previous_close, now):
+    def trigger_price(self, previous_close, limit_down_price=None):
+        """實機採API跌停價；離線未提供時，沿用v31的跌停價tick計算。"""
+        previous = Decimal(str(previous_close))
+        if limit_down_price is None:
+            raw = float(previous_close) * 0.90
+            tick = next(t for upper, t in ((10, .01), (50, .05), (100, .1),
+                                          (500, .5), (1000, 1), (math.inf, 5)) if raw < upper)
+            tick = Decimal(str(tick))
+            limit_down_price = (Decimal(str(raw)) / tick).quantize(
+                Decimal('1'), rounding=ROUND_CEILING) * tick
+        lower = Decimal(str(limit_down_price))
+        if not lower.is_finite() or not 0 < lower <= previous:
+            raise ValueError('BROKEN 跌停價必須為正數且不高於昨收')
+        return previous - (previous - lower) * Decimal(str(self.drop_percent)) / 100
+
+    def check_window(self, bars, previous_close, now, *, limit_down_price=None):
         """固定窗口僅需檢核一次；回傳 (窗口資料, 當日此策略已失效)。"""
         base = now.replace(second=0, microsecond=0)
         start = base.replace(hour=self.signal_start[0], minute=self.signal_start[1])
@@ -56,19 +71,20 @@ class BrokenConfig:
         if spread > previous * Decimal(str(self.max_signal_range_percent)) / 100:
             return None, True
         return {'broken_activation_time': (end + timedelta(minutes=1)).isoformat(),
-                'broken_trigger_price': float(previous * (1 - Decimal(str(self.drop_percent)) / 100)),
+                'broken_trigger_price': float(self.trigger_price(previous_close, limit_down_price)),
                 'broken_signal_range_percent': float(spread / previous * 100)}, False
 
-    def find_candidate(self, bars, previous_close, now, *, window_metrics=None):
+    def find_candidate(self, bars, previous_close, now, *, window_metrics=None, limit_down_price=None):
         """已完成分K確認即保留資格；不要求次根 open，也不因跨分鐘失效。"""
         if window_metrics is None:
-            window_metrics, rejected = self.check_window(bars, previous_close, now)
+            window_metrics, rejected = self.check_window(
+                bars, previous_close, now, limit_down_price=limit_down_price)
             if window_metrics is None:
                 return None, rejected
         base = now.replace(second=0, microsecond=0)
         completed = [bar for bar in bars if bar['dt'] < base]
         # 使用昨收與參數重新建立 Decimal 門檻，不以快取 float 判斷邊界。
-        trigger = Decimal(str(previous_close)) * (1 - Decimal(str(self.drop_percent))/100)
+        trigger = self.trigger_price(previous_close, limit_down_price)
         entry_start = base.replace(hour=self.entry_start[0], minute=self.entry_start[1])
         deadline = base.replace(hour=self.signal_deadline[0], minute=self.signal_deadline[1])
         counts = Counter(bar['dt'] for bar in completed)

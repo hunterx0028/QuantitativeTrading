@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from threading import Lock
-from .fall import FallWindowError, find_fall_average_stop
 
 
 class SharedCandidateFlow:
@@ -22,8 +21,6 @@ class SharedCandidateFlow:
         self.tickers = {}
         self.scan_timing = None
         self.scan_timing_lock = Lock()
-        self.fall_stop_candles = {}
-        self.last_fall_stop_scan = {}
 
     def record_scan_completion(self, batch, future):
         """背景完成時記錄時間；僅由主流程列印整輪摘要。"""
@@ -57,7 +54,7 @@ class SharedCandidateFlow:
 
     def initialize(self):
         a = self.api
-        supported = {a.STRATEGY_FALL, a.STRATEGY_AVG}
+        supported = {a.STRATEGY_AVG}
         if hasattr(a, 'STRATEGY_BROKEN'):
             supported.add(a.STRATEGY_BROKEN)
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
@@ -93,8 +90,7 @@ class SharedCandidateFlow:
 
     def strategy_deadlines(self):
         a = self.api
-        deadlines = [(a.STRATEGY_FALL, a.FALL_ENTRY_DEADLINE),
-                     (a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE)]
+        deadlines = [(a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE)]
         if hasattr(a, 'STRATEGY_BROKEN'):
             deadlines.append((a.STRATEGY_BROKEN, divmod(
                 a.BROKEN_ENTRY_DEADLINE[0] * 60 + a.BROKEN_ENTRY_DEADLINE[1] + 1, 60)))
@@ -112,13 +108,6 @@ class SharedCandidateFlow:
                 a.trade_log("AVG_SLOPE_REJECTED", symbol=symbol, normalized_slope=slope)
                 return checks
             checks['slope'] = slope
-        if 'count' not in checks and hm >= (9, 30):
-            count = sum((b['dt'].hour, b['dt'].minute) < (9, 30) for b in completed)
-            if count < a.AVG_MIN_MINUTE_BARS_BEFORE_0930:
-                disabled.add(a.STRATEGY_AVG)
-                a.trade_log("AVG_MINUTE_BARS_REJECTED", symbol=symbol, count=count)
-                return checks
-            checks['count'] = count
         return checks
 
     def prune(self, symbol, now):
@@ -149,7 +138,6 @@ class SharedCandidateFlow:
         state = a.build_initial_state(row[0], a.get_entry_order_quantity(strategy_type=strategy),
                                       *row[2:6], str(row[6]).zfill(2), '', up, down, *row[8], strategy)
         state.update(fields, minute_bars_eligible=True, side=a.TRADE_SIDE_SHORT,
-                     fall_candidate=strategy == a.STRATEGY_FALL,
                      candidate_time=now.isoformat())
         candidates[strategy] = state
         a.trade_log('STRATEGY_CANDIDATE', symbol=symbol, strategy=strategy, **fields)
@@ -164,7 +152,7 @@ class SharedCandidateFlow:
             if strategy in disabled or not self.strategy_enabled(strategy):
                 continue
             state = candidates.get(strategy)
-            if state is None or (strategy == a.STRATEGY_FALL and not state.get('fall_entry_confirmed_time')):
+            if state is None:
                 return True
         return False
 
@@ -188,25 +176,10 @@ class SharedCandidateFlow:
         bars = a.parse_avg_candles(response.get('data'), cutoff)
         completed = [b for b in bars if b['dt'] < cutoff.replace(second=0, microsecond=0)]
         candidates = self.candidates.setdefault(symbol, {})
-        fall_end = now.replace(hour=a.FALL_SIGNAL_END_TIME[0], minute=a.FALL_SIGNAL_END_TIME[1], second=0, microsecond=0)
-        if a.STRATEGY_FALL not in disabled:
-            if (a.STRATEGY_FALL not in candidates
-                    and cutoff >= fall_end + timedelta(minutes=1, seconds=a.FALL_CANDLE_PUBLISH_DELAY_SECONDS)):
-                try:
-                    signal = a.find_fall_signal(completed, cutoff)
-                except FallWindowError as exc:
-                    a.trade_log('FALL_WINDOW_REJECTED', symbol=symbol, reason=str(exc))
-                    signal = None
-                if signal:
-                    self.add_candidate(symbol, a.STRATEGY_FALL, signal, ticker, now)
-                else:
-                    disabled.add(a.STRATEGY_FALL)
-            if a.STRATEGY_FALL in candidates:
-                self.confirm_fall_entry(candidates[a.STRATEGY_FALL], response, cutoff)
         if a.STRATEGY_AVG not in disabled:
             checks = self.check_avg_eligibility(symbol, completed, float(row[5]), cutoff, disabled)
             if (a.STRATEGY_AVG not in disabled and a.STRATEGY_AVG not in candidates
-                    and 'slope' in checks and 'count' in checks
+                    and 'slope' in checks
                     and (now.hour, now.minute) >= a.AVG_CANDLES_START_TIME):
                 signal = a.get_avg_strategy().find_avg_entry_signal(completed, cutoff, candidate_only=True)
                 if signal:
@@ -226,7 +199,7 @@ class SharedCandidateFlow:
             config = a.get_broken_config()
             metrics = self.broken_windows.get(symbol)
             if metrics is None:
-                metrics, rejected = config.check_window(bars, float(row[5]), cutoff)
+                metrics, rejected = config.check_window(bars, float(row[5]), cutoff, limit_down_price=down)
                 if rejected:
                     disabled.add(a.STRATEGY_BROKEN)
                     a.trade_log('BROKEN_WINDOW_REJECTED', symbol=symbol)
@@ -234,100 +207,14 @@ class SharedCandidateFlow:
                     self.broken_windows[symbol] = metrics
                     a.trade_log('BROKEN_WINDOW_PASSED', symbol=symbol, **metrics)
             if metrics is not None and a.STRATEGY_BROKEN not in candidates:
-                signal, rejected = config.find_candidate(bars, float(row[5]), cutoff, window_metrics=metrics)
+                signal, rejected = config.find_candidate(
+                    bars, float(row[5]), cutoff, window_metrics=metrics, limit_down_price=down)
                 if rejected:
                     disabled.add(a.STRATEGY_BROKEN)
                     a.trade_log('BROKEN_REJECTED', symbol=symbol, reason='invalid_or_expired_signal')
                 elif signal:
                     self.add_candidate(symbol, a.STRATEGY_BROKEN, signal, ticker, now)
         self.prune(symbol, now)
-
-    def confirm_fall_entry(self, state, response, now):
-        """FALL 候選獨立確認跌破昨收，尚不取得交易歸屬。"""
-        a = self.api
-        symbol = state['symbol_code_with_suf']
-        if state.get('fall_entry_confirmed_time') or state.get('traded') or state.get('in_position'):
-            return
-        if (now.hour, now.minute) > a.FALL_ENTRY_DEADLINE:
-            return
-        start = now.replace(hour=a.FALL_SIGNAL_END_TIME[0], minute=a.FALL_SIGNAL_END_TIME[1],
-                            second=0, microsecond=0) + timedelta(minutes=1)
-        completed = [bar for bar in a.parse_avg_candles(response.get('data'), now)
-                     if start <= bar['dt'] < now.replace(second=0, microsecond=0)]
-        counts = {}
-        for bar in completed:
-            counts[bar['dt']] = counts.get(bar['dt'], 0) + 1
-        count, last = 0, None
-        previous = Decimal(str(state['yesterday_close_price']))
-        for bar in completed:
-            dt = bar['dt']
-            if (dt.second or dt.microsecond or counts[dt] != 1
-                    or Decimal(str(bar['low'])) >= previous):
-                count, last = 0, None
-                continue
-            if last is None or dt != last + timedelta(minutes=1):
-                count = 0
-            count += 1
-            last = dt
-            if count >= a.FALL_ENTRY_CONFIRM_BARS:
-                state['fall_entry_confirmed_time'] = (dt + timedelta(minutes=1)).isoformat()
-                a.trade_log('FALL_ENTRY_CONFIRMED', symbol=symbol, confirm_bars=count,
-                            confirmed_time=state['fall_entry_confirmed_time'])
-                return
-
-    def fetch_fall_stop_candles(self, state, sdk):
-        """持倉分K不查 ticker，沿用持倉優先序及共用 HTTP 逾時。"""
-        a = self.api
-        requested_at = a.now_tpe()
-        with a.marketdata_priority(a.MARKETDATA_PRIORITY_POSITION):
-            response = a.get_stock_rest_client(sdk).intraday.candles(
-                symbol=state['symbol_code'], timeframe='1', sort='asc')
-        return response, requested_at
-
-    def process_fall_average_stops(self, states, sdk, trade_sdk, now):
-        """確認成交後每分鐘取完整分K；主執行緒記錄觸發並走既有平倉流程。"""
-        a = self.api
-        for symbol, future in list(self.fall_stop_candles.items()):
-            if not future.done():
-                continue
-            self.fall_stop_candles.pop(symbol)
-            state = states.get(symbol)
-            if (not state or not state.get('in_position') or not state.get('entry_fill_confirmed')
-                    or state.get('traded') or state.get('exit_order_pending')
-                    or state.get('fall_average_stop_triggered')):
-                continue
-            try:
-                response, requested_at = future.result()
-                # 請求跨分鐘時，當時仍未完成的棒不可當作完整棒使用。
-                cutoff = min(requested_at, now)
-                bars = a.parse_avg_candles(response.get('data'), cutoff)
-                entry_time = datetime.fromisoformat(state.get('entry_first_fill_time') or state['entry_time'])
-                if entry_time.tzinfo is None and now.tzinfo is not None:
-                    entry_time = entry_time.replace(tzinfo=now.tzinfo)
-                signal = find_fall_average_stop(bars, entry_time, cutoff)
-                if signal:
-                    state.update(fall_average_stop_triggered=True,
-                                 fall_average_stop_bar_time=signal['bar_time'],
-                                 fall_average_stop_price=signal['reference_price'])
-                    self.persist(state)
-                    a.trade_log('FALL_AVERAGE_STOP_TRIGGERED', symbol=symbol, **signal,
-                                action='submit_market_exit')
-                    a.try_close_position(state, trade_sdk)
-            except Exception as exc:
-                a.trade_log('FALL_AVERAGE_STOP_ERROR', error=True, symbol=symbol,
-                            error_msg=repr(exc), action='retry_next_scan_quotes_continue')
-        minute = now.strftime('%Y-%m-%d %H:%M')
-        for symbol, state in list(states.items()):
-            if (not a.is_fall_strategy(state) or not state.get('in_position')
-                    or not state.get('entry_fill_confirmed') or state.get('traded')
-                    or state.get('exit_order_pending') or state.get('fall_average_stop_triggered')
-                    or a.force_close_time_reached(state)):
-                continue
-            if (symbol not in self.fall_stop_candles and self.last_fall_stop_scan.get(symbol) != minute
-                    and now.second >= a.FALL_CANDLE_PUBLISH_DELAY_SECONDS):
-                self.last_fall_stop_scan[symbol] = minute
-                self.fall_stop_candles[symbol] = a.AVG_POSITION_QUOTE_EXECUTOR.submit(
-                    self.fetch_fall_stop_candles, state, sdk)
 
     def update_quote(self, state, quote, now):
         px, opening, high, low, close, average, bid, ask = quote
@@ -362,20 +249,15 @@ class SharedCandidateFlow:
                 continue
             self.update_quote(state, quote, now)
             if high >= state['limit_up_price'] or low <= state['limit_down_price']:
-                self.disabled.setdefault(symbol, set()).update(a.STRATEGY_PRIORITY)
+                self.disabled.setdefault(symbol, set()).add(strategy)
                 self.prune(symbol, now)
-                a.trade_log('CANDIDATE_LIMIT_TOUCHED', symbol=symbol)
-                return
+                a.trade_log('CANDIDATE_LIMIT_TOUCHED', symbol=symbol, strategy=strategy)
+                continue
             if not a.check_open_status(state):
                 continue
             if not a.get_entry_check_start_time(state) <= (now.hour, now.minute) <= a.get_entry_check_end_time(state):
                 continue
-            if a.is_fall_strategy(state):
-                if (not state.get('fall_entry_confirmed_time')
-                        or datetime.fromisoformat(state['fall_entry_confirmed_time']) > now
-                        or Decimal(str(px)) >= Decimal(str(state['yesterday_close_price']))):
-                    continue
-            elif a.is_avg_strategy(state):
+            if a.is_avg_strategy(state):
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
                     continue
             else:
@@ -385,7 +267,7 @@ class SharedCandidateFlow:
                         or Decimal(str(px)) >= Decimal(str(state['broken_trigger_price']))):
                     continue
             loss_percent, _ = a.get_optimize_loss_profit_percent(state)
-            if not a.is_fall_strategy(state) and float(px) * (1 + loss_percent / 100) >= state['limit_up_price']:
+            if float(px) * (1 + loss_percent / 100) >= state['limit_up_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
                 a.trade_log('CANDIDATE_STOP_SPACE_REJECTED', symbol=symbol, strategy=strategy)
                 continue
@@ -432,12 +314,13 @@ class SharedCandidateFlow:
             except Exception as exc:
                 a.trade_log('CANDIDATE_SCAN_ERROR', error=True, symbol=symbol, error_msg=repr(exc))
         self.print_scan_timing()
-        self.process_fall_average_stops(states, sdk, trade_sdk, now)
         minute = now.strftime('%Y-%m-%d %H:%M')
-        start = min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME, (9, 30),
-                    divmod(a.FALL_SIGNAL_END_TIME[0] * 60 + a.FALL_SIGNAL_END_TIME[1] + 1, 60))
-        if hasattr(a, 'STRATEGY_BROKEN'):
-            start = min(start, a.get_broken_config().entry_start)
+        starts = []
+        if self.strategy_enabled(a.STRATEGY_AVG):
+            starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
+        if hasattr(a, 'STRATEGY_BROKEN') and self.strategy_enabled(a.STRATEGY_BROKEN):
+            starts.append(a.get_broken_config().entry_start)
+        start = min(starts) if starts else (23, 59)
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND
                 and (now.hour, now.minute) >= start):
@@ -479,8 +362,7 @@ class SharedCandidateFlow:
             try:
                 state = states.get(symbol)
                 if state:
-                    if state.get('in_position') and (a.force_close_time_reached(state) or state.get('exit_retry_reason')
-                                                     or state.get('fall_average_stop_triggered')):
+                    if state.get('in_position') and (a.force_close_time_reached(state) or state.get('exit_retry_reason')):
                         a.try_close_position(state, trade_sdk)
                     if state.get('traded') and not state.get('in_position'):
                         continue
@@ -489,7 +371,7 @@ class SharedCandidateFlow:
                 if request_quotes and symbol not in self.quotes:
                     position = bool(state and state.get('in_position'))
                     priority = a.MARKETDATA_PRIORITY_POSITION if position else a.MARKETDATA_PRIORITY_CANDIDATE
-                    executor = a.AVG_POSITION_QUOTE_EXECUTOR if position else a.FALL_QUOTE_EXECUTOR
-                    self.quotes[symbol] = executor.submit(a.fetch_fall_quote, symbol, sdk, priority)
+                    executor = a.AVG_POSITION_QUOTE_EXECUTOR if position else a.CANDIDATE_QUOTE_EXECUTOR
+                    self.quotes[symbol] = executor.submit(a.fetch_candidate_quote, symbol, sdk, priority)
             except Exception as exc:
                 a.trade_log('CANDIDATE_MONITOR_ERROR', error=True, symbol=symbol, error_msg=repr(exc))
