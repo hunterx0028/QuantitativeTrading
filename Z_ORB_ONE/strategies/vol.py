@@ -1,4 +1,4 @@
-"""VOL: v35 completed-minute signals followed by a 15-second quote entry.
+"""VOL: v35 completed-minute close<average confirmation, then quote entry.
 
 Historical volume uses minute candles, not daily volume (which can include
 other sessions). All stored/computed volumes use shares; API minute lots x1000.
@@ -137,9 +137,9 @@ class VolConfig:
                 continue  # Still inspect later completed bars for limit-up touches.
             if signal is not None:
                 average = positive(bar.get('average'))
-                if average is not None and Decimal(str(bar['low'])) < Decimal(str(average)):
+                if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
                     candidate = {**signal, 'vol_average_break_time': bar['dt'].isoformat(),
-                                 'vol_average_break_low': bar['low'], 'vol_average_break_average': average,
+                                 'vol_average_break_close': bar['close'], 'vol_average_break_average': average,
                                  'vol_entry_time': (bar['dt'] + timedelta(minutes=1)).isoformat()}
                 continue
             volume = bar.get('volume')

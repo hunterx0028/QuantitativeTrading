@@ -8,7 +8,7 @@
 進場：轉弱價＝當日最高價 × (1 − PULLBACK_PERCENT%)。
 SIGNAL_START_TIME 起，分K close 由轉弱價上方（前一根有效分K close 嚴格高於當時轉弱價）
 跌至轉弱價（含）以下，且上述條件於該棒成立，即為轉弱訊號棒；
-其後等待分K low 嚴格低於該根 average，於跌破 average 棒的下一根有效分K open 放空。
+其後等待分K close 嚴格低於該根 average，於跌破 average 棒的下一根有效分K open 放空。
 實際入場不得晚於 ENTRY_DEADLINE（含）；每檔每日最多一筆。
 09:00起至入場前任一有效分K high曾達漲停，當日不入場；入場棒僅檢查open。
 出場：固定停損、固定停利（同根停損優先），停損出場另計滑價；12:50 open 強制平倉，缺棒順延。
@@ -451,7 +451,7 @@ def evaluate_candidates(
             'signal_dt': candidate['signal_dt'],
             'signal_close': candidate['signal_close'],
             'average_break_dt': candidate['average_break_dt'],
-            'average_break_low': candidate['average_break_low'],
+            'average_break_close': candidate['average_break_close'],
             'average_break_price': candidate['average_break_price'],
             'day_open': candidate['day_open'],
             'day_high': candidate['day_high'],
@@ -502,7 +502,7 @@ def evaluate_candidates(
 
 
 def find_entry(today_bars, previous_close, average_daily_volume):
-    """轉弱訊號後，等待後續分K low低於該根average，再於下一根有效分K open入場。"""
+    """轉弱訊號後，等待後續分K close低於該根average，再於下一根有效分K open入場。"""
     window = get_signal_window(today_bars)
     if window is None:
         return None
@@ -529,7 +529,7 @@ def find_entry(today_bars, previous_close, average_daily_volume):
     signal = None
     for bar in bars:
         if signal is not None:
-            # 轉弱訊號成立後保留資格；後續棒low低於該根average後，才於再下一根open進場。
+            # 轉弱訊號成立後保留資格；後續棒close低於該根average後，才於再下一根open進場。
             if bar['dt'] > deadline:
                 return None
             if 'average_break_dt' in signal:
@@ -540,9 +540,9 @@ def find_entry(today_bars, previous_close, average_daily_volume):
             if Decimal(str(bar['high'])) >= limit_up:
                 return None
             average = parse_positive_number(bar.get('average'))
-            if average is not None and Decimal(str(bar['low'])) < Decimal(str(average)):
+            if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
                 signal['average_break_dt'] = bar['dt']
-                signal['average_break_low'] = bar['low']
+                signal['average_break_close'] = bar['close']
                 signal['average_break_price'] = average
             continue
         if bar['dt'] > deadline:
@@ -603,7 +603,7 @@ def count_testable_stock_dates(bars_by_date, target_date):
 
 
 def collect_trade_candidates(stock_name, bars_by_date, target_date):
-    """每檔每日取首次轉弱訊號，等待後續low低於該根average，再於下一根有效分K open放空。"""
+    """每檔每日取首次轉弱訊號，等待後續close低於該根average，再於下一根有效分K open放空。"""
     candidates = []
     for date_key in sorted(bars_by_date):
         current_date = date.fromisoformat(date_key)
@@ -700,7 +700,7 @@ def format_result_line(stock_name, date_str, signal, result):
         f'開盤={signal["day_open"]:.2f} 日高={signal["day_high"]:.2f} '
         f'轉弱價={signal["trigger_price"]:.4f} 量比={signal["volume_ratio"]:.2f} '
         f'跌破確認={signal["signal_dt"]:%H:%M} close={signal["signal_close"]:.2f} '
-        f'跌破average={signal["average_break_dt"]:%H:%M} low={signal["average_break_low"]:.2f} average={signal["average_break_price"]:.4f} '
+        f'跌破average={signal["average_break_dt"]:%H:%M} close={signal["average_break_close"]:.2f} average={signal["average_break_price"]:.4f} '
         f'停損={signal["stop_loss_price"]:.2f} 停利={signal["take_profit_price"]:.2f} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
@@ -790,7 +790,7 @@ def main():
              f'的{MIN_VOLUME_RATIO:g}倍，前日資料不足{VOLUME_AVERAGE_DAYS}日則不交易。',
              f'進場：轉弱價＝當日最高價×{100 - PULLBACK_PERCENT:g}%。訊號起點後，前一根有效分K close嚴格高於當時轉弱價、'
              '本根close小於或等於轉弱價，且選股條件於本根成立，即為轉弱訊號棒；'
-             '其後等待分K low嚴格低於該根average，於跌破average棒的下一根有效分K open放空。'
+             '其後等待分K close嚴格低於該根average，於跌破average棒的下一根有效分K open放空。'
              '等待期間保留轉弱訊號資格，不重新檢查量比或因最高價更新而重設，但觸及漲停即取消當日交易。'
              '跌破當下條件未成立則不交易，須待重新站回轉弱價上方後再次跌破。'
              '最晚入場為截止時間（含），每檔每日最多一筆，資格不跨日。',

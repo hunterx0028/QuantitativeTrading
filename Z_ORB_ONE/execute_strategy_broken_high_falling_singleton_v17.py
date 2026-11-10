@@ -138,7 +138,7 @@ BROKEN_PROTECT_LOSS_PER = 1.5
 BROKEN_PROFIT_BACK_PERCENT = 0.5
 BROKEN_PROFIT_TARGET_PERCENT = 1.0
 
-# VOL: v35 minute signals; completed low<average confirmation -> 15-second quote entry.
+# VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
 VOL_SIGNAL_START_TIME = (9, 20)
 VOL_ENTRY_DEADLINE = (12, 0)
