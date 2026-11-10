@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
+from pprint import pformat
 
 MAX_LIMIT_UP_PRICE = 300.0
 MIN_LIMIT_DOWN_PRICE = 50.0
@@ -452,6 +453,8 @@ def update_selected_stocks_file(
     limit_up_records: list[tuple],
     limit_down_records: list[tuple],
     total_records: list[tuple] | None = None,
+    vol_history_by_symbol: dict | None = None,
+    vol_history_reference_date: str | None = None,
 ) -> None:
     source = stock_data_path.read_text(encoding="utf-8")
     source = ensure_selected_limit_stock_lists(source)
@@ -463,6 +466,18 @@ def update_selected_stocks_file(
             source = source.rstrip() + "\n\n" + format_stock_records_assignment("total_stocks", total_records) + "\n"
         else:
             source = replace_stock_records_assignment(source, "total_stocks", total_records)
+    # Replace the whole snapshot, including empty snapshots from old caches.
+    # Do not append fields to the legacy nine-column stock tuples.
+    for name, value in (('vol_history_by_symbol', vol_history_by_symbol or {}),
+                        ('vol_history_reference_date', vol_history_reference_date)):
+        assignment = find_assignment(source, name)
+        replacement = f'{name} = {pformat(value, sort_dicts=True)}'
+        if assignment is None:
+            source = source.rstrip() + '\n\n' + replacement + '\n'
+        else:
+            lines = source.splitlines()
+            start, end = assignment
+            source = '\n'.join(lines[:start] + replacement.splitlines() + lines[end:]) + '\n'
     stock_data_path.write_text(source, encoding="utf-8")
 
 
@@ -554,6 +569,7 @@ def main() -> None:
         raise FileNotFoundError(f"找不到快取檔案: {cache_path}")
 
     trading_dates, cached_stocks = load_cache(cache_path)
+    cache_metadata = json.loads(cache_path.read_text(encoding='utf-8'))
     ranked_records, consecutive_ranked_records = build_ranked_records(
         trading_dates,
         cached_stocks,
@@ -589,12 +605,21 @@ def main() -> None:
         selected_limit_up_stock_records,
         selected_limit_down_stock_records,
     ) = split_records_by_limit_repeat(all_ranked_stock_records)
+    pool = {record[0] for record in [*selected_stock_records, *total_stock_records]}
+    vol_history_by_symbol = {
+        stock['record'][0].split(':', 1)[1]: stock['vol_history']
+        for stock in cached_stocks
+        if isinstance(stock.get('vol_history'), dict)
+        and stock.get('record') and stock['record'][0] in pool
+    }
     update_selected_stocks_file(
         stock_data_path,
         selected_stock_records,
         selected_limit_up_stock_records,
         selected_limit_down_stock_records,
         total_stock_records,
+        vol_history_by_symbol,
+        cache_metadata.get('vol_history_reference_date'),
     )
 
     log(f"done: {output_result_path}")
@@ -602,6 +627,7 @@ def main() -> None:
     log(f"source={cache_path}")
     log(f"selected_stocks_count={len(selected_stock_records)}")
     log(f"total_stocks_count={len(total_stock_records)}")
+    log(f'vol_history_count={len(vol_history_by_symbol)}')
     log(f"selected_stocks_previous_close_total={sum_previous_close_prices(selected_stock_records)}")
 
     update_script_path = base_dir.parent / "update_stock_data_industry_indices.py"

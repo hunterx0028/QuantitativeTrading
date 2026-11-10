@@ -175,7 +175,14 @@ class AvgStrategy:
                     continue
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
-            bars.append({"dt": candle_dt, **prices, "average": average})
+            try:
+                volume = float(raw['volume'])
+                if not math.isfinite(volume) or volume < 0:
+                    volume = None
+            except (KeyError, TypeError, ValueError, OverflowError):
+                volume = None
+            # AVG/BROKEN do not depend on volume; VOL rejects missing volume separately.
+            bars.append({"dt": candle_dt, **prices, "average": average, "volume": volume})
         bars.sort(key=lambda bar: bar["dt"])
         return bars
 

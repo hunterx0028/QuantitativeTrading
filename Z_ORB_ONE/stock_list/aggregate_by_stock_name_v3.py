@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import configparser
 import json
+import sys
 import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
@@ -10,6 +11,9 @@ from pathlib import Path
 from typing import Dict
 
 from esun_marketdata import EsunMarketdata
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from strategies.vol import build_volume_history
 
 REQUEST_INTERVAL_SEC = 1
 
@@ -173,7 +177,27 @@ def get_symbol_historical_data(stock_id: str, sdk):
 
     daily_limit_states = build_daily_limit_states(response_data)
     atr = calculate_atr(response_data)
-    return daily_limit_states, atr
+    return daily_limit_states, atr, response_data
+
+
+def get_vol_history(symbol, rest_stock, daily_response, stats_response, expected_close, prepared_at):
+    """Prepare v35-compatible volume independently; failure must not remove AVG/BROKEN stocks."""
+    now = datetime.now()
+    # The daily generator is normally run after market close for the next session.
+    completed_dates = sorted({str(bar['date'])[:10] for bar in daily_response.get('data', [])
+                              if str(bar.get('date', ''))[:10] < now.date().isoformat()
+                              or (str(bar.get('date', ''))[:10] == now.date().isoformat()
+                                  and (now.hour, now.minute) >= (13, 35))})
+    stats = stats_response.get('data', stats_response)
+    stats_date = str(stats.get('date', stats_response.get('date', '')))[:10]
+    if not completed_dates or stats_date != completed_dates[-1]:
+        raise ValueError('VOL stats date does not match latest completed daily candle')
+    time.sleep(REQUEST_INTERVAL_SEC)
+    response = rest_stock.historical.candles(symbol=symbol, timeframe='1')
+    history = build_volume_history(response.get('data', []), completed_dates, prepared_at)
+    if Decimal(str(history['previous_close'])) != Decimal(str(expected_close)):
+        raise ValueError('VOL minute close does not match stats previous close')
+    return history
 
 
 def apply_atr(record: tuple, atr: float) -> tuple:
@@ -315,6 +339,8 @@ def main() -> None:
     log("[INFO] SDK 登入成功，開始逐檔更新")
     updated_by_stock: dict[str, tuple] = {}
     daily_limit_states_by_stock: dict[str, list[dict]] = {}
+    vol_history_by_stock: dict[str, dict] = {}
+    reference_dates = []
     stock_names = sorted(first_record_by_stock.keys())
     total = len(stock_names)
     success_count = 0
@@ -330,7 +356,7 @@ def main() -> None:
             time.sleep(REQUEST_INTERVAL_SEC)
             stats_response = rest_stock.historical.stats(symbol=symbol)
             updated = apply_stats_price(original, stats_response)
-            daily_limit_states, atr = get_symbol_historical_data(
+            daily_limit_states, atr, daily_response = get_symbol_historical_data(
                 symbol,
                 sdk,
             )
@@ -338,6 +364,13 @@ def main() -> None:
 
             updated_by_stock[stock_name] = updated
             daily_limit_states_by_stock[stock_name] = daily_limit_states
+            reference_dates.extend(str(bar['date'])[:10] for bar in daily_response.get('data', [])
+                                   if bar.get('date'))
+            try:
+                vol_history_by_stock[stock_name] = get_vol_history(
+                    symbol, rest_stock, daily_response, stats_response, updated[5], execution_start_time)
+            except Exception as vol_exc:
+                log(f'[WARN] {stock_name} VOL量能不足或不一致，僅停用VOL: {vol_exc}')
             success_count += 1
         except Exception as exc:
             log(f"[WARN] {stock_name}({symbol}) API 更新失敗，本次排除: {exc}")
@@ -351,12 +384,14 @@ def main() -> None:
         "schema_version": 2,
         "generated_at": execution_start_time,
         "trading_dates": trading_dates,
+        "vol_history_reference_date": max(reference_dates, default=None),
         "stocks": [
             {
                 "stock_name": stock_name,
                 "occurrence_dates": occurrence_dates_by_stock.get(stock_name, []),
                 "daily_limit_states": daily_limit_states_by_stock[stock_name],
                 "record": updated_by_stock[stock_name],
+                "vol_history": vol_history_by_stock.get(stock_name),
             }
             for stock_name in sorted(updated_by_stock)
         ],

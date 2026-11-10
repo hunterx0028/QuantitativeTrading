@@ -49,7 +49,7 @@ def package_strategy(source_dir: Path, output_dir: Path, *,
     shared_modules = [source_dir / name for name in ("runtime_environment.py", "marketdata_transport.py")]
     required = [input_path, *shared_modules]
     required += [source_dir / "strategies" / name for name in
-                 ("__init__.py", "avg.py", "broken.py", "candidate_flow.py")]
+                 ("__init__.py", "avg.py", "broken.py", "vol.py", "candidate_flow.py")]
     for path in required:
         if not path.is_file():
             raise FileNotFoundError(path)

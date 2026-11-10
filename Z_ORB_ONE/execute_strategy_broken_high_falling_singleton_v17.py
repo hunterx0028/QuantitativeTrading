@@ -30,9 +30,12 @@ stock_data = None
 selected_stocks = []
 market_previous_close_indices = {}
 total_stocks = []
+vol_history_by_symbol = {}
+vol_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.broken import BrokenConfig
+from strategies.vol import VolConfig
 
 
 class TeeStream:
@@ -57,7 +60,7 @@ class TeeStream:
 # ============ 參數/常數 ============
 # 已知對齊原則與刻意差異：
 # 1. 回測版以分 K 模擬策略，實機版以 REST 即時 quote 執行；資料粒度差異不視為策略不一致。
-# 2. BROKEN 風控參數對齊 v31；實機保護及追蹤以即時報價觸發，回測以分K模擬。
+# 2. BROKEN對齊v31；VOL對齊v35，VOL固定停利，不啟用保護及追蹤。
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
@@ -69,6 +72,7 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 # 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_AVG = 'AVG'
 STRATEGY_BROKEN = 'BROKEN'
+STRATEGY_VOL = 'VOL'
 
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
@@ -86,10 +90,11 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["AVG", "BROKEN"]
+STRATEGY_PRIORITY = ["VOL", "BROKEN", "AVG"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
 ENABLE_BROKEN = True
+ENABLE_VOL = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
 AVG_STAGE_1_START_TIME = (9, 0)
@@ -132,6 +137,22 @@ BROKEN_PROTECT_PROFIT_PER = 2.5
 BROKEN_PROTECT_LOSS_PER = 1.5
 BROKEN_PROFIT_BACK_PERCENT = 0.5
 BROKEN_PROFIT_TARGET_PERCENT = 1.0
+
+# VOL: v35 minute signals; completed low<average confirmation -> 15-second quote entry.
+# Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
+VOL_SIGNAL_START_TIME = (9, 20)
+VOL_ENTRY_DEADLINE = (12, 0)
+VOL_MIN_PREVIOUS_TURNOVER = 1_000_000_000
+VOL_VOLUME_AVERAGE_DAYS = 5
+VOL_MIN_VOLUME_RATIO = 4.0
+VOL_REGULAR_SESSION_MINUTES = 270
+VOL_MIN_RUNUP_PERCENT = 7.0
+VOL_PULLBACK_PERCENT = 3.0
+VOL_VOLUME_UNIT_SHARES = 1000
+VOL_STOP_LOSS_PERCENT = 2.0
+VOL_TAKE_PROFIT_PERCENT = 6.0
+VOL_FORCE_CLOSE_TIME = (12, 50)
+VOL_ENTRY_ORDER_QUANTITY = 1
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 開盤前不查委託結果，09:00 後才補成交價量
@@ -275,6 +296,39 @@ def validate_broken_config():
             raise ValueError('BROKEN 風控百分比必須介於 0 與 100')
     if BROKEN_PROTECT_LOSS_PER >= BROKEN_PROTECT_PROFIT_PER:
         raise ValueError('BROKEN 保護毛利必須小於獲利保護啟動百分比')
+
+
+def is_vol_strategy(state):
+    return bool(state and state.get('strategy_type') == STRATEGY_VOL)
+
+
+def get_vol_config():
+    return VolConfig(signal_start=VOL_SIGNAL_START_TIME, entry_deadline=VOL_ENTRY_DEADLINE,
+                     min_previous_turnover=VOL_MIN_PREVIOUS_TURNOVER,
+                     average_days=VOL_VOLUME_AVERAGE_DAYS, min_volume_ratio=VOL_MIN_VOLUME_RATIO,
+                     session_minutes=VOL_REGULAR_SESSION_MINUTES, min_runup_percent=VOL_MIN_RUNUP_PERCENT,
+                     pullback_percent=VOL_PULLBACK_PERCENT, minute_volume_shares=VOL_VOLUME_UNIT_SHARES)
+
+
+def validate_vol_config():
+    get_vol_config().validate()
+    if type(VOL_ENTRY_ORDER_QUANTITY) is not int or VOL_ENTRY_ORDER_QUANTITY != 1:
+        raise ValueError('VOL 每檔只允許一張')
+    for value in (VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT):
+        if not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError('VOL 風控百分比必須介於0與100')
+    if not VOL_ENTRY_DEADLINE < VOL_FORCE_CLOSE_TIME <= (13, 30):
+        raise ValueError('VOL 平倉時間必須晚於入場截止且不晚於13:30')
+
+
+def get_vol_reference_date():
+    # Industry data is independently refreshed after stock-list generation.
+    # Reject inconsistent snapshots rather than reuse stale volumes silently.
+    dates = [str(value.get('time', ''))[:10] for value in market_previous_close_indices.values()
+             if isinstance(value, dict) and value.get('time')]
+    if dates and max(dates) != vol_history_reference_date:
+        return None
+    return vol_history_reference_date
 
 
 def all_order_states(states):
@@ -1028,6 +1082,9 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
 
+    if is_vol_strategy(state):
+        print(f'停損：{flat_price:.2f}，固定停利：{profit_price:.2f}')
+        return
     _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
     if state.get("side") == TRADE_SIDE_LONG:
         protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
@@ -1055,7 +1112,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_broken_strategy(state):
+        if is_avg_strategy(state) or is_broken_strategy(state) or is_vol_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
@@ -1847,6 +1904,8 @@ def get_current_entry_mode() -> int:
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
+    if is_vol_strategy(state):
+        return VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT
     if is_broken_strategy(state):
         return BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT
     if is_avg_strategy(state):
@@ -1863,6 +1922,8 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if is_vol_strategy(state):
+        return VOL_FORCE_CLOSE_TIME
     if is_broken_strategy(state):
         return BROKEN_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
@@ -1871,6 +1932,8 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 
 
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
+    if strategy_type == STRATEGY_VOL or is_vol_strategy(state):
+        return VOL_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_BROKEN or is_broken_strategy(state):
         return BROKEN_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
@@ -1908,6 +1971,8 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
+    if is_vol_strategy(state):
+        return VOL_ENTRY_DEADLINE
     if is_broken_strategy(state):
         return divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)
     if is_avg_strategy(state):
@@ -1917,7 +1982,9 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        return min(AVG_ENTRY_START_TIME, get_broken_config().entry_start)
+        return min(AVG_ENTRY_START_TIME, get_broken_config().entry_start, VOL_SIGNAL_START_TIME)
+    if is_vol_strategy(state):
+        return VOL_SIGNAL_START_TIME
     if is_broken_strategy(state):
         return get_broken_config().entry_start
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
@@ -1927,7 +1994,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [AVG_ENTRY_DEADLINE,
+    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE,
              divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
@@ -1938,11 +2005,12 @@ def is_strategy_enabled(strategy_type: str) -> bool:
     return {
         STRATEGY_AVG: ENABLE_AVG,
         STRATEGY_BROKEN: ENABLE_BROKEN,
+        STRATEGY_VOL: ENABLE_VOL,
     }.get(strategy_type, False)
 
 
 def validate_strategy_switches() -> None:
-    for name in ('ENABLE_AVG', 'ENABLE_BROKEN'):
+    for name in ('ENABLE_AVG', 'ENABLE_BROKEN', 'ENABLE_VOL'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
 
@@ -1961,7 +2029,12 @@ def try_open_position(state: Dict[str, Any], mysdk):
         return
     if TRADE_API_DEGRADED_EVENT.is_set():
         return  # 當日停止新風險；保留已送出的委託與持倉對帳。
-    if is_broken_strategy(state):
+    if is_vol_strategy(state):
+        if (not state.get('vol_entry_time')
+                or datetime.fromisoformat(state['vol_entry_time']) > now_tpe()
+                or not finite_positive(state.get('last_price'))):
+            return
+    elif is_broken_strategy(state):
         # 即時價與門檻的比較統一由SharedCandidateFlow處理，此處不重複檢查。
         if (not state.get('broken_entry_time')
                 or datetime.fromisoformat(state['broken_entry_time']) > now_tpe()
@@ -1986,7 +2059,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
     entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：trigger price
     qty = state.get("qty", 1)
 
-    # BROKEN 保留入場前觸及漲跌停的排除。
+    # VOL只排除曾觸及漲停；BROKEN保留曾觸及漲跌停的排除。
     try:
         high_price = float(state.get("high_price"))
         low_price = float(state.get("low_price"))
@@ -2000,13 +2073,15 @@ def try_open_position(state: Dict[str, Any], mysdk):
         print(f"[{state['symbol_name']}] 當日高低價或漲跌停價無效，暫不進場")
         return
 
-    if not is_avg_strategy(state) and (high_price >= limit_up_price or low_price <= limit_down_price):
+    limit_touched = (high_price >= limit_up_price if is_vol_strategy(state)
+                     else high_price >= limit_up_price or low_price <= limit_down_price)
+    if not is_avg_strategy(state) and limit_touched:
         state["traded"] = True
         state["entry_time"] = now_tpe().isoformat()
         state["exit_reason"] = "limit_price_touched_before_entry"
         atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
         print(
-            f"[{state['symbol_name']}] 入場前當日已觸及漲停或跌停，今日不交易 "
+            f"[{state['symbol_name']}] 入場前當日已觸及禁入價格，今日不交易 "
             f"high={high_price} limit_up={limit_up_price} "
             f"low={low_price} limit_down={limit_down_price}"
         )
@@ -2110,6 +2185,17 @@ def try_close_position(state: Dict[str, Any], mysdk):
         return
     if state.get("exit_retry_reason"):
         submit_exit_order(state, mysdk, state["exit_retry_reason"])
+        return
+
+    if is_vol_strategy(state):
+        # v35 uses fixed exits, never profit protection or trailing profit.
+        if force_close_time_reached(state):
+            endtime_close_position(state, mysdk)
+        elif state.get('entry_fill_confirmed'):
+            if reached_stop_to_flat(state):
+                close_flat_position(state, mysdk)
+            elif reached_resize_profit(state):
+                close_profit_position(state, mysdk)
         return
 
     pl = reached_profitable_limit_price(state)
@@ -2756,6 +2842,7 @@ def main(*, runtime_mode: str | None = None):
     """本機與 Docker 共用入口；此程式只支援每日啟動一次。"""
     global stock_data, selected_stocks, market_previous_close_indices, total_stocks
     global MARKETDATA_STOCK_REST_CLIENT
+    global vol_history_by_symbol, vol_history_reference_date
     environment = RuntimeEnvironment(BASE_DIR, mode=runtime_mode or os.getenv("QUANT_RUNTIME_MODE", "local"))
     #print(10*get_tick_size(74.3))
 
@@ -2772,20 +2859,28 @@ def main(*, runtime_mode: str | None = None):
 
     try:
         validate_strategy_switches()
-        for strategy in (STRATEGY_AVG, STRATEGY_BROKEN):
+        for strategy in STRATEGY_PRIORITY:
             print(f'[STRATEGY_SWITCH] {strategy}={"ON" if is_strategy_enabled(strategy) else "OFF"}')
-        if not any(is_strategy_enabled(s) for s in (STRATEGY_AVG, STRATEGY_BROKEN)):
+        if not any(is_strategy_enabled(s) for s in STRATEGY_PRIORITY):
             print('所有策略已關閉，今日不啟動交易。')
             return
         stock_data = environment.prepare_stock_data()
         selected_stocks = stock_data.selected_stocks
         market_previous_close_indices = stock_data.market_previous_close_indices
         total_stocks = stock_data.total_stocks
+        vol_history_by_symbol = getattr(stock_data, 'vol_history_by_symbol', {})
+        vol_history_reference_date = getattr(stock_data, 'vol_history_reference_date', None)
+        if not isinstance(vol_history_by_symbol, dict):
+            vol_history_by_symbol = {}
+        if ENABLE_VOL and not vol_history_by_symbol:
+            print('[WARN] stock_data沒有VOL歷史量能，本日僅停用各檔VOL；請先重跑aggregate v3及v3_re')
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         if ENABLE_AVG:
             validate_avg_config()
         if ENABLE_BROKEN:
             validate_broken_config()
+        if ENABLE_VOL:
+            validate_vol_config()
         wait_until_main_start_time()
         TRADE_API_DEGRADED_EVENT.clear()
         AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})

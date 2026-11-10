@@ -57,6 +57,8 @@ class SharedCandidateFlow:
         supported = {a.STRATEGY_AVG}
         if hasattr(a, 'STRATEGY_BROKEN'):
             supported.add(a.STRATEGY_BROKEN)
+        if hasattr(a, 'STRATEGY_VOL'):
+            supported.add(a.STRATEGY_VOL)
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
             raise ValueError(f"STRATEGY_PRIORITY 必須各包含 {sorted(supported)} 一次")
         if a.STOCK_DATA_SOURCE not in ("T", "S"):
@@ -94,6 +96,8 @@ class SharedCandidateFlow:
         if hasattr(a, 'STRATEGY_BROKEN'):
             deadlines.append((a.STRATEGY_BROKEN, divmod(
                 a.BROKEN_ENTRY_DEADLINE[0] * 60 + a.BROKEN_ENTRY_DEADLINE[1] + 1, 60)))
+        if hasattr(a, 'STRATEGY_VOL'):
+            deadlines.append((a.STRATEGY_VOL, a.VOL_ENTRY_DEADLINE))
         return deadlines
 
     def check_avg_eligibility(self, symbol, completed, previous_close, now, disabled):
@@ -176,6 +180,19 @@ class SharedCandidateFlow:
         bars = a.parse_avg_candles(response.get('data'), cutoff)
         completed = [b for b in bars if b['dt'] < cutoff.replace(second=0, microsecond=0)]
         candidates = self.candidates.setdefault(symbol, {})
+        if (hasattr(a, 'STRATEGY_VOL') and a.STRATEGY_VOL not in disabled
+                and a.STRATEGY_VOL not in candidates):
+            signal, rejected = a.get_vol_config().find_candidate(
+                bars, float(row[5]), a.vol_history_by_symbol.get(symbol),
+                a.get_vol_reference_date(), cutoff, up)
+            if rejected:
+                disabled.add(a.STRATEGY_VOL)
+                a.trade_log('VOL_REJECTED', symbol=symbol,
+                            reason='history_turnover_limit_or_signal_invalid')
+            elif signal:
+                state = self.add_candidate(symbol, a.STRATEGY_VOL, signal, ticker, now)
+                # Never enter using a quote requested before confirmation was available.
+                state['vol_quote_not_before'] = a.time.monotonic()
         if a.STRATEGY_AVG not in disabled:
             checks = self.check_avg_eligibility(symbol, completed, float(row[5]), cutoff, disabled)
             if (a.STRATEGY_AVG not in disabled and a.STRATEGY_AVG not in candidates
@@ -233,7 +250,7 @@ class SharedCandidateFlow:
             a.try_close_position(state, sdk)
         self.persist(state)
 
-    def apply_candidates_quote(self, symbol, quote, states, sdk, now):
+    def apply_candidates_quote(self, symbol, quote, states, sdk, now, *, requested_at=None):
         """同一份報價評估所有候選；只有完整符合進場條件才競爭交易歸屬。"""
         a = self.api
         if symbol in states or symbol not in self.rows:
@@ -248,7 +265,8 @@ class SharedCandidateFlow:
             if state is None:
                 continue
             self.update_quote(state, quote, now)
-            if high >= state['limit_up_price'] or low <= state['limit_down_price']:
+            is_vol = strategy == getattr(a, 'STRATEGY_VOL', None)
+            if high >= state['limit_up_price'] or (not is_vol and low <= state['limit_down_price']):
                 self.disabled.setdefault(symbol, set()).add(strategy)
                 self.prune(symbol, now)
                 a.trade_log('CANDIDATE_LIMIT_TOUCHED', symbol=symbol, strategy=strategy)
@@ -257,7 +275,13 @@ class SharedCandidateFlow:
                 continue
             if not a.get_entry_check_start_time(state) <= (now.hour, now.minute) <= a.get_entry_check_end_time(state):
                 continue
-            if a.is_avg_strategy(state):
+            if is_vol:
+                if (not state.get('vol_entry_time')
+                        or datetime.fromisoformat(state['vol_entry_time']) > now
+                        or requested_at is None
+                        or requested_at < state.get('vol_quote_not_before', float('inf'))):
+                    continue
+            elif a.is_avg_strategy(state):
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
                     continue
             else:
@@ -320,6 +344,8 @@ class SharedCandidateFlow:
             starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
         if hasattr(a, 'STRATEGY_BROKEN') and self.strategy_enabled(a.STRATEGY_BROKEN):
             starts.append(a.get_broken_config().entry_start)
+        if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
+            starts.append(a.VOL_SIGNAL_START_TIME)
         start = min(starts) if starts else (23, 59)
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND
@@ -350,7 +376,8 @@ class SharedCandidateFlow:
                     if symbol in states:
                         self.apply_quote(states[symbol], quote, trade_sdk, now)
                     else:
-                        self.apply_candidates_quote(symbol, quote, states, trade_sdk, now)
+                        self.apply_candidates_quote(symbol, quote, states, trade_sdk, now,
+                                                    requested_at=requested_at)
             except Exception as exc:
                 a.trade_log('CANDIDATE_QUOTE_ERROR', error=True, symbol=symbol, error_msg=repr(exc))
         quote_round = int((now.timestamp() - 5) // a.QUOTE_ROUND_INTERVAL_SECONDS)
