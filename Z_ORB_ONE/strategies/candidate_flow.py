@@ -10,7 +10,6 @@ class SharedCandidateFlow:
         self.namespace = namespace
         self.rows = {}
         self.candidates = {}  # symbol -> strategy -> independent candidate state
-        self.broken_windows = {}
         self.disabled = {}
         self.avg_checks = {}
         self.candles = {}
@@ -56,8 +55,6 @@ class SharedCandidateFlow:
     def initialize(self):
         a = self.api
         supported = {a.STRATEGY_AVG}
-        if hasattr(a, 'STRATEGY_BROKEN'):
-            supported.add(a.STRATEGY_BROKEN)
         if hasattr(a, 'STRATEGY_VOL'):
             supported.add(a.STRATEGY_VOL)
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
@@ -103,9 +100,6 @@ class SharedCandidateFlow:
     def strategy_deadlines(self):
         a = self.api
         deadlines = [(a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE)]
-        if hasattr(a, 'STRATEGY_BROKEN'):
-            deadlines.append((a.STRATEGY_BROKEN, divmod(
-                a.BROKEN_ENTRY_DEADLINE[0] * 60 + a.BROKEN_ENTRY_DEADLINE[1] + 1, 60)))
         if hasattr(a, 'STRATEGY_VOL'):
             deadlines.append((a.STRATEGY_VOL, a.VOL_ENTRY_DEADLINE))
         return deadlines
@@ -222,25 +216,6 @@ class SharedCandidateFlow:
                         self.add_candidate(symbol, a.STRATEGY_AVG, {
                             'avg_signal_bar_time': dt.isoformat(), 'avg_normalized_slope': checks['slope'],
                             'avg_pre_entry_range': float(spread), 'avg_entry_time': entry_time.isoformat()}, ticker, now)
-        if hasattr(a, 'STRATEGY_BROKEN') and a.STRATEGY_BROKEN not in disabled:
-            config = a.get_broken_config()
-            metrics = self.broken_windows.get(symbol)
-            if metrics is None:
-                metrics, rejected = config.check_window(bars, float(row[5]), cutoff, limit_down_price=down)
-                if rejected:
-                    disabled.add(a.STRATEGY_BROKEN)
-                    a.trade_log('BROKEN_WINDOW_REJECTED', symbol=symbol)
-                elif metrics is not None:
-                    self.broken_windows[symbol] = metrics
-                    a.trade_log('BROKEN_WINDOW_PASSED', symbol=symbol, **metrics)
-            if metrics is not None and a.STRATEGY_BROKEN not in candidates:
-                signal, rejected = config.find_candidate(
-                    bars, float(row[5]), cutoff, window_metrics=metrics, limit_down_price=down)
-                if rejected:
-                    disabled.add(a.STRATEGY_BROKEN)
-                    a.trade_log('BROKEN_REJECTED', symbol=symbol, reason='invalid_or_expired_signal')
-                elif signal:
-                    self.add_candidate(symbol, a.STRATEGY_BROKEN, signal, ticker, now)
         self.prune(symbol, now)
 
     def update_quote(self, state, quote, now):
@@ -276,7 +251,8 @@ class SharedCandidateFlow:
                 continue
             self.update_quote(state, quote, now)
             is_vol = strategy == getattr(a, 'STRATEGY_VOL', None)
-            if high >= state['limit_up_price'] or (not is_vol and low <= state['limit_down_price']):
+            # 所有策略共用：入場前曾觸及漲跌停，當日不得進場。
+            if high >= state['limit_up_price'] or low <= state['limit_down_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
                 self.prune(symbol, now)
                 a.trade_log('CANDIDATE_LIMIT_TOUCHED', symbol=symbol, strategy=strategy)
@@ -295,11 +271,7 @@ class SharedCandidateFlow:
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
                     continue
             else:
-                # BROKEN 的即時價門檻集中於此；不符時保留候選，等待後續報價。
-                if (not state.get('broken_entry_time')
-                        or datetime.fromisoformat(state['broken_entry_time']) > now
-                        or Decimal(str(px)) >= Decimal(str(state['broken_trigger_price']))):
-                    continue
+                continue
             loss_percent, _ = a.get_optimize_loss_profit_percent(state)
             if float(px) * (1 + loss_percent / 100) >= state['limit_up_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
@@ -352,8 +324,6 @@ class SharedCandidateFlow:
         starts = []
         if self.strategy_enabled(a.STRATEGY_AVG):
             starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
-        if hasattr(a, 'STRATEGY_BROKEN') and self.strategy_enabled(a.STRATEGY_BROKEN):
-            starts.append(a.get_broken_config().entry_start)
         if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
             starts.append(a.VOL_SIGNAL_START_TIME)
         start = min(starts) if starts else (23, 59)

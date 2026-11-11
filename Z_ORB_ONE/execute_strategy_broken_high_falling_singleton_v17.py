@@ -34,7 +34,6 @@ vol_history_by_symbol = {}
 vol_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
-from strategies.broken import BrokenConfig
 from strategies.vol import VolConfig
 
 
@@ -60,7 +59,7 @@ class TeeStream:
 # ============ 參數/常數 ============
 # 已知對齊原則與刻意差異：
 # 1. 回測版以分 K 模擬策略，實機版以 REST 即時 quote 執行；資料粒度差異不視為策略不一致。
-# 2. BROKEN對齊v31；VOL對齊v35，VOL固定停利，不啟用保護及追蹤。
+# 2. VOL對齊v35，VOL固定停利，不啟用保護及追蹤。
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
@@ -71,7 +70,6 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 
 # 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_AVG = 'AVG'
-STRATEGY_BROKEN = 'BROKEN'
 STRATEGY_VOL = 'VOL'
 
 TRADE_SIDE_SHORT = 'SHORT'
@@ -91,10 +89,9 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["VOL", "BROKEN", "AVG"]
+STRATEGY_PRIORITY = ["VOL", "AVG"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
-ENABLE_BROKEN = False
 ENABLE_VOL = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
@@ -122,22 +119,6 @@ AVG_PROTECT_PROFIT_PER = 2.5
 AVG_PROTECT_LOSS_PER = 1.5
 AVG_PROFIT_BACK_PERCENT = 0.5
 AVG_PROFIT_TARGET_PERCENT = 1.0
-
-# BROKEN：對齊回測 v31；確認棒截止含 11:00，資格保留至最晚 11:01 入場。
-BROKEN_SIGNAL_START_TIME = (9, 0)
-BROKEN_SIGNAL_END_TIME = (9, 20)
-BROKEN_MAX_SIGNAL_RANGE_PERCENT = 3.3
-BROKEN_ENTRY_DEADLINE = (11, 0)
-BROKEN_TRIGGER_DROP_PERCENT = 15.0  # 昨收至跌停價的向下距離為100；15表示該距離的15%
-BROKEN_TRIGGER_CONFIRM_BARS = 3
-BROKEN_STOP_LOSS_PERCENT = 1.5
-BROKEN_TAKE_PROFIT_PERCENT = 5.0
-BROKEN_FORCE_CLOSE_TIME = (12, 50)
-BROKEN_ENTRY_ORDER_QUANTITY = 1
-BROKEN_PROTECT_PROFIT_PER = 2.5
-BROKEN_PROTECT_LOSS_PER = 1.5
-BROKEN_PROFIT_BACK_PERCENT = 0.5
-BROKEN_PROFIT_TARGET_PERCENT = 1.0
 
 # VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
@@ -271,33 +252,6 @@ class RateLimitedStockRest:
 
     def __getattr__(self, name):
         return getattr(self.client, name)
-
-
-def is_broken_strategy(state):
-    return bool(state and state.get("strategy_type") == STRATEGY_BROKEN)
-
-
-def get_broken_config():
-    return BrokenConfig(BROKEN_SIGNAL_START_TIME, BROKEN_SIGNAL_END_TIME,
-                        BROKEN_ENTRY_DEADLINE, BROKEN_TRIGGER_DROP_PERCENT,
-                        BROKEN_TRIGGER_CONFIRM_BARS, BROKEN_MAX_SIGNAL_RANGE_PERCENT)
-
-
-def validate_broken_config():
-    get_broken_config().validate()
-    close = time_tuple_to_minutes(BROKEN_FORCE_CLOSE_TIME, 'BROKEN_FORCE_CLOSE_TIME')
-    deadline = time_tuple_to_minutes(BROKEN_ENTRY_DEADLINE, 'BROKEN_ENTRY_DEADLINE')
-    if deadline + 1 >= close:
-        raise ValueError('BROKEN 最晚入場必須早於強制平倉')
-    if type(BROKEN_ENTRY_ORDER_QUANTITY) is not int or BROKEN_ENTRY_ORDER_QUANTITY != 1:
-        raise ValueError('BROKEN 目前每檔只允許一張')
-    protection_values = (BROKEN_PROTECT_PROFIT_PER, BROKEN_PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
-    for value in (BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT, *protection_values,
-                  BROKEN_PROFIT_BACK_PERCENT, BROKEN_PROFIT_TARGET_PERCENT):
-        if not math.isfinite(value) or not 0 < value < 100:
-            raise ValueError('BROKEN 風控百分比必須介於 0 與 100')
-    if ENABLE_PROFIT_PROTECTION and BROKEN_PROTECT_LOSS_PER >= BROKEN_PROTECT_PROFIT_PER:
-        raise ValueError('BROKEN 保護毛利必須小於獲利保護啟動百分比')
 
 
 def is_vol_strategy(state):
@@ -1116,7 +1070,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_broken_strategy(state) or is_vol_strategy(state):
+        if is_avg_strategy(state) or is_vol_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
@@ -1910,16 +1864,12 @@ def get_current_entry_mode() -> int:
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if is_vol_strategy(state):
         return VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT
-    if is_broken_strategy(state):
-        return BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT
     if is_avg_strategy(state):
         return AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT
     raise ValueError("未支援的策略，無法取得停損停利設定")
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
-    if is_broken_strategy(state):
-        return BROKEN_PROTECT_LOSS_PER, BROKEN_PROTECT_PROFIT_PER
     if is_avg_strategy(state):
         return AVG_PROTECT_LOSS_PER, AVG_PROTECT_PROFIT_PER
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
@@ -1928,8 +1878,6 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_vol_strategy(state):
         return VOL_FORCE_CLOSE_TIME
-    if is_broken_strategy(state):
-        return BROKEN_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
         return AVG_FORCE_CLOSE_TIME
     return FORCE_EXIT_TIME
@@ -1938,8 +1886,6 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
     if strategy_type == STRATEGY_VOL or is_vol_strategy(state):
         return VOL_ENTRY_ORDER_QUANTITY
-    if strategy_type == STRATEGY_BROKEN or is_broken_strategy(state):
-        return BROKEN_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
         return AVG_ENTRY_ORDER_QUANTITY
     return 0
@@ -1977,8 +1923,6 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if is_vol_strategy(state):
         return VOL_ENTRY_DEADLINE
-    if is_broken_strategy(state):
-        return divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)
     if is_avg_strategy(state):
         return AVG_ENTRY_DEADLINE
     return AVG_ENTRY_DEADLINE
@@ -1986,11 +1930,9 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        return min(AVG_ENTRY_START_TIME, get_broken_config().entry_start, VOL_SIGNAL_START_TIME)
+        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME)
     if is_vol_strategy(state):
         return VOL_SIGNAL_START_TIME
-    if is_broken_strategy(state):
-        return get_broken_config().entry_start
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
         return AVG_ENTRY_START_TIME
     return AVG_ENTRY_START_TIME
@@ -1998,8 +1940,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE,
-             divmod(BROKEN_ENTRY_DEADLINE[0] * 60 + BROKEN_ENTRY_DEADLINE[1] + 1, 60)]
+    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
 
@@ -2008,7 +1949,6 @@ def is_strategy_enabled(strategy_type: str) -> bool:
     """策略開關僅控制新進場，不影響持倉平倉。"""
     return {
         STRATEGY_AVG: ENABLE_AVG,
-        STRATEGY_BROKEN: ENABLE_BROKEN,
         STRATEGY_VOL: ENABLE_VOL,
     }.get(strategy_type, False)
 
@@ -2016,7 +1956,7 @@ def is_strategy_enabled(strategy_type: str) -> bool:
 def validate_strategy_switches() -> None:
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
-    for name in ('ENABLE_AVG', 'ENABLE_BROKEN', 'ENABLE_VOL'):
+    for name in ('ENABLE_AVG', 'ENABLE_VOL'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
 
@@ -2040,13 +1980,6 @@ def try_open_position(state: Dict[str, Any], mysdk):
                 or datetime.fromisoformat(state['vol_entry_time']) > now_tpe()
                 or not finite_positive(state.get('last_price'))):
             return
-    elif is_broken_strategy(state):
-        # 即時價與門檻的比較統一由SharedCandidateFlow處理，此處不重複檢查。
-        if (not state.get('broken_entry_time')
-                or datetime.fromisoformat(state['broken_entry_time']) > now_tpe()
-                or not finite_positive(state.get('broken_trigger_price'))
-                or not finite_positive(state.get('last_price'))):
-            return
     elif is_avg_strategy(state):
         if not AVG_RUNTIME.session_state.get("active"):
             return
@@ -2065,7 +1998,7 @@ def try_open_position(state: Dict[str, Any], mysdk):
     entry_ref_px = state.get("entry_trigger_price", last_px)  # 進場參考價：trigger price
     qty = state.get("qty", 1)
 
-    # VOL只排除曾觸及漲停；BROKEN保留曾觸及漲跌停的排除。
+    # 所有策略共用：入場前曾觸及漲跌停，當日不得進場。
     try:
         high_price = float(state.get("high_price"))
         low_price = float(state.get("low_price"))
@@ -2079,9 +2012,8 @@ def try_open_position(state: Dict[str, Any], mysdk):
         print(f"[{state['symbol_name']}] 當日高低價或漲跌停價無效，暫不進場")
         return
 
-    limit_touched = (high_price >= limit_up_price if is_vol_strategy(state)
-                     else high_price >= limit_up_price or low_price <= limit_down_price)
-    if not is_avg_strategy(state) and limit_touched:
+    limit_touched = high_price >= limit_up_price or low_price <= limit_down_price
+    if limit_touched:
         state["traded"] = True
         state["entry_time"] = now_tpe().isoformat()
         state["exit_reason"] = "limit_price_touched_before_entry"
@@ -2307,8 +2239,6 @@ def _protect_profit_stop(state: Dict[str, Any]):
     else:
         protect_trigger_price = entry_price * (1 - protect_profit_per / 100.0)
         protected_flat_price = entry_price * (1 - protect_loss_per / 100.0)
-        if is_broken_strategy(state):
-            protected_flat_price = ceil_price_to_tick_value(protected_flat_price)
         should_update = px <= protect_trigger_price and protected_flat_price < current_flat_price
 
     if should_update:
@@ -2410,8 +2340,6 @@ def _advance_profit_trail(state: Dict[str, Any]):
     side = state.get("side")
     target_percent = AVG_PROFIT_TARGET_PERCENT if is_avg_strategy(state) else PROFIT_TARGET_PERCENT
     back_percent = AVG_PROFIT_BACK_PERCENT if is_avg_strategy(state) else PROFIT_BACK_PERCENT
-    if is_broken_strategy(state):
-        target_percent, back_percent = BROKEN_PROFIT_TARGET_PERCENT, BROKEN_PROFIT_BACK_PERCENT
     target_step = calculate_profit_trail_step(px, target_percent)
     back_step = calculate_profit_trail_step(px, back_percent)
     if side == TRADE_SIDE_LONG:
@@ -2729,8 +2657,6 @@ def initialize_states(
 def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata):
     global ORDER_RESULTS_PENDING_FUTURE
     realtime_quote_start_announced = False
-    entry_check_start_announced = False
-    entry_check_end_announced = False
     entry_mode_decided = False
     last_order_results_update_monotonic = 0.0
     order_query_started_monotonic = 0.0
@@ -2754,26 +2680,6 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             entry_mode_decided = True
         candidate_flow.process(states, realtime_sdk, mysdk)
         order_states = all_order_states(states)
-        entry_check_start_time = get_entry_check_start_time()
-        current_entry_mode = get_current_entry_mode()
-        if (
-            entry_mode_decided
-            and current_entry_mode != ENTRY_MODE_NO_TRADE
-            and (candidate_flow.rows or any(not st.get("traded") for st in states.values()))
-            and not entry_check_start_announced
-            and (now_local.hour, now_local.minute) >= entry_check_start_time
-        ):
-            print(
-                f"⏰ {get_entry_mode_text()} 進場檢核開始時間！"
-                f"目前時間：{now_local.strftime('%H:%M:%S')}"
-            )
-            entry_check_start_announced = True
-
-        latest_entry_check_end_time = get_latest_entry_check_end_time(states)
-        if (not entry_check_end_announced) and ((now_local.hour, now_local.minute, now_local.second) >= (latest_entry_check_end_time[0], latest_entry_check_end_time[1], 0)):
-            print(f"⏰ 進場檢核截止時間！目前時間：{now_local.strftime('%H:%M:%S')}")
-            entry_check_end_announced = True
-
         pending_states = [st for st in states.values() if not st.get("traded")]
         all_force_close_time_reached = bool(pending_states) and all(
             force_close_time_reached(st)
@@ -2886,8 +2792,6 @@ def main(*, runtime_mode: str | None = None):
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         if ENABLE_AVG:
             validate_avg_config()
-        if ENABLE_BROKEN:
-            validate_broken_config()
         if ENABLE_VOL:
             validate_vol_config()
         wait_until_main_start_time()

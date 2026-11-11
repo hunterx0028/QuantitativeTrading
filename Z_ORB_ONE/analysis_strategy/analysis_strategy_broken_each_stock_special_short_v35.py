@@ -11,7 +11,7 @@ SIGNAL_START_TIME 起，分K close 由轉弱價上方（前一根有效分K clos
 跌至轉弱價（含）以下，且上述條件於該棒成立，即為轉弱訊號棒；
 其後等待分K close 嚴格低於該根 average，於跌破 average 棒的下一根有效分K open 放空。
 實際入場不得晚於 ENTRY_DEADLINE（含）；每檔每日最多一筆。
-09:00起至入場前任一有效分K high曾達漲停，當日不入場；入場棒僅檢查open。
+09:00起至入場前任一有效分K high曾達漲停或low曾達跌停，當日不入場；入場棒僅檢查open。
 出場：固定停損、獲利保護與追蹤停利；本根low更新的出場線下一根生效，固定停損另計滑價。
 12:50 open 強制平倉，缺棒順延。
 使用原始 average 欄位；缺失或無效時該棒不確認跌破，不補算。缺棒以前後有效分K接續判斷。
@@ -612,8 +612,9 @@ def find_entry(today_bars, previous_close, average_daily_volume):
     day_open = Decimal(str(bars[0]['open']))
     runup_price = day_open * (1 + Decimal(str(MIN_RUNUP_PERCENT)) / 100)
     pullback_factor = 1 - Decimal(str(PULLBACK_PERCENT)) / 100
-    limit_up_price, _ = calculate_limit_prices(previous_close)
+    limit_up_price, limit_down_price = calculate_limit_prices(previous_close)
     limit_up = Decimal(str(limit_up_price))
+    limit_down = Decimal(str(limit_down_price))
     day_high = None
     cumulative_volume = 0.0
     previous_above = False  # 前一根有效分K close 是否嚴格高於當時轉弱價
@@ -624,11 +625,13 @@ def find_entry(today_bars, previous_close, average_daily_volume):
             if bar['dt'] > deadline:
                 return None
             if 'average_break_dt' in signal:
-                # 此時只知道入場棒open，不使用其後才形成的high。
-                if Decimal(str(bar['open'])) >= limit_up:
+                # 此時只知道入場棒open，不使用其後才形成的high/low。
+                entry_open = Decimal(str(bar['open']))
+                if entry_open >= limit_up or entry_open <= limit_down:
                     return None
                 return bar, float(bar['open']), signal
-            if Decimal(str(bar['high'])) >= limit_up:
+            if (Decimal(str(bar['high'])) >= limit_up
+                    or Decimal(str(bar['low'])) <= limit_down):
                 return None
             average = parse_positive_number(bar.get('average'))
             if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
@@ -639,7 +642,7 @@ def find_entry(today_bars, previous_close, average_daily_volume):
         if bar['dt'] > deadline:
             return None
         high = Decimal(str(bar['high']))
-        if high >= limit_up:
+        if high >= limit_up or Decimal(str(bar['low'])) <= limit_down:
             return None
         day_high = high if day_high is None else max(day_high, high)
         cumulative_volume += bar['volume']
@@ -891,12 +894,12 @@ def main():
              f'進場：轉弱價＝當日最高價×{100 - PULLBACK_PERCENT:g}%。訊號起點後，前一根有效分K close嚴格高於當時轉弱價、'
              '本根close小於或等於轉弱價，且選股條件於本根成立，即為轉弱訊號棒；'
              '其後等待分K close嚴格低於該根average，於跌破average棒的下一根有效分K open放空。'
-             '等待期間保留轉弱訊號資格，不重新檢查量比或因最高價更新而重設，但觸及漲停即取消當日交易。'
+             '等待期間保留轉弱訊號資格，不重新檢查量比或因最高價更新而重設，但觸及漲跌停即取消當日交易。'
              '跌破當下條件未成立則不交易，須待重新站回轉弱價上方後再次跌破。'
              '最晚入場為截止時間（含），每檔每日最多一筆，資格不跨日。',
              '當日開盤、最高價及累計量自09:00起計；缺棒以前後有效分K接續判斷；使用原始average欄位，缺失或無效時該棒不確認跌破、不補算。'
              '昨收為前一有資料交易日最後一根close；重複、非整分鐘或順序異常分K排除。'
-             '09:00起至入場前任一有效分K high曾達漲停則當日不交易；入場棒僅檢查open是否達漲停，不使用該棒high。'
+             '09:00起至入場前任一有效分K high曾達漲停或low曾達跌停則當日不交易；入場棒僅檢查open是否達漲跌停，不使用該棒high/low。'
              '入場價加停損價差達漲停價則不交易。',
              '淨損益扣除既定手續費及交易稅，停損含上述滑價，未含借券費；每筆一股合計非投資組合報酬率。']
     results = []
