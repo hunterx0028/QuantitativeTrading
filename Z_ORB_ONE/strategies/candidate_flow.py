@@ -19,6 +19,7 @@ class SharedCandidateFlow:
         self.last_quote_round = None
         self.initialized = False
         self.tickers = {}
+        self.vol_turnover_eligibility = {}
         self.scan_timing = None
         self.scan_timing_lock = Lock()
 
@@ -66,6 +67,15 @@ class SharedCandidateFlow:
         if any(self.strategy_enabled(strategy) for strategy in a.STRATEGY_PRIORITY):
             for row in a.total_stocks if a.STOCK_DATA_SOURCE == "T" else a.selected_stocks:
                 self.rows[a.get_pure_symbol(row[0])[1]] = row
+        if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
+            self.vol_turnover_eligibility = a.get_vol_config().build_turnover_eligibility(
+                self.rows, a.vol_history_by_symbol, a.get_vol_reference_date(), a.now_tpe())
+            for symbol in self.rows:
+                if not self.vol_turnover_eligibility.get(symbol, False):
+                    self.disabled.setdefault(symbol, set()).add(a.STRATEGY_VOL)
+            a.trade_log('VOL_TURNOVER_FILTER', pool_count=len(self.rows),
+                        ranked_count=len(self.vol_turnover_eligibility),
+                        eligible_count=sum(self.vol_turnover_eligibility.values()))
         self.initialized = True
 
     def strategy_enabled(self, strategy):

@@ -4,6 +4,7 @@ Historical volume uses minute candles, not daily volume (which can include
 other sessions). All stored/computed volumes use shares; API minute lots x1000.
 """
 from dataclasses import dataclass
+from bisect import bisect_left
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import math
@@ -63,15 +64,20 @@ def build_volume_history(raw, expected_dates, prepared_at, days=5):
 class VolConfig:
     signal_start: tuple = (9, 20)
     entry_deadline: tuple = (12, 0)
-    min_previous_turnover: float = 1_000_000_000
+    min_previous_turnover: float = 300_000_000
     average_days: int = 5
     min_volume_ratio: float = 4.0
     session_minutes: int = 270
     min_runup_percent: float = 7.0
     pullback_percent: float = 3.0
     minute_volume_shares: int = 1000
+    previous_turnover_top_percent: float = 30.0
 
     def validate(self):
+        if (type(self.previous_turnover_top_percent) not in (int, float)
+                or not math.isfinite(self.previous_turnover_top_percent)
+                or not 0 < self.previous_turnover_top_percent <= 100):
+            raise ValueError('VOL previous turnover top percent must be in (0, 100]')
         for value in (self.signal_start, self.entry_deadline):
             if (len(value) != 2 or any(type(x) is not int for x in value)
                     or not 0 <= value[0] < 24 or not 0 <= value[1] < 60):
@@ -105,6 +111,36 @@ class VolConfig:
             )
         except (KeyError, TypeError, ValueError):
             return False
+
+    def build_turnover_eligibility(self, rows, histories, reference_date, now):
+        """Freeze ranking over the selected pool before ticker/strategy filtering.
+
+        Match v35: count strictly lower turnovers, including ties in the denominator.
+        Ranking only needs the previous session; five-day eligibility is checked later.
+        """
+        turnovers = {}
+        for symbol, row in rows.items():
+            history = histories.get(symbol)
+            if not isinstance(history, dict) or not reference_date:
+                continue
+            try:
+                close = positive(history.get('previous_close'))
+                volume = float(history['previous_volume_shares'])
+                if (history.get('as_of_date') != reference_date
+                        or date.fromisoformat(reference_date) >= now.date()
+                        or history.get('source') != 'historical.minute_sum'
+                        or history.get('volume_unit') != 'shares'
+                        or close is None or not math.isfinite(volume) or volume < 0
+                        or Decimal(str(close)) != Decimal(str(row[5]))):
+                    continue
+                turnovers[symbol] = Decimal(str(volume)) * Decimal(str(close))
+            except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+                continue
+        ordered = sorted(turnovers.values())
+        required = (1 - Decimal(str(self.previous_turnover_top_percent)) / 100) * len(ordered)
+        return {symbol: (turnover >= Decimal(str(self.min_previous_turnover))
+                         and bisect_left(ordered, turnover) >= required)
+                for symbol, turnover in turnovers.items()}
 
     def find_candidate(self, bars, previous_close, history, reference_date, now, limit_up):
         """Return (candidate, disabled). Replaying completed bars is deterministic."""

@@ -44,6 +44,7 @@ class AvgConfig:
     TRADE_SIDE_SHORT: str
     # 舊三策略入口的相容參數；AVG/BROKEN 入口不再依賴 LOWER。
     STRATEGY_START_LOWER_3: tuple[int, int] | None = None
+    ENABLE_PROFIT_PROTECTION: bool = True  # 舊入口維持原行為；v17明確傳入開關
 
 
 @dataclass
@@ -137,8 +138,10 @@ class AvgStrategy:
             )
         if not math.isfinite(self.config.AVG_MAX_NORMALIZED_SLOPE):
             raise ValueError("AVG 斜率門檻必須為有限數值")
-        for value in (self.config.AVG_STOP_LOSS_PERCENT, self.config.AVG_TAKE_PROFIT_PERCENT, self.config.AVG_PROTECT_PROFIT_PER,
-                      self.config.AVG_PROTECT_LOSS_PER, self.config.AVG_PROFIT_BACK_PERCENT, self.config.AVG_PROFIT_TARGET_PERCENT):
+        protection_values = ((self.config.AVG_PROTECT_PROFIT_PER, self.config.AVG_PROTECT_LOSS_PER)
+                             if self.config.ENABLE_PROFIT_PROTECTION else ())
+        for value in (self.config.AVG_STOP_LOSS_PERCENT, self.config.AVG_TAKE_PROFIT_PERCENT, *protection_values,
+                      self.config.AVG_PROFIT_BACK_PERCENT, self.config.AVG_PROFIT_TARGET_PERCENT):
             if not math.isfinite(value) or not 0 < value < 100:
                 raise ValueError("AVG 風控百分比必須介於 0 與 100")
         for value in (self.config.AVG_STAGE_1_AMPLITUDE_PERCENT, self.config.AVG_STAGE_2_AMPLITUDE_PERCENT,

@@ -80,6 +80,7 @@ TRADE_SIDE_LONG = 'LONG'
 # 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
 # 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
 
+ENABLE_PROFIT_PROTECTION = False  # 控制獲利保護，不影響固定停損及追蹤停利
 PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
 PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
 
@@ -93,7 +94,7 @@ STOCK_DATA_SOURCE = "T"
 STRATEGY_PRIORITY = ["VOL", "BROKEN", "AVG"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
-ENABLE_BROKEN = True
+ENABLE_BROKEN = False
 ENABLE_VOL = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
@@ -142,7 +143,8 @@ BROKEN_PROFIT_TARGET_PERCENT = 1.0
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
 VOL_SIGNAL_START_TIME = (9, 20)
 VOL_ENTRY_DEADLINE = (12, 0)
-VOL_MIN_PREVIOUS_TURNOVER = 1_000_000_000
+VOL_PREVIOUS_TURNOVER_TOP_PERCENT = 30.0  # 共用股票池前日成交金額排名；100為不限排名
+VOL_MIN_PREVIOUS_TURNOVER = 300_000_000  # 前日成交金額最低限額（元），另須通過排名
 VOL_VOLUME_AVERAGE_DAYS = 5
 VOL_MIN_VOLUME_RATIO = 4.0
 VOL_REGULAR_SESSION_MINUTES = 270
@@ -289,12 +291,12 @@ def validate_broken_config():
         raise ValueError('BROKEN 最晚入場必須早於強制平倉')
     if type(BROKEN_ENTRY_ORDER_QUANTITY) is not int or BROKEN_ENTRY_ORDER_QUANTITY != 1:
         raise ValueError('BROKEN 目前每檔只允許一張')
-    for value in (BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT,
-                  BROKEN_PROTECT_PROFIT_PER, BROKEN_PROTECT_LOSS_PER,
+    protection_values = (BROKEN_PROTECT_PROFIT_PER, BROKEN_PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
+    for value in (BROKEN_STOP_LOSS_PERCENT, BROKEN_TAKE_PROFIT_PERCENT, *protection_values,
                   BROKEN_PROFIT_BACK_PERCENT, BROKEN_PROFIT_TARGET_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('BROKEN 風控百分比必須介於 0 與 100')
-    if BROKEN_PROTECT_LOSS_PER >= BROKEN_PROTECT_PROFIT_PER:
+    if ENABLE_PROFIT_PROTECTION and BROKEN_PROTECT_LOSS_PER >= BROKEN_PROTECT_PROFIT_PER:
         raise ValueError('BROKEN 保護毛利必須小於獲利保護啟動百分比')
 
 
@@ -305,6 +307,7 @@ def is_vol_strategy(state):
 def get_vol_config():
     return VolConfig(signal_start=VOL_SIGNAL_START_TIME, entry_deadline=VOL_ENTRY_DEADLINE,
                      min_previous_turnover=VOL_MIN_PREVIOUS_TURNOVER,
+                     previous_turnover_top_percent=VOL_PREVIOUS_TURNOVER_TOP_PERCENT,
                      average_days=VOL_VOLUME_AVERAGE_DAYS, min_volume_ratio=VOL_MIN_VOLUME_RATIO,
                      session_minutes=VOL_REGULAR_SESSION_MINUTES, min_runup_percent=VOL_MIN_RUNUP_PERCENT,
                      pullback_percent=VOL_PULLBACK_PERCENT, minute_volume_shares=VOL_VOLUME_UNIT_SHARES)
@@ -403,6 +406,7 @@ def get_avg_strategy() -> AvgStrategy:
     """使用目前參數與股票池建立策略視圖；同日狀態共用同一份。"""
     return AvgStrategy(
         config=AvgConfig(
+            ENABLE_PROFIT_PROTECTION=ENABLE_PROFIT_PROTECTION,
             AVG_CANDLES_START_TIME=AVG_CANDLES_START_TIME,
             AVG_CANDLE_POLL_SECOND=AVG_CANDLE_POLL_SECOND,
             AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS=AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS,
@@ -2010,6 +2014,8 @@ def is_strategy_enabled(strategy_type: str) -> bool:
 
 
 def validate_strategy_switches() -> None:
+    if type(ENABLE_PROFIT_PROTECTION) is not bool:
+        raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
     for name in ('ENABLE_AVG', 'ENABLE_BROKEN', 'ENABLE_VOL'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
@@ -2273,6 +2279,8 @@ def mark_exit_order_pending(state: Dict[str, Any], order_no: str, exit_reason: s
 
 def _protect_profit_stop(state: Dict[str, Any]):
     """獲利達標後，將 flat_price 推進到至少保住指定獲利的位置。"""
+    if not ENABLE_PROFIT_PROTECTION:
+        return
     side = state.get("side")
     if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         return
@@ -2859,6 +2867,7 @@ def main(*, runtime_mode: str | None = None):
 
     try:
         validate_strategy_switches()
+        print(f'[PROFIT_PROTECTION] {"ON" if ENABLE_PROFIT_PROTECTION else "OFF"}')
         for strategy in STRATEGY_PRIORITY:
             print(f'[STRATEGY_SWITCH] {strategy}={"ON" if is_strategy_enabled(strategy) else "OFF"}')
         if not any(is_strategy_enabled(s) for s in STRATEGY_PRIORITY):

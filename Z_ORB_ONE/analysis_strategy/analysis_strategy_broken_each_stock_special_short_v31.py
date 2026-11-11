@@ -5,7 +5,7 @@ SIGNAL_START_TIME～SIGNAL_END_TIME 分 K 必須逐分鐘完整且唯一，low �
 SIGNAL_END_TIME 次分鐘～ENTRY_DEADLINE 連續 TRIGGER_CONFIRM_BARS 根 close 嚴格跌破
 昨收減去「昨收至跌停價距離 × TRIGGER_DROP_PERCENT / 100」的門檻，
 確認後保留資格，從次分鐘起等待首根 open 嚴格低於門檻才放空。
-固定啟用獲利保護與追蹤停利；本根 low 更新的保護價下一根生效，反彈觸價按出場線、跳空按 open 平倉。
+獲利保護由 ENABLE_PROFIT_PROTECTION 控制，追蹤停利持續啟用；本根 low 更新的保護價下一根生效。
 歷史 cache、費用與 tick 規則沿用 v18；不使用 average 訊號。
 """
 
@@ -39,11 +39,16 @@ MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日
 TRIGGER_DROP_PERCENT = 15.0  # 昨收至跌停價的向下距離為 100；15 表示走完該距離的 15%
 TRIGGER_CONFIRM_BARS = 3  # 連續幾根分 K 的 close 嚴格低於門檻
 OPTIMIZE_LOSS_PER_LOWER = 1.5  # 固定停損百分比，亦用於漲停入場限制
-OPTIMIZE_PROFIT_PER_LOWER = 5.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
+OPTIMIZE_PROFIT_PER_LOWER = 3.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
+
+ENABLE_PROFIT_PROTECTION = False  # True才啟用PROTECT_PROFIT_PER、PROTECT_LOSS_PER；不影響追蹤停利
 PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比，固定啟動獲利保護
 PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比（相對入場價，尚未扣費用）
+
 PROFIT_BACK_PERCENT = 0.5  # 追蹤出場線：當次啟動／推進價格向上回撤百分比
 PROFIT_TARGET_PERCENT = 1.0  # 下次推進目標：當次啟動／推進價格再向下的百分比
+
+STOP_SLIPPAGE_TICKS = 0  # 固定停損（含跳空）回補價向上加計的tick數；0為不計滑價，不套用保利或逐利
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
@@ -172,6 +177,14 @@ def has_limit_price_touched_before_entry(
         np.max(prior_high_values) >= limit_up_price
         or np.min(prior_low_values) <= limit_down_price
     )
+
+
+def apply_stop_slippage(price: float, limit_up_price: float) -> float:
+    """固定停損回補價逐tick向上加計滑價，不超過漲停價。"""
+    price_dec = Decimal(str(price))
+    for _ in range(STOP_SLIPPAGE_TICKS):
+        price_dec += Decimal(str(get_tick_size(float(price_dec))))
+    return min(float(price_dec), limit_up_price)
 
 
 def parse_args() -> argparse.Namespace:
@@ -486,34 +499,38 @@ def evaluate_candidates(
         profit_tracking_active = False
         trailing_stop_price = None
         next_profit_price = take_profit_price
-        protect_trigger = Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_PROFIT_PER)) / 100)
-        raw_protected_stop = float(Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_LOSS_PER)) / 100))
-        protected_stop = ceil_price_to_tick(raw_protected_stop, get_profit_trail_tick_size(raw_protected_stop))
+        protect_trigger = protected_stop = None
+        if ENABLE_PROFIT_PROTECTION:
+            protect_trigger = Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_PROFIT_PER)) / 100)
+            raw_protected_stop = float(Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_LOSS_PER)) / 100))
+            protected_stop = ceil_price_to_tick(raw_protected_stop, get_profit_trail_tick_size(raw_protected_stop))
         settlement_dt = entry_dt.replace(hour=intraday_compare_end[0],
                                          minute=intraday_compare_end[1], second=0, microsecond=0)
         for i in range(entry_idx, len(dt_values)):
             bar_time = dt_values[i]
+            if bar_time >= settlement_dt:
+                break
             # 只使用本根之前已生效的出場線；放空以較低反彈價位優先。
             exit_price = stop_loss_price
             exit_reason = 'protect_profit' if protection_active else 'stop'
             if profit_tracking_active and trailing_stop_price < exit_price:
                 exit_price, exit_reason = trailing_stop_price, 'trailing_profit'
-            # 強制平倉先於該分鐘內的 high/low；缺棒則在其後第一根 open 平倉。
-            if bar_time >= settlement_dt:
-                reason = 'close' if bar_time == settlement_dt else 'close_delayed'
-                result = build_outcome_result(reason, entry_price, float(open_values[i]))
-            elif (i > entry_idx or not candidate.get('entry_intrabar', False)) and open_values[i] >= exit_price:
-                result = build_outcome_result(exit_reason + '_gap', entry_price, float(open_values[i]))
+            if open_values[i] >= exit_price:
+                fill_price = float(open_values[i])
+                if exit_reason == 'stop':
+                    fill_price = apply_stop_slippage(fill_price, limit_up_price)
+                result = build_outcome_result(exit_reason + '_gap', entry_price, fill_price)
             elif high_values[i] >= exit_price:
-                # 盤中跌破入場的當根 high 可能早於入場；無逐筆資料，保守視為停損。
-                # 同根觸及兩者時亦停損優先；當根 open 不可用作入場後跳空出場。
-                result = build_outcome_result(exit_reason, entry_price, exit_price)
+                # 與 v18 相同：入場棒即檢查固定停損，新保護價於下一根生效。
+                fill_price = (apply_stop_slippage(exit_price, limit_up_price)
+                              if exit_reason == 'stop' else exit_price)
+                result = build_outcome_result(exit_reason, entry_price, fill_price)
             if result is not None:
                 result['exit_dt'] = bar_time
                 break
             # 本根未出場才以 low 啟動／推進保護，新價位下一根可用分K生效。
             low = float(low_values[i])
-            if (not protection_active and Decimal(str(low)) <= protect_trigger
+            if (ENABLE_PROFIT_PROTECTION and not protection_active and Decimal(str(low)) <= protect_trigger
                     and protected_stop < stop_loss_price):
                 stop_loss_price = protected_stop
                 protection_active = True
@@ -523,12 +540,11 @@ def evaluate_candidates(
                                        if profit_tracking_active else new_trailing_stop)
                 profit_tracking_active = True
         if result is None:
-            # 仍持倉但沒有平倉時段資料，不回推至過去 open，也不計入已完成績效。
-            result = {
-                'outcome': 'incomplete', 'is_success': False,
-                'exit_reason': 'data_insufficient', 'exit_dt': None,
-                'exit_price': None, 'signed_pnl': None, 'net_return_percent': None,
-            }
+            # 與 v18 相同：平倉分鐘缺棒時順延，無後續棒則使用最後一根 open。
+            settlement_idx = next((i for i, dtv in enumerate(dt_values)
+                                   if dtv >= settlement_dt), len(dt_values) - 1)
+            result = build_outcome_result('close', entry_price, float(open_values[settlement_idx]))
+            result['exit_dt'] = dt_values[settlement_idx]
         if print_results:
             line = format_result_line(name, date_str, signal, result)
             if line:
@@ -682,14 +698,19 @@ def save_shared_api_cache(cache_path, payload, raw):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(updated, ensure_ascii=False), encoding='utf-8')
 def validate_settings():
+    if type(STOP_SLIPPAGE_TICKS) is not int or STOP_SLIPPAGE_TICKS < 0:
+        raise ValueError('STOP_SLIPPAGE_TICKS 必須為非負整數')
     if type(MIN_MINUTE_BARS_BEFORE_0930) is not int or MIN_MINUTE_BARS_BEFORE_0930 <= 0:
         raise ValueError('MIN_MINUTE_BARS_BEFORE_0930 必須為正整數')
     if not math.isfinite(MAX_SIGNAL_RANGE_PERCENT) or MAX_SIGNAL_RANGE_PERCENT < 0:
         raise ValueError('MAX_SIGNAL_RANGE_PERCENT 必須為有限非負數')
-    for value in (PROTECT_PROFIT_PER, PROTECT_LOSS_PER, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
+    if type(ENABLE_PROFIT_PROTECTION) is not bool:
+        raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
+    protection_values = (PROTECT_PROFIT_PER, PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
+    for value in (*protection_values, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('獲利保護及追蹤停利百分比必須介於 0 與 100 之間')
-    if PROTECT_LOSS_PER >= PROTECT_PROFIT_PER:
+    if ENABLE_PROFIT_PROTECTION and PROTECT_LOSS_PER >= PROTECT_PROFIT_PER:
         raise ValueError('保護毛利百分比必須小於獲利保護啟動百分比')
     if type(TRIGGER_CONFIRM_BARS) is not int or TRIGGER_CONFIRM_BARS < 1:
         raise ValueError('TRIGGER_CONFIRM_BARS 必須為正整數')
@@ -713,17 +734,13 @@ def validate_settings():
 
 def format_result_line(stock_name, date_str, signal, result):
     prefix = (
-        f'{date_str} 價差={signal["signal_range_percent"]:.4f}% '
-        f'區間={signal["signal_high_to_entry_open_gap_percent"]:.4f}% '
-        f'{stock_name} 昨收={signal["previous_close"]:.2f} '
-        f'門檻={signal["trigger_price"]:.4f} 訊號={signal["signal_dt"]:%H:%M} | '
+        f'{date_str} {stock_name} 價差={signal["signal_range_percent"]:.4f}% | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
     if result['outcome'] == 'incomplete':
         return prefix + 'data_insufficient 資料不足，未計入已完成交易績效'
     return (prefix + f'{result["exit_dt"]:%H:%M} {result["exit_price"]:.2f} '
-            f'{result["exit_reason"]} | 每股淨損益={result["signed_pnl"]:+.4f} '
-            f'淨報酬率={result["net_return_percent"]:+.4f}%')
+            f'{result["exit_reason"]} | 每股淨損益={result["signed_pnl"]:+.4f}')
 
 
 def summarize_results(label, pairs):
@@ -794,15 +811,17 @@ def main():
              '不足則排除當日交易；使用完整早盤歷史資料篩選，不限制最早入場至09:30。',
              f'起點={SIGNAL_START_TIME} 確認時間={SIGNAL_END_TIME} '
              f'訊號起點=確認時間次分鐘 向下距離={TRIGGER_DROP_PERCENT:g}%（昨收至跌停價為100） 連續確認根數={TRIGGER_CONFIRM_BARS} '
-             f'停損={OPTIMIZE_LOSS_PER_LOWER:g}% 追蹤停利啟動={OPTIMIZE_PROFIT_PER_LOWER:g}% '
-             f'獲利保護固定啟用（浮盈{PROTECT_PROFIT_PER:g}%後保住{PROTECT_LOSS_PER:g}%毛利） '
-             f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
+             f'停損={OPTIMIZE_LOSS_PER_LOWER:g}%（固定停損含跳空加計{STOP_SLIPPAGE_TICKS}個tick滑價，不超過漲停；保利、逐利及時間平倉不加計） '
+             f'追蹤停利啟動={OPTIMIZE_PROFIT_PER_LOWER:g}% '
+             + (f'獲利保護啟用（浮盈{PROTECT_PROFIT_PER:g}%後保住{PROTECT_LOSS_PER:g}%毛利） '
+                if ENABLE_PROFIT_PROTECTION else '獲利保護關閉 ')
+             + f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}% '
              f'訊號截止={ENTRY_DEADLINE}（含，最晚入場為截止次分鐘open） 強制平倉={INTRADAY_COMPARE_END_LOWER} open',
              f'{SIGNAL_START_TIME[0]:02d}:{SIGNAL_START_TIME[1]:02d}～'
              f'{SIGNAL_END_TIME[0]:02d}:{SIGNAL_END_TIME[1]:02d} 分K須逐分鐘完整且唯一，low 全部嚴格高於昨收；區間最高 high 減最低 low 須 <= 昨收 × {MAX_SIGNAL_RANGE_PERCENT:g}%；昨收為前一有資料交易日最後一根 close。',
              f'確認時間次分鐘～'
              f'{ENTRY_DEADLINE[0]:02d}:{ENTRY_DEADLINE[1]:02d} 連續 {TRIGGER_CONFIRM_BARS} 根逐分鐘分K的 close < 昨收 - (昨收 - 跌停價) × {TRIGGER_DROP_PERCENT:g} / 100，最後確認棒須在訊號截止內。確認後保留資格，從次分鐘起等待首根open嚴格低於門檻入場，最晚至截止次分鐘；open等於或高於門檻、缺棒則繼續等待，不重新計數，逾時略過。每檔每日最多一筆。同根停損停利皆觸及，以停損優先。',
-             '淨損益扣除既定手續費及交易稅，未含滑價、借券費；每筆一股合計非投資組合報酬率。']
+             '淨損益扣除既定手續費及交易稅，固定停損含上述滑價，未含借券費；每筆一股合計非投資組合報酬率。']
     results = []
     testable_count = 0
     for name in stock_names:
@@ -817,6 +836,14 @@ def main():
         lines.append(format_result_line(signal['name'], signal['date_str'], signal, result))
     for day in sorted({signal['date_str'] for signal, _ in results}):
         lines.append(summarize_results(day, [pair for pair in results if pair[0]['date_str'] == day]))
+    monthly_pnl = {}
+    for signal, result in results:
+        if result['outcome'] == 'incomplete':
+            continue
+        month = signal['date_str'][:7]
+        monthly_pnl[month] = monthly_pnl.get(month, 0.0) + result['signed_pnl']
+    for month, pnl in sorted(monthly_pnl.items()):
+        lines.append(f'{month} 每月每筆一股淨損益合計={pnl:+.4f}')
     lines.append(summarize_results('總計', results))
     output = '\n'.join(lines) + '\n'
     EACH_STOCK_OUTPUT_FILE.write_text(output, encoding='utf-8')

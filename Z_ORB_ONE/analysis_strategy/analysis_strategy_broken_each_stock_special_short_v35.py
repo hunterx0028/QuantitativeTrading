@@ -1,7 +1,8 @@
 """v35 爆量急拉後跌破轉弱價放空（衝高回落）。
 
 選股（皆以訊號棒當下已知資料判斷）：
-1. 前一有資料交易日成交金額（日成交量×昨收）達 MIN_PREVIOUS_TURNOVER。
+1. 前一有資料交易日成交金額（日成交量×昨收）在當日清單內排名前 PREVIOUS_TURNOVER_TOP_PERCENT%，
+   且不低於保底金額 MIN_PREVIOUS_TURNOVER。排名於當日分析前以各股前一日資料計算，盤中不變。
 2. 當日最高價（09:00起，含訊號棒）不低於當日開盤價的 (1 + MIN_RUNUP_PERCENT%)。
 3. 當日累計成交量（09:00起，含訊號棒）不低於
    前 VOLUME_AVERAGE_DAYS 個有資料交易日均量 × 已過分鐘比例 × MIN_VOLUME_RATIO。
@@ -11,11 +12,13 @@ SIGNAL_START_TIME 起，分K close 由轉弱價上方（前一根有效分K clos
 其後等待分K close 嚴格低於該根 average，於跌破 average 棒的下一根有效分K open 放空。
 實際入場不得晚於 ENTRY_DEADLINE（含）；每檔每日最多一筆。
 09:00起至入場前任一有效分K high曾達漲停，當日不入場；入場棒僅檢查open。
-出場：固定停損、固定停利（同根停損優先），停損出場另計滑價；12:50 open 強制平倉，缺棒順延。
+出場：固定停損、獲利保護與追蹤停利；本根low更新的出場線下一根生效，固定停損另計滑價。
+12:50 open 強制平倉，缺棒順延。
 使用原始 average 欄位；缺失或無效時該棒不確認跌破，不補算。缺棒以前後有效分K接續判斷。
 """
 
 import argparse
+import bisect
 import configparser
 import json
 import math
@@ -38,7 +41,8 @@ if str(PROJECT_ROOT) not in sys.path:
 SIGNAL_START_TIME = (9, 20)  # 訊號棒最早時間；實際入場為其後下一根有效分K open
 ENTRY_DEADLINE = (12, 0)  # 實際open入場截止（含），不允許截止次分鐘入場
 MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
-MIN_PREVIOUS_TURNOVER = 1_000_000_000  # 前一有資料交易日成交金額下限（元）＝日成交量×昨收
+PREVIOUS_TURNOVER_TOP_PERCENT = 30.0  # 前一日成交金額須在當日清單內排名前此百分比；100為不限排名
+MIN_PREVIOUS_TURNOVER = 300_000_000  # 前一有資料交易日成交金額保底下限（元）＝日成交量×昨收
 VOLUME_UNIT_SHARES = 1000  # 分K volume 單位為張；換算成交金額用
 VOLUME_AVERAGE_DAYS = 5  # 均量採前幾個有資料交易日；不足則當日不交易
 MIN_VOLUME_RATIO = 4.0  # 累計量須達「均量×已過分鐘比例」的倍數
@@ -46,8 +50,16 @@ REGULAR_SESSION_MINUTES = 270  # 09:00～13:30；已過分鐘數＝訊號棒距0
 MIN_RUNUP_PERCENT = 7.0  # 當日最高價相對當日開盤價的最低漲幅百分比
 PULLBACK_PERCENT = 3.0  # 轉弱價＝當日最高價向下回落的百分比
 OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
-OPTIMIZE_PROFIT_PER_LOWER = 6.0  # 固定停利百分比，觸及即平倉
-STOP_SLIPPAGE_TICKS = 1  # 停損（含跳空停損）出場價向上加計的tick數；0為不計滑價
+OPTIMIZE_PROFIT_PER_LOWER = 6.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
+
+ENABLE_PROFIT_PROTECTION = False  # True才啟用PROTECT_PROFIT_PER、PROTECT_LOSS_PER；不影響追蹤停利
+PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比啟動獲利保護
+PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比，尚未扣費用
+
+PROFIT_BACK_PERCENT = 0.5  # 追蹤出場線相對當次low向上回撤百分比
+PROFIT_TARGET_PERCENT = 1.0  # 下一個追蹤目標相對當次low再向下的百分比
+
+STOP_SLIPPAGE_TICKS = 0  # 停損（含跳空停損）出場價向上加計的tick數；0為不計滑價
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
@@ -127,6 +139,27 @@ def calculate_limit_prices(prev_close: float):
 def calculate_stop_loss_amount_by_percent(entry_price: float, stop_loss_percent: float) -> float:
     """依入場價與停損百分比計算停損價差。"""
     return entry_price * (stop_loss_percent / 100.0)
+
+
+def get_profit_trail_tick_size(price: float) -> float:
+    """沿用 v18、v31 的追蹤停利 tick 邊界規則。"""
+    for upper, tick in ((10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1)):
+        if price <= upper:
+            return tick
+    return 5
+
+
+def calculate_short_profit_trail(price: float, limit_down_price: float) -> tuple[float, float]:
+    """以當次low計算下一目標與反彈出場線，各價差至少一tick。"""
+    price_dec = Decimal(str(price))
+    tick = Decimal(str(get_profit_trail_tick_size(price)))
+    target_step = max(price_dec * Decimal(str(PROFIT_TARGET_PERCENT)) / 100, tick)
+    back_step = max(price_dec * Decimal(str(PROFIT_BACK_PERCENT)) / 100, tick)
+    raw_target = float(price_dec - target_step)
+    raw_stop = float(price_dec + back_step)
+    target = max(floor_price_to_tick(raw_target, get_profit_trail_tick_size(raw_target)), limit_down_price)
+    stop = ceil_price_to_tick(raw_stop, get_profit_trail_tick_size(raw_stop))
+    return target, stop
 
 
 def calculate_take_profit_amount_by_percent(entry_price: float, take_profit_percent: float) -> float:
@@ -308,6 +341,43 @@ def compute_average_daily_volume(bars_by_date: dict, target_date: date):
     return average if average > 0 else None
 
 
+def build_previous_turnover_table(bars_by_stock: dict, target_date: date) -> dict:
+    """各交易日清單內所有股票的前一有資料交易日成交金額。
+    回傳 dict[YYYY-MM-DD -> {'by_stock': {股票: 金額}, 'sorted': 由小到大金額}]；
+    當日無分K或無前一日資料的股票不列入。僅使用前一日資料，當日開盤前即可算出。"""
+    target_key = target_date.strftime('%Y-%m-%d')
+    table: dict[str, dict] = {}
+    for stock_name, bars_by_date in bars_by_stock.items():
+        previous_bars = None
+        for date_key in sorted(bars_by_date):
+            if date_key > target_key:
+                break
+            bars = bars_by_date[date_key]
+            if not bars:
+                continue
+            if previous_bars is not None:
+                turnover = (sum(bar['volume'] for bar in previous_bars)
+                            * VOLUME_UNIT_SHARES * previous_bars[-1]['close'])
+                table.setdefault(date_key, {'by_stock': {}})['by_stock'][stock_name] = turnover
+            previous_bars = bars
+    for entry in table.values():
+        entry['sorted'] = sorted(entry['by_stock'].values())
+    return table
+
+
+def is_previous_turnover_qualified(stock_name: str, date_key: str, turnover_table: dict) -> bool:
+    """成交金額不低於保底，且清單內金額嚴格較低的股票占比不低於 (100 − 排名百分比)%。"""
+    entry = turnover_table.get(date_key)
+    if not entry or stock_name not in entry['by_stock']:
+        return False
+    turnover = entry['by_stock'][stock_name]
+    if turnover < MIN_PREVIOUS_TURNOVER:
+        return False
+    lower_count = bisect.bisect_left(entry['sorted'], turnover)
+    required_ratio = 1 - Decimal(str(PREVIOUS_TURNOVER_TOP_PERCENT)) / 100
+    return Decimal(lower_count) >= required_ratio * len(entry['sorted'])
+
+
 def calculate_net_pnl_for_short_trade(entry_price: float, exit_price: float) -> tuple[float, float]:
     """計算放空交易每股淨損益與總交易成本。"""
     sell_side_cost = entry_price * (BROKERAGE_FEE_RATE + SELL_TRANSACTION_TAX_RATE)
@@ -392,7 +462,7 @@ def evaluate_candidates(
     candidates: list,
     print_results: bool = False,
 ) -> list:
-    """對候選交易套用固定停損／停利及強制平倉並回傳結果。"""
+    """套用固定停損、獲利保護、追蹤停利及強制平倉。"""
     all_results = []
     for candidate in candidates:
         name = candidate['name']
@@ -461,30 +531,51 @@ def evaluate_candidates(
             'stop_loss_price': stop_loss_price,
         }
         result = None
+        protection_active = False
+        profit_tracking_active = False
+        trailing_stop_price = None
+        next_profit_price = take_profit_price
+        protect_trigger = protected_stop = None
+        if ENABLE_PROFIT_PROTECTION:
+            protect_trigger = Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_PROFIT_PER)) / 100)
+            raw_protected_stop = float(Decimal(str(entry_price)) * (1 - Decimal(str(PROTECT_LOSS_PER)) / 100))
+            protected_stop = ceil_price_to_tick(raw_protected_stop, get_profit_trail_tick_size(raw_protected_stop))
         settlement_dt = entry_dt.replace(hour=intraday_compare_end[0],
                                          minute=intraday_compare_end[1], second=0, microsecond=0)
         for i in range(entry_idx, len(dt_values)):
             bar_time = dt_values[i]
             bar_open = float(open_values[i])
+            # 僅使用前一根結束時已生效的出場線，較低反彈價位優先。
+            exit_price = stop_loss_price
+            exit_reason = 'protect_profit' if protection_active else 'stop'
+            if profit_tracking_active and trailing_stop_price < exit_price:
+                exit_price, exit_reason = trailing_stop_price, 'trailing_profit'
             # 強制平倉先於該分鐘內的 high/low；缺棒則在其後第一根 open 平倉。
             if bar_time >= settlement_dt:
                 reason = 'close' if bar_time == settlement_dt else 'close_delayed'
                 result = build_outcome_result(reason, entry_price, bar_open)
-            elif i > entry_idx and bar_open >= stop_loss_price:
-                result = build_outcome_result(
-                    'stop_gap', entry_price, apply_stop_slippage(bar_open, limit_up_price))
-            elif high_values[i] >= stop_loss_price:
-                # open入場後，同根同時觸及停損及停利時停損優先。
-                result = build_outcome_result(
-                    'stop', entry_price, apply_stop_slippage(stop_loss_price, limit_up_price))
-            elif i > entry_idx and bar_open <= take_profit_price:
-                # 跳空越過停利價，以 open 回補。
-                result = build_outcome_result('take_profit_gap', entry_price, bar_open)
-            elif low_values[i] <= take_profit_price:
-                result = build_outcome_result('take_profit', entry_price, take_profit_price)
+            elif bar_open >= exit_price:
+                fill_price = (apply_stop_slippage(bar_open, limit_up_price)
+                              if exit_reason == 'stop' else bar_open)
+                result = build_outcome_result(exit_reason + '_gap', entry_price, fill_price)
+            elif high_values[i] >= exit_price:
+                fill_price = (apply_stop_slippage(exit_price, limit_up_price)
+                              if exit_reason == 'stop' else exit_price)
+                result = build_outcome_result(exit_reason, entry_price, fill_price)
             if result is not None:
                 result['exit_dt'] = bar_time
                 break
+            # 本根未出場才以low啟動／推進，新出場線下一根生效。
+            low = float(low_values[i])
+            if (ENABLE_PROFIT_PROTECTION and not protection_active and Decimal(str(low)) <= protect_trigger
+                    and protected_stop < stop_loss_price):
+                stop_loss_price = protected_stop
+                protection_active = True
+            if low <= next_profit_price:
+                next_profit_price, new_trailing_stop = calculate_short_profit_trail(low, limit_down_price)
+                trailing_stop_price = (min(trailing_stop_price, new_trailing_stop)
+                                       if profit_tracking_active else new_trailing_stop)
+                profit_tracking_active = True
         if result is None:
             # 仍持倉但沒有平倉時段資料，不回推至過去 open，也不計入已完成績效。
             result = {
@@ -602,7 +693,7 @@ def count_testable_stock_dates(bars_by_date, target_date):
     return count
 
 
-def collect_trade_candidates(stock_name, bars_by_date, target_date):
+def collect_trade_candidates(stock_name, bars_by_date, target_date, turnover_table):
     """每檔每日取首次轉弱訊號，等待後續close低於該根average，再於下一根有效分K open放空。"""
     candidates = []
     for date_key in sorted(bars_by_date):
@@ -617,7 +708,7 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date):
         previous = compute_yesterday_stats(yesterday)
         previous_close = previous['close']
         previous_turnover = previous['volume'] * VOLUME_UNIT_SHARES * previous_close
-        if previous_turnover < MIN_PREVIOUS_TURNOVER:
+        if not is_previous_turnover_qualified(stock_name, date_key, turnover_table):
             continue
         average_daily_volume = compute_average_daily_volume(bars_by_date, current_date)
         if average_daily_volume is None:
@@ -666,6 +757,14 @@ def save_shared_api_cache(cache_path, payload, raw):
 
 
 def validate_settings():
+    if type(ENABLE_PROFIT_PROTECTION) is not bool:
+        raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
+    protection_values = (PROTECT_PROFIT_PER, PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
+    for value in (*protection_values, PROFIT_BACK_PERCENT, PROFIT_TARGET_PERCENT):
+        if not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError('獲利保護及追蹤停利百分比必須介於 0 與 100 之間')
+    if ENABLE_PROFIT_PROTECTION and PROTECT_LOSS_PER >= PROTECT_PROFIT_PER:
+        raise ValueError('保護毛利百分比必須小於獲利保護啟動百分比')
     if type(MIN_MINUTE_BARS_BEFORE_0930) is not int or MIN_MINUTE_BARS_BEFORE_0930 <= 0:
         raise ValueError('MIN_MINUTE_BARS_BEFORE_0930 必須為正整數')
     for name, value in (('VOLUME_AVERAGE_DAYS', VOLUME_AVERAGE_DAYS),
@@ -677,9 +776,12 @@ def validate_settings():
         raise ValueError('STOP_SLIPPAGE_TICKS 必須為非負整數')
     for name, value in (('MIN_PREVIOUS_TURNOVER', MIN_PREVIOUS_TURNOVER),
                         ('MIN_VOLUME_RATIO', MIN_VOLUME_RATIO),
+                        ('PREVIOUS_TURNOVER_TOP_PERCENT', PREVIOUS_TURNOVER_TOP_PERCENT),
                         ('MIN_RUNUP_PERCENT', MIN_RUNUP_PERCENT)):
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError(f'{name} 必須為有限非負數')
+    if not 0 < PREVIOUS_TURNOVER_TOP_PERCENT <= 100:
+        raise ValueError('PREVIOUS_TURNOVER_TOP_PERCENT 必須大於 0 且不超過 100')
     for value in (SIGNAL_START_TIME, ENTRY_DEADLINE, INTRADAY_COMPARE_END_LOWER):
         if (len(value) != 2 or any(type(part) is not int for part in value)
                 or not 0 <= value[0] <= 23 or not 0 <= value[1] <= 59):
@@ -695,31 +797,23 @@ def validate_settings():
 
 
 def format_result_line(stock_name, date_str, signal, result):
+    display_name = re.sub(r'\.TW(?:O)?$', '', stock_name)
     prefix = (
-        f'{date_str} 放空 {stock_name} 昨收={signal["previous_close"]:.2f} '
-        f'開盤={signal["day_open"]:.2f} 日高={signal["day_high"]:.2f} '
-        f'轉弱價={signal["trigger_price"]:.4f} 量比={signal["volume_ratio"]:.2f} '
-        f'跌破確認={signal["signal_dt"]:%H:%M} close={signal["signal_close"]:.2f} '
-        f'跌破average={signal["average_break_dt"]:%H:%M} close={signal["average_break_close"]:.2f} average={signal["average_break_price"]:.4f} '
-        f'停損={signal["stop_loss_price"]:.2f} 停利={signal["take_profit_price"]:.2f} | '
+        f'{date_str} {display_name} 量比={signal["volume_ratio"]:.2f} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
     if result['outcome'] == 'incomplete':
         return prefix + 'data_insufficient 資料不足，未計入已完成交易績效'
     return (prefix + f'{result["exit_dt"]:%H:%M} {result["exit_price"]:.2f} '
-            f'{result["exit_reason"]} | 每股淨損益={result["signed_pnl"]:+.4f} '
-            f'淨報酬率={result["net_return_percent"]:+.4f}%')
+            f'{result["exit_reason"]} | 每股淨損益={result["signed_pnl"]:+.4f}')
 
 
 def summarize_results(label, pairs):
     completed = [result for _, result in pairs if result['outcome'] != 'incomplete']
     incomplete = len(pairs) - len(completed)
-    average_return = (sum(r['net_return_percent'] for r in completed) / len(completed)
-                      if completed else 0.0)
     return (f'{label} 已完成交易數={len(completed)} 資料不足筆數={incomplete} '
             f'獲利筆數={sum(r["is_success"] for r in completed)} '
-            f'每筆一股淨損益合計={sum(r["signed_pnl"] for r in completed):+.4f} '
-            f'平均淨報酬率={average_return:+.4f}%')
+            f'每筆一股淨損益合計={sum(r["signed_pnl"] for r in completed):+.4f}')
 
 
 def main():
@@ -783,8 +877,14 @@ def main():
              f'早盤篩選：09:00～09:29 至少 {MIN_MINUTE_BARS_BEFORE_0930} 根有效且不重複分K，'
              '不足則排除當日交易；於當日分析前先判斷，不限制最早入場至09:30。',
              f'停損={OPTIMIZE_LOSS_PER_LOWER:g}%（向上取tick，出場加計{STOP_SLIPPAGE_TICKS}個tick滑價，不超過漲停） '
-             f'停利={OPTIMIZE_PROFIT_PER_LOWER:g}%（向下取tick，觸及即平倉）；同根停損優先，開盤跳空以open出場。',
-             f'選股：前一有資料交易日成交金額（日量×{VOLUME_UNIT_SHARES}×昨收）至少{MIN_PREVIOUS_TURNOVER:,}元；'
+             f'追蹤停利啟動={OPTIMIZE_PROFIT_PER_LOWER:g}%（向下取tick，達標不直接平倉）；'
+             + (f'獲利保護啟用（浮盈{PROTECT_PROFIT_PER:g}%後保住{PROTECT_LOSS_PER:g}%毛利），'
+                if ENABLE_PROFIT_PROTECTION else '獲利保護關閉，')
+             + f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}%；'
+             '先檢查既有出場線，本根low更新的出場線下一根生效；跳空以open出場，僅固定停損加計滑價。',
+             f'選股：前一有資料交易日成交金額（日量×{VOLUME_UNIT_SHARES}×昨收）須在當日清單內排名前{PREVIOUS_TURNOVER_TOP_PERCENT:g}%'
+             f'（清單內金額嚴格較低的股票占比至少{100 - PREVIOUS_TURNOVER_TOP_PERCENT:g}%；當日無分K或無前一日資料者不列入排名），'
+             f'且至少{MIN_PREVIOUS_TURNOVER:,}元；排名僅用前一日資料，於當日分析前算定。'
              f'當日最高價不低於當日開盤價的{100 + MIN_RUNUP_PERCENT:g}%；'
              f'09:00起累計量不低於前{VOLUME_AVERAGE_DAYS}個有資料交易日均量×（已過分鐘數÷{REGULAR_SESSION_MINUTES}）'
              f'的{MIN_VOLUME_RATIO:g}倍，前日資料不足{VOLUME_AVERAGE_DAYS}日則不交易。',
@@ -801,11 +901,15 @@ def main():
              '淨損益扣除既定手續費及交易稅，停損含上述滑價，未含借券費；每筆一股合計非投資組合報酬率。']
     results = []
     testable_count = 0
+    # 排名需先備齊清單內全部股票的分K，再逐檔分析。
+    bars_by_stock = {name: parse_bars(raw[name]) for name in stock_names}
+    turnover_table = build_previous_turnover_table(bars_by_stock, target_date)
     for name in stock_names:
-        bars = parse_bars(raw[name])
+        bars = bars_by_stock[name]
         if HISTORICAL_CACHE_DATE:
             testable_count += count_testable_stock_dates(bars, target_date)
-        results.extend(evaluate_candidates(collect_trade_candidates(name, bars, target_date)))
+        results.extend(evaluate_candidates(
+            collect_trade_candidates(name, bars, target_date, turnover_table)))
     if HISTORICAL_CACHE_DATE:
         lines.insert(0, f'歷史 cache 模式：{target_date}，使用 cache 全部股票，可檢驗股票－日期數={testable_count:,}')
     results.sort(key=lambda pair: (pair[0]['entry_dt'], pair[0]['name']))
@@ -813,6 +917,14 @@ def main():
         lines.append(format_result_line(signal['name'], signal['date_str'], signal, result))
     for day in sorted({signal['date_str'] for signal, _ in results}):
         lines.append(summarize_results(day, [pair for pair in results if pair[0]['date_str'] == day]))
+    monthly_pnl = {}
+    for signal, result in results:
+        if result['outcome'] == 'incomplete':
+            continue
+        month = signal['date_str'][:7]
+        monthly_pnl[month] = monthly_pnl.get(month, 0.0) + result['signed_pnl']
+    for month, pnl in sorted(monthly_pnl.items()):
+        lines.append(f'{month} 每月每筆一股淨損益合計={pnl:+.4f}')
     lines.append(summarize_results('總計', results))
     output = '\n'.join(lines) + '\n'
     EACH_STOCK_OUTPUT_FILE.write_text(output, encoding='utf-8')
