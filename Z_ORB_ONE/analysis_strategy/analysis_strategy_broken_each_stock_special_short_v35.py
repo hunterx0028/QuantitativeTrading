@@ -2,7 +2,8 @@
 
 選股（皆以訊號棒當下已知資料判斷）：
 1. 前一有資料交易日成交金額（日成交量×昨收）在當日清單內排名前 PREVIOUS_TURNOVER_TOP_PERCENT%，
-   且不低於保底金額 MIN_PREVIOUS_TURNOVER。排名於當日分析前以各股前一日資料計算，盤中不變。
+   且不低於保底金額 MIN_PREVIOUS_TURNOVER。排名於當日分析前以各股前一日資料計算，盤中不變；
+   排名母體只含前 VOLUME_AVERAGE_DAYS 個有資料交易日齊備且均量大於零的股票。
 2. 當日最高價（09:00起，含訊號棒）不低於當日開盤價的 (1 + MIN_RUNUP_PERCENT%)。
 3. 當日累計成交量（09:00起，含訊號棒）不低於
    前 VOLUME_AVERAGE_DAYS 個有資料交易日均量 × 已過分鐘比例 × MIN_VOLUME_RATIO。
@@ -40,7 +41,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # IDE 直接執行時在此調整；時間標籤視為該分鐘起點。
 SIGNAL_START_TIME = (9, 20)  # 訊號棒最早時間；實際入場為其後下一根有效分K open
 ENTRY_DEADLINE = (12, 0)  # 實際open入場截止（含），不允許截止次分鐘入場
-MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 PREVIOUS_TURNOVER_TOP_PERCENT = 30.0  # 前一日成交金額須在當日清單內排名前此百分比；100為不限排名
 MIN_PREVIOUS_TURNOVER = 300_000_000  # 前一有資料交易日成交金額保底下限（元）＝日成交量×昨收
 VOLUME_UNIT_SHARES = 1000  # 分K volume 單位為張；換算成交金額用
@@ -62,6 +62,7 @@ PROFIT_TARGET_PERCENT = 1.0  # 下一個追蹤目標相對當次low再向下的�
 STOP_SLIPPAGE_TICKS = 0  # 停損（含跳空停損）出場價向上加計的tick數；0為不計滑價
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)
+MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
 # 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
 # 非空：只使用指定 cache 內全部股票與分 K，不讀 stock_data.py、不回退 API。
@@ -89,35 +90,45 @@ def parse_positive_number(value):
     return value if math.isfinite(value) and value > 0 else None
 
 
-def get_tick_size(price: float) -> float:
-    if price < 10:
-        return 0.01
-    elif price < 50:
-        return 0.05
-    elif price < 100:
-        return 0.1
-    elif price < 500:
-        return 0.5
-    elif price < 1000:
-        return 1
-    else:
-        return 5
+def get_tick_size(price):
+    """A boundary belongs to the price interval starting at that boundary."""
+    price = Decimal(str(price))
+    for upper, tick in (('10', '0.01'), ('50', '0.05'), ('100', '0.1'),
+                        ('500', '0.5'), ('1000', '1')):
+        if price < Decimal(upper):
+            return float(tick)
+    return 5.0
 
 
-def floor_price_to_tick(price: float, tick: float) -> float:
-    """將價格無條件捨去到合法 tick。"""
-    price_dec = Decimal(str(price))
-    tick_dec = Decimal(str(tick))
-    floored_units = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_FLOOR)
-    return float(floored_units * tick_dec)
+def floor_price_to_tick(price, tick=None):
+    tick = Decimal(str(get_tick_size(price) if tick is None else tick))
+    return float((Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_FLOOR) * tick)
 
 
-def ceil_price_to_tick(price: float, tick: float) -> float:
-    """將價格無條件進位到合法 tick。"""
-    price_dec = Decimal(str(price))
-    tick_dec = Decimal(str(tick))
-    ceiled_units = (price_dec / tick_dec).quantize(Decimal("1"), rounding=ROUND_CEILING)
-    return float(ceiled_units * tick_dec)
+def ceil_price_to_tick(price, tick=None):
+    tick = Decimal(str(get_tick_size(price) if tick is None else tick))
+    return float((Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
+
+
+def next_price_up(price):
+    """Next legal price strictly above price, including at interval boundaries."""
+    rounded = ceil_price_to_tick(price)
+    if Decimal(str(rounded)) > Decimal(str(price)):
+        return rounded
+    return float(Decimal(str(rounded)) + Decimal(str(get_tick_size(rounded))))
+
+
+def next_price_down(price):
+    """Next legal price strictly below price; use the lower interval at a boundary."""
+    rounded = floor_price_to_tick(price)
+    if Decimal(str(rounded)) < Decimal(str(price)):
+        return rounded
+    value = Decimal(str(rounded))
+    lower_ticks = {'10': '0.01', '50': '0.05', '100': '0.1', '500': '0.5', '1000': '1'}
+    tick = next((step for boundary, step in lower_ticks.items()
+                 if value == Decimal(boundary)), None)
+    return float(value - Decimal(tick or str(get_tick_size(rounded))))
+
 
 
 def calculate_limit_prices(prev_close: float):
@@ -141,12 +152,8 @@ def calculate_stop_loss_amount_by_percent(entry_price: float, stop_loss_percent:
     return entry_price * (stop_loss_percent / 100.0)
 
 
-def get_profit_trail_tick_size(price: float) -> float:
-    """沿用 v18、v31 的追蹤停利 tick 邊界規則。"""
-    for upper, tick in ((10, 0.01), (50, 0.05), (100, 0.1), (500, 0.5), (1000, 1)):
-        if price <= upper:
-            return tick
-    return 5
+# Compatibility name; all price calculations now share one grid definition.
+get_profit_trail_tick_size = get_tick_size
 
 
 def calculate_short_profit_trail(price: float, limit_down_price: float) -> tuple[float, float]:
@@ -176,7 +183,7 @@ def apply_stop_slippage(price: float, limit_up_price: float) -> float:
     """停損回補價向上加計 STOP_SLIPPAGE_TICKS 個tick（逐tick依價位區間），不超過漲停價。"""
     price_dec = Decimal(str(price))
     for _ in range(STOP_SLIPPAGE_TICKS):
-        price_dec += Decimal(str(get_tick_size(float(price_dec))))
+        price_dec = Decimal(str(next_price_up(price_dec)))
     return min(float(price_dec), limit_up_price)
 
 
@@ -344,22 +351,27 @@ def compute_average_daily_volume(bars_by_date: dict, target_date: date):
 def build_previous_turnover_table(bars_by_stock: dict, target_date: date) -> dict:
     """各交易日清單內所有股票的前一有資料交易日成交金額。
     回傳 dict[YYYY-MM-DD -> {'by_stock': {股票: 金額}, 'sorted': 由小到大金額}]；
-    當日無分K或無前一日資料的股票不列入。僅使用前一日資料，當日開盤前即可算出。"""
+    當日無分K的股票不列入。
+    排名母體與「當日可交易」的條件一致（對齊實機 VOL）：之前有資料的交易日不足
+    VOLUME_AVERAGE_DAYS 日，或這幾日均量為零的股票，當日本來就不會交易，也不列入排名。
+    僅使用當日之前的資料，當日開盤前即可算出。"""
     target_key = target_date.strftime('%Y-%m-%d')
     table: dict[str, dict] = {}
     for stock_name, bars_by_date in bars_by_stock.items():
         previous_bars = None
+        previous_volumes = []  # 之前各有資料交易日的日量，由舊到新
         for date_key in sorted(bars_by_date):
             if date_key > target_key:
                 break
             bars = bars_by_date[date_key]
             if not bars:
                 continue
-            if previous_bars is not None:
-                turnover = (sum(bar['volume'] for bar in previous_bars)
-                            * VOLUME_UNIT_SHARES * previous_bars[-1]['close'])
+            recent_volumes = previous_volumes[-VOLUME_AVERAGE_DAYS:]
+            if len(recent_volumes) == VOLUME_AVERAGE_DAYS and sum(recent_volumes) > 0:
+                turnover = recent_volumes[-1] * VOLUME_UNIT_SHARES * previous_bars[-1]['close']
                 table.setdefault(date_key, {'by_stock': {}})['by_stock'][stock_name] = turnover
             previous_bars = bars
+            previous_volumes.append(sum(bar['volume'] for bar in bars))
     for entry in table.values():
         entry['sorted'] = sorted(entry['by_stock'].values())
     return table
@@ -886,7 +898,7 @@ def main():
              + f'追蹤回撤={PROFIT_BACK_PERCENT:g}% 下次目標步幅={PROFIT_TARGET_PERCENT:g}%；'
              '先檢查既有出場線，本根low更新的出場線下一根生效；跳空以open出場，僅固定停損加計滑價。',
              f'選股：前一有資料交易日成交金額（日量×{VOLUME_UNIT_SHARES}×昨收）須在當日清單內排名前{PREVIOUS_TURNOVER_TOP_PERCENT:g}%'
-             f'（清單內金額嚴格較低的股票占比至少{100 - PREVIOUS_TURNOVER_TOP_PERCENT:g}%；當日無分K或無前一日資料者不列入排名），'
+             f'（清單內金額嚴格較低的股票占比至少{100 - PREVIOUS_TURNOVER_TOP_PERCENT:g}%；當日無分K、前{VOLUME_AVERAGE_DAYS}個有資料交易日不齊或均量為零者不列入排名），'
              f'且至少{MIN_PREVIOUS_TURNOVER:,}元；排名僅用前一日資料，於當日分析前算定。'
              f'當日最高價不低於當日開盤價的{100 + MIN_RUNUP_PERCENT:g}%；'
              f'09:00起累計量不低於前{VOLUME_AVERAGE_DAYS}個有資料交易日均量×（已過分鐘數÷{REGULAR_SESSION_MINUTES}）'
@@ -921,13 +933,15 @@ def main():
     for day in sorted({signal['date_str'] for signal, _ in results}):
         lines.append(summarize_results(day, [pair for pair in results if pair[0]['date_str'] == day]))
     monthly_pnl = {}
+    monthly_trade_counts = {}
     for signal, result in results:
         if result['outcome'] == 'incomplete':
             continue
         month = signal['date_str'][:7]
         monthly_pnl[month] = monthly_pnl.get(month, 0.0) + result['signed_pnl']
+        monthly_trade_counts[month] = monthly_trade_counts.get(month, 0) + 1
     for month, pnl in sorted(monthly_pnl.items()):
-        lines.append(f'{month} 每月每筆一股淨損益合計={pnl:+.4f}')
+        lines.append(f'{month} 已完成交易數={monthly_trade_counts[month]} 每月每筆一股淨損益合計={pnl:+.4f}')
     lines.append(summarize_results('總計', results))
     output = '\n'.join(lines) + '\n'
     EACH_STOCK_OUTPUT_FILE.write_text(output, encoding='utf-8')

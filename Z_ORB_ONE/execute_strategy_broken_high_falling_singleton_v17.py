@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import json
+import copy
 import time
 import sys
 import math
@@ -11,7 +12,7 @@ import uuid
 import requests
 from contextlib import contextmanager
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime, timedelta
 import pytz
@@ -59,7 +60,7 @@ class TeeStream:
 # ============ 參數/常數 ============
 # 已知對齊原則與刻意差異：
 # 1. 回測版以分 K 模擬策略，實機版以 REST 即時 quote 執行；資料粒度差異不視為策略不一致。
-# 2. VOL對齊v35，VOL固定停利，不啟用保護及追蹤。
+# 2. 所有策略共用獲利保護及逐步追蹤停利；啟動逐利的浮盈門檻依策略設定。
 TZ = pytz.timezone("Asia/Taipei")
 BASE_DIR = os.path.dirname(__file__)
 STATE_DIR = os.path.join(BASE_DIR, "stock_state")  # 狀態檔目錄
@@ -75,8 +76,8 @@ STRATEGY_VOL = 'VOL'
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
 
-# 目前受交易規格與額度限制，每檔股票最多只交易一張；實際運行不會出現
-# 多張委託中部分張數成功、部分張數失敗的情境。成交回報仍保留一般性防禦處理。
+# 一筆入場委託可分批成交；出場意圖鎖定後，晚到成交亦須補平。
+# 不主動撤銷入場委託；成交數量與有效回補殘量以券商回報及查詢共同校正。
 
 ENABLE_PROFIT_PROTECTION = False  # 控制獲利保護，不影響固定停損及追蹤停利
 PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
@@ -104,6 +105,7 @@ AVG_STAGE_1_AMPLITUDE_PERCENT = 1.0
 AVG_STAGE_2_AMPLITUDE_PERCENT = 1.0
 AVG_STAGE_3_AMPLITUDE_PERCENT = 1.0
 AVG_SLOPE_CUTOFF_TIME = (9, 20)
+AVG_MAX_MISSING_SLOPE_BARS = 5  # 09:00（含）至斜率截止（不含）；無效 average 亦算缺棒，0 表示不可缺棒
 AVG_MAX_NORMALIZED_SLOPE = 0.06  # 相對昨收 %／分鐘，須嚴格小於此值
 AVG_ENTRY_START_TIME = (10, 0)
 AVG_ENTRY_DEADLINE = (11, 0)
@@ -115,10 +117,6 @@ AVG_STOP_LOSS_PERCENT = 2.0
 AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
 AVG_ENTRY_ORDER_QUANTITY = 1
-AVG_PROTECT_PROFIT_PER = 2.5
-AVG_PROTECT_LOSS_PER = 1.5
-AVG_PROFIT_BACK_PERCENT = 0.5
-AVG_PROFIT_TARGET_PERCENT = 1.0
 
 # VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
@@ -148,12 +146,11 @@ TRADE_API_DEGRADED_EVENT = threading.Event()  # 當日停止新進場；既有�
 TRADE_CALL_STATE_LOCK = threading.Lock()
 TRADE_CALL_STATE: Dict[str, Any] = {}
 ORDER_SUBMISSION_FUTURES: Dict[str, Future] = {}
-ENTRY_CANCEL_FUTURES: Dict[str, tuple] = {}
 
 ACTIVE_ORDER_STATES: Dict[str, Dict[str, Any]] = {}
 PENDING_DEALT_REPORTS: Dict[str, List[Dict[str, Any]]] = {}
-DEALT_REPORT_LOCK = threading.Lock()
 ORDER_STATE_LOCK = threading.RLock()
+DEALT_REPORT_LOCK = ORDER_STATE_LOCK  # 回報、書號綁定與累計量使用同一把可重入鎖
 TRADE_API_LOCK = threading.Lock()  # native SDK 的查詢與送單不可並行。
 SEEN_DEALT_REPORT_KEYS: set[tuple[str, str]] = set()
 ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = 0.0
@@ -269,8 +266,8 @@ def get_vol_config():
 
 def validate_vol_config():
     get_vol_config().validate()
-    if type(VOL_ENTRY_ORDER_QUANTITY) is not int or VOL_ENTRY_ORDER_QUANTITY != 1:
-        raise ValueError('VOL 每檔只允許一張')
+    if type(VOL_ENTRY_ORDER_QUANTITY) is not int or VOL_ENTRY_ORDER_QUANTITY <= 0:
+        raise ValueError('VOL 張數必須為正整數')
     for value in (VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('VOL 風控百分比必須介於0與100')
@@ -370,11 +367,12 @@ def get_avg_strategy() -> AvgStrategy:
             AVG_FORCE_CLOSE_TIME=AVG_FORCE_CLOSE_TIME,
             AVG_MAX_NORMALIZED_SLOPE=AVG_MAX_NORMALIZED_SLOPE,
             AVG_MIN_PRE_ENTRY_RANGE_PERCENT=AVG_MIN_PRE_ENTRY_RANGE_PERCENT,
-            AVG_PROFIT_BACK_PERCENT=AVG_PROFIT_BACK_PERCENT,
-            AVG_PROFIT_TARGET_PERCENT=AVG_PROFIT_TARGET_PERCENT,
-            AVG_PROTECT_LOSS_PER=AVG_PROTECT_LOSS_PER,
-            AVG_PROTECT_PROFIT_PER=AVG_PROTECT_PROFIT_PER,
+            AVG_PROFIT_BACK_PERCENT=PROFIT_BACK_PERCENT,
+            AVG_PROFIT_TARGET_PERCENT=PROFIT_TARGET_PERCENT,
+            AVG_PROTECT_LOSS_PER=PROTECT_LOSS_PER,
+            AVG_PROTECT_PROFIT_PER=PROTECT_PROFIT_PER,
             AVG_SLOPE_CUTOFF_TIME=AVG_SLOPE_CUTOFF_TIME,
+            AVG_MAX_MISSING_SLOPE_BARS=AVG_MAX_MISSING_SLOPE_BARS,
             AVG_STAGE_1_AMPLITUDE_PERCENT=AVG_STAGE_1_AMPLITUDE_PERCENT,
             AVG_STAGE_1_MIN_BARS=AVG_STAGE_1_MIN_BARS,
             AVG_STAGE_1_START_TIME=AVG_STAGE_1_START_TIME,
@@ -457,14 +455,34 @@ def report_unsettled_trades(states: Dict[str, Dict[str, Any]], context: str) -> 
     with ORDER_STATE_LOCK:
         unsettled = [
             {key: state.get(key) for key in (
-                "symbol_code_with_suf", "in_position", "qty", "entry_order_pending",
+                "symbol_code_with_suf", "symbol_name", "in_position", "qty", "entry_order_pending",
                 "entry_order_no", "entry_request_id", "exit_order_pending", "exit_order_no",
-                "exit_request_id", "exit_retry_reason", "entry_cancel_requested",
+                "exit_request_id", "exit_retry_reason", "exit_intent_reason",
+                "entry_filled_shares", "exit_filled_shares", "net_position_shares",
+                "exit_reserved_shares", "entry_execution", "exit_executions",
             )}
             for state in states.values()
-            if state.get("in_position") or state.get("entry_order_pending") or state.get("exit_order_pending")
+             if state.get("in_position") or state.get("entry_order_pending") or state.get("exit_order_pending")
+             or state.get('net_position_shares', 0) != 0
         ]
     attention = bool(unsettled) or TRADE_API_DEGRADED_EVENT.is_set()
+    if unsettled:
+        print(f'=== 未結清股票，請人工核對券商持倉與委託（{context}）===')
+        for item in unsettled:
+            net = item.get('net_position_shares')
+            net_text = f'{net} 股' if net is not None else '尚未確認'
+            print(f"[UNSETTLED_POSITION] 股票={item.get('symbol_code_with_suf')} "
+                  f"名稱={item.get('symbol_name')} 已知淨持倉={net_text} "
+                  f"入場未結={bool(item.get('entry_order_pending'))} "
+                  f"回補未結={bool(item.get('exit_order_pending'))}")
+            if item.get('entry_order_pending'):
+                print(f"  入場書號={item.get('entry_order_no') or '未知'} "
+                      f"request_id={item.get('entry_request_id') or ''}")
+            for order in item.get('exit_executions') or []:
+                if not order.get('terminal'):
+                    print(f"  回補書號={order.get('order_no') or '未知'} "
+                          f"request_id={order.get('request_id') or ''} "
+                          f"委託={order.get('ordered_shares')} 股 已成交={order.get('filled_shares')} 股")
     atomic_write_json(os.path.join(BASE_DIR, "trade_attention.json"), {
         "time": now_tpe().isoformat(), "context": context,
         "manual_attention_required": attention,
@@ -474,6 +492,15 @@ def report_unsettled_trades(states: Dict[str, Dict[str, Any]], context: str) -> 
               error=attention, context=context, unsettled=unsettled,
               sdk_degraded=TRADE_API_DEGRADED_EVENT.is_set())
     return attention
+
+
+def stop_at_force_exit_time(states):
+    """停止時間是硬性退出點；未結清部位交由人工處理。"""
+    now_local = now_tpe()
+    if (now_local.hour, now_local.minute) >= FORCE_EXIT_TIME:
+        attention = report_unsettled_trades(states, 'force_exit_time')
+        print(f"已達停止時間 {FORCE_EXIT_TIME[0]:02d}:{FORCE_EXIT_TIME[1]:02d}，程式結束。")
+        sys.exit(2 if attention else 0)
 
 
 def check_trade_api_watchdog(states: Dict[str, Dict[str, Any]]) -> None:
@@ -490,7 +517,7 @@ def check_trade_api_watchdog(states: Dict[str, Dict[str, Any]]) -> None:
     report_unsettled_trades(states, "trade_api_stalled")
 
 
-def consume_late_order_responses(states: Dict[str, Dict[str, Any]]) -> None:
+def consume_late_order_responses(states):
     for request_id, future in list(ORDER_SUBMISSION_FUTURES.items()):
         if not future.done():
             continue
@@ -498,45 +525,31 @@ def consume_late_order_responses(states: Dict[str, Dict[str, Any]]) -> None:
         try:
             response = future.result()
         except Exception:
-            continue  # 仍保留 unknown，由委託明細對帳，不直接補單。
+            continue
         if not isinstance(response, dict):
             continue
-        order_no = str(response.get("ord_no", "") or "").strip()
-        ret_code = str(response.get("ret_code", "") or "").strip()
-        rejected = bool(ret_code) and ret_code != "000000" and not order_no
-        if not rejected and (ret_code != "000000" or not order_no):
+        order_no = str(response.get('ord_no', '') or '').strip()
+        code = str(response.get('ret_code', '') or '').strip()
+        rejected = bool(code) and code != '000000' and not order_no
+        if not rejected and (code != '000000' or not order_no):
             continue
-        for state in states.values():
-            for role in ("entry", "exit"):
-                with ORDER_STATE_LOCK:
-                    if state.get(f"{role}_request_id") != request_id or state.get(f"{role}_order_no"):
+        with ORDER_STATE_LOCK:
+            for state in states.values():
+                for role, order in execution_orders(state):
+                    if order.get('request_id') != request_id or order.get('order_no'):
                         continue
                     if rejected:
-                        if state.get(f"{role}_fill_confirmed"):
-                            continue
-                        state[f"{role}_order_pending"] = False
-                        state[f"{role}_terminal_reason"] = "rejected"
-                        if role == "entry":
-                            state["traded"] = True
-                            state["exit_reason"] = "entry_order_terminated_unfilled"
-                        else:
-                            state["exit_retry_reason"] = state.get("exit_reason_pending") or "stop"
+                        order.update(terminal=True, request_id='')
+                        state[role + '_outcome_unknown'] = False
                     else:
-                        state[f"{role}_order_no"] = order_no
-                    state[f"{role}_outcome_unknown"] = False
-                apply_pending_dealt_reports(state)
-                atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
-                trade_log("LATE_ORDER_RESPONSE_RESOLVED", request_id=request_id, ord_no=order_no,
-                          role=role, rejected=rejected)
+                        bind_execution_order(state, role, order, order_no)
+                    refresh_execution_totals(state)
+                    atomic_write_json(state_path(state['symbol_code_with_suf']), state)
 
 
-# symbol: '2330' '0050'
-# action_type: Action.Buy or Action.Sell
-# trade_type: Trade.Cash or Trade.DayTradingSell
-# price_flag: PriceFlag.Market or PriceFlag.LimitDown or PriceFlag.LimitUp or PriceFlag.Limit
 def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quantity=1, price_flag=PriceFlag.Market, price=0.0) -> Optional[str]:
-    if type(quantity) is not int or quantity != 1:
-        raise ValueError("實機策略每檔委託只允許一張")
+    if type(quantity) is not int or quantity <= 0:
+        raise ValueError("委託張數必須為正整數")
     request_id = "ORB" + uuid.uuid4().hex
     priceInfo = price
 
@@ -656,152 +669,141 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
     return order_no
 
 
-def _find_state_by_order_no(order_no: str) -> tuple[Optional[Dict[str, Any]], str]:
-    # 僅保護記憶體查找，避免主流程刷新狀態表時中斷成交回報。
+
+def ensure_execution_ledger(state):
+    """All ledger quantities are shares; API order quantities remain lots."""
+    if 'entry_execution' not in state:
+        state['entry_execution'] = dict(
+            order_no=str(state.get('entry_order_no', '') or ''),
+            request_id=state.get('entry_request_id', ''),
+            ordered_shares=int(state.get('entry_order_qty', state.get('qty', 0))) * 1000,
+            filled_shares=0, filled_value=0.0, ws_shares=0, ws_value=0.0,
+            terminal=False, submitted_monotonic=time.monotonic())
+    state.setdefault('exit_executions', [])
+    return state['entry_execution']
+
+
+def execution_orders(state):
+    return [('entry', ensure_execution_ledger(state))] + [
+        ('exit', order) for order in state['exit_executions']]
+
+
+def order_result_shares(row, field='mat_qty'):
+    """Reject malformed/fractional share counts instead of truncating them."""
+    value = (Decimal(str(row['mat_qty_share'])) if field == 'mat_qty' and row.get('mat_qty_share') is not None
+             else Decimal(str(row.get(field, 0))) * 1000)
+    if not value.is_finite() or value < 0 or value != value.to_integral_value():
+        raise ValueError('Invalid broker quantity')
+    return int(value)
+
+
+def refresh_execution_totals(state):
+    """Called under ORDER_STATE_LOCK. Pending entry prevents early completion."""
+    entry = ensure_execution_ledger(state)
+    exits = state['exit_executions']
+    entered = entry['filled_shares']
+    exited = sum(o['filled_shares'] for o in exits)
+    reserved = sum(max(0, o['ordered_shares'] - o['filled_shares'])
+                   for o in exits if not o['terminal'])
+    net = entered - exited
+    state.update(entry_filled_shares=entered, exit_filled_shares=exited,
+                 net_position_shares=net, exit_reserved_shares=reserved,
+                 entry_filled_qty=entered // 1000, exit_filled_qty=exited // 1000,
+                 entry_fill_confirmed=entered > 0, exit_fill_confirmed=exited > 0,
+                 entry_fully_filled=entered >= entry['ordered_shares'],
+                 entry_order_pending=not entry['terminal'],
+                 exit_order_pending=any(not o['terminal'] for o in exits),
+                 in_position=net > 0, qty=max(0, net // 1000))
+    if entered:
+        state['entry_average_price'] = entry['filled_value'] / entered
+    if exited:
+        state['exit_price'] = sum(o['filled_value'] for o in exits) / exited
+    settled = entry['terminal'] and net == 0 and not state['exit_order_pending']
+    state['traded'] = bool(settled)
+    state['exit_fully_filled'] = bool(settled and entered > 0)
+    if settled:
+        state['exit_reason'] = state.get('exit_intent_reason') or 'entry_order_terminated_unfilled'
+    if net < 0:
+        TRADE_API_DEGRADED_EVENT.set()
+        trade_log('EXECUTION_QUANTITY_MISMATCH', error=True, **state_symbol_fields(state),
+                  entered=entered, exited=exited)
+    return net
+
+
+def apply_execution_fill(state, order, shares, value, source):
+    """Merge two independent cumulative views by maximum, never addition."""
+    if shares < 0 or shares > order['ordered_shares'] or (shares and not finite_positive(value)):
+        trade_log('INVALID_FILL_QUANTITY', error=True, **state_symbol_fields(state), shares=shares)
+        return False
+    old = order['filled_shares']
+    if shares > old:
+        order.update(filled_shares=shares, filled_value=value)
+    elif shares == old and shares and source == 'order_results':
+        order['filled_value'] = value
+    if order['filled_shares'] == order['ordered_shares']:
+        order['terminal'] = True
+    entry = ensure_execution_ledger(state)
+    if order is entry and order['filled_shares'] and not state.get('risk_prices_initialized'):
+        state['entry_price'] = order['filled_value'] / order['filled_shares']
+        state['risk_entry_price'] = state['entry_price']
+        recalc_entry_position_prices(state)
+        state['risk_prices_initialized'] = True
+        state['entry_first_fill_time'] = now_tpe().isoformat()
+    refresh_execution_totals(state)
+    if shares > old:
+        trade_log('FILL_UPDATE', **state_symbol_fields(state), source=source,
+                  role='entry' if order is entry else 'exit', ord_no=order.get('order_no'),
+                  filled_shares=order['filled_shares'], entry_shares=state['entry_filled_shares'],
+                  exit_shares=state['exit_filled_shares'], net_shares=state['net_position_shares'],
+                  reserved_shares=state['exit_reserved_shares'])
+    return shares > old
+
+
+def apply_execution_report(state, data, role):
+    with ORDER_STATE_LOCK:
+        orders = [o for r, o in execution_orders(state) if r == role]
+        order_no = str(data.get('ord_no', '') or '').strip()
+        order = next((o for o in orders if o.get('order_no') == order_no), None)
+        if order is None:
+            return False
+        try:
+            shares = int(data.get('mat_qty', 0))
+            price = float(data.get('mat_price', 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if shares <= 0 or not finite_positive(price):
+            return False
+        order['ws_shares'] += shares
+        order['ws_value'] += shares * price
+        changed = apply_execution_fill(state, order, order['ws_shares'], order['ws_value'], 'DEALT_REPORT')
+        atomic_write_json(state_path(state['symbol_code_with_suf']), state)
+        return changed
+
+
+def bind_execution_order(state, role, order, order_no):
+    order['order_no'] = str(order_no).strip()
+    order['request_id'] = ''
+    if role == 'entry' or order is state['exit_executions'][-1]:
+        state[role + '_order_no'] = order['order_no']
+        state[role + '_outcome_unknown'] = False
+    apply_pending_dealt_reports(state)
+
+
+def _find_state_by_order_no(order_no):
     with ORDER_STATE_LOCK:
         for state in ACTIVE_ORDER_STATES.values():
-            if str(state.get("entry_order_no", "") or "").strip() == order_no:
-                return state, "entry"
-            if str(state.get("exit_order_no", "") or "").strip() == order_no:
-                return state, "exit"
-    return None, ""
+            for role, order in execution_orders(state):
+                if order.get('order_no') == order_no:
+                    return state, role
+    return None, ''
 
 
-def _apply_entry_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, Any]) -> bool:
-    """
-    以主動成交回報校正入場價量；若已由另一來源接管則不覆寫。
-    已知限制：目前實際只使用一張股票完整進出，部分成交或殘量拆單處理刻意延後。
-    """
-    try:
-        mat_price = float(data.get("mat_price", 0) or 0)
-        # DEALT_REPORT 實機回報 mat_qty 為股數；例如 mat_price=67.5, mat_qty=1000, pay_price=67500。
-        mat_shares = int(data.get("mat_qty", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    if mat_price <= 0 or mat_shares <= 0:
-        return False
-
-    with ORDER_STATE_LOCK:
-        source = str(state.get("entry_price_source", "estimated") or "estimated")
-        if source == "order_results" or state.get("entry_fully_filled"):
-            return False
-        try:
-            entry_order_qty = int(state.get("entry_order_qty", state.get("qty", 0)) or 0)
-        except (TypeError, ValueError):
-            return False
-        if entry_order_qty <= 0:
-            return False
-
-        accumulated_shares = int(state.get("dealt_report_filled_shares", 0) or 0) + mat_shares
-        accumulated_value = float(state.get("dealt_report_filled_value", 0.0) or 0.0) + mat_price * mat_shares
-        expected_shares = entry_order_qty * 1000
-        filled_lots = min(accumulated_shares // 1000, entry_order_qty)
-
-        state["dealt_report_filled_shares"] = accumulated_shares
-        state["dealt_report_filled_value"] = accumulated_value
-        state["entry_price"] = accumulated_value / accumulated_shares
-        state["entry_filled_qty"] = filled_lots
-        state["entry_fill_confirmed"] = True
-        state.setdefault("entry_first_fill_time", now_tpe().isoformat())
-        state["entry_fully_filled"] = accumulated_shares >= expected_shares
-        state["entry_order_pending"] = not state["entry_fully_filled"]
-        state["in_position"] = True
-        state["entry_price_source"] = "dealt_report"
-        state["entry_fill_update_time"] = now_tpe().isoformat()
-        state["qty"] = max(filled_lots, 1)
-        recalc_entry_position_prices(state)
-        entry_price = state["entry_price"]
-        entry_order_no = state.get("entry_order_no")
-        entry_fully_filled = bool(state.get("entry_fully_filled"))
-        state_snapshot = dict(state)
-    atomic_write_json(state_path(state_snapshot.get("symbol_code_with_suf", "")), state_snapshot)
-
-    fill_text = "完整成交" if entry_fully_filled else "部分成交"
-    trade_log(
-        "FILL_UPDATE",
-        **state_symbol_fields(state),
-        role="entry",
-        source="DEALT_REPORT",
-        fill_status=fill_text,
-        ord_no=entry_order_no,
-        avg_price=f"{entry_price:.4f}",
-        filled_shares=accumulated_shares,
-        expected_shares=expected_shares,
-        filled_qty=filled_lots,
-        expected_qty=entry_order_qty,
-    )
-    print_entry_position_prices(state_snapshot)
-    return True
+def _apply_entry_dealt_report_to_state(state, data):
+    return apply_execution_report(state, data, 'entry')
 
 
-def _apply_exit_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, Any]) -> bool:
-    """
-    以主動成交回報確認平倉；完整成交後才視為交易完成。
-    已知限制：目前實際只使用一張股票完整進出，部分成交或殘量拆單處理刻意延後。
-    """
-    try:
-        mat_price = float(data.get("mat_price", 0) or 0)
-        # DEALT_REPORT 實機回報 mat_qty 為股數；需換算為張數後才和 exit_order_qty 比對。
-        mat_shares = int(data.get("mat_qty", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    if mat_price <= 0 or mat_shares <= 0:
-        return False
-
-    with ORDER_STATE_LOCK:
-        if state.get("exit_fully_filled") or state.get("traded"):
-            return False
-        try:
-            exit_order_qty = int(state.get("exit_order_qty", state.get("qty", 0)) or 0)
-        except (TypeError, ValueError):
-            return False
-        if exit_order_qty <= 0:
-            return False
-
-        accumulated_shares = int(state.get("exit_dealt_report_filled_shares", 0) or 0) + mat_shares
-        accumulated_value = float(state.get("exit_dealt_report_filled_value", 0.0) or 0.0) + mat_price * mat_shares
-        expected_shares = exit_order_qty * 1000
-        filled_lots = min(accumulated_shares // 1000, exit_order_qty)
-
-        state["exit_dealt_report_filled_shares"] = accumulated_shares
-        state["exit_dealt_report_filled_value"] = accumulated_value
-        state["exit_price"] = accumulated_value / accumulated_shares
-        state["exit_filled_qty"] = filled_lots
-        state["exit_fill_confirmed"] = True
-        state["exit_fully_filled"] = accumulated_shares >= expected_shares
-        state["exit_price_source"] = "dealt_report"
-        state["exit_fill_update_time"] = now_tpe().isoformat()
-
-        if state["exit_fully_filled"]:
-            state["exit_order_pending"] = False
-            state["traded"] = True
-            state["in_position"] = False
-            if state.get("exit_reason_pending"):
-                state["exit_reason"] = state.get("exit_reason_pending")
-        exit_price = state["exit_price"]
-        exit_order_no = state.get("exit_order_no")
-        exit_reason = state.get("exit_reason_pending") or state.get("exit_reason")
-        exit_fully_filled = bool(state.get("exit_fully_filled"))
-        state_snapshot = dict(state)
-
-    atomic_write_json(state_path(state_snapshot.get("symbol_code_with_suf", "")), state_snapshot)
-
-    fill_text = "完整成交" if exit_fully_filled else "部分成交"
-    trade_log(
-        "FILL_UPDATE",
-        **state_symbol_fields(state),
-        role="exit",
-        source="DEALT_REPORT",
-        fill_status=fill_text,
-        ord_no=exit_order_no,
-        exit_reason=exit_reason,
-        avg_price=f"{exit_price:.4f}",
-        filled_shares=accumulated_shares,
-        expected_shares=expected_shares,
-        filled_qty=filled_lots,
-        expected_qty=exit_order_qty,
-    )
-    return True
+def _apply_exit_dealt_report_to_state(state, data):
+    return apply_execution_report(state, data, 'exit')
 
 
 def _apply_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, Any], order_role: str) -> bool:
@@ -812,18 +814,12 @@ def _apply_dealt_report_to_state(state: Dict[str, Any], data: Dict[str, Any], or
     return False
 
 
-def apply_pending_dealt_reports(state: Dict[str, Any]) -> None:
-    order_pairs = [
-        ("entry", str(state.get("entry_order_no", "") or "").strip()),
-        ("exit", str(state.get("exit_order_no", "") or "").strip()),
-    ]
+def apply_pending_dealt_reports(state):
     with DEALT_REPORT_LOCK:
-        for order_role, order_no in order_pairs:
-            if not order_no:
-                continue
-            reports = PENDING_DEALT_REPORTS.pop(order_no, [])
-            for report in reports:
-                _apply_dealt_report_to_state(state, report, order_role)
+        for role, order in execution_orders(state):
+            if order.get('order_no'):
+                for report in PENDING_DEALT_REPORTS.pop(order['order_no'], []):
+                    _apply_dealt_report_to_state(state, report, role)
 
 
 def start_trade_report_stream(sdk: SDK) -> threading.Thread:
@@ -886,20 +882,44 @@ def start_trade_report_stream(sdk: SDK) -> threading.Thread:
 
 
 # ============ 工具函式 ============
-def get_tick_size(price: float) -> float:
-    """依台股價格區間回傳 tick size"""
-    if price <= 10:
-        return 0.01
-    elif price <= 50:
-        return 0.05
-    elif price <= 100:
-        return 0.1
-    elif price <= 500:
-        return 0.5
-    elif price <= 1000:
-        return 1.0
-    else:
-        return 5.0
+def get_tick_size(price):
+    """A boundary belongs to the price interval starting at that boundary."""
+    price = Decimal(str(price))
+    for upper, tick in (('10', '0.01'), ('50', '0.05'), ('100', '0.1'),
+                        ('500', '0.5'), ('1000', '1')):
+        if price < Decimal(upper):
+            return float(tick)
+    return 5.0
+
+
+def floor_price_to_tick_value(price, tick=None):
+    tick = Decimal(str(get_tick_size(price) if tick is None else tick))
+    return float((Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_FLOOR) * tick)
+
+
+def ceil_price_to_tick_value(price, tick=None):
+    tick = Decimal(str(get_tick_size(price) if tick is None else tick))
+    return float((Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
+
+
+def next_price_up(price):
+    """Next legal price strictly above price, including at interval boundaries."""
+    rounded = ceil_price_to_tick_value(price)
+    if Decimal(str(rounded)) > Decimal(str(price)):
+        return rounded
+    return float(Decimal(str(rounded)) + Decimal(str(get_tick_size(rounded))))
+
+
+def next_price_down(price):
+    """Next legal price strictly below price; use the lower interval at a boundary."""
+    rounded = floor_price_to_tick_value(price)
+    if Decimal(str(rounded)) < Decimal(str(price)):
+        return rounded
+    value = Decimal(str(rounded))
+    lower_ticks = {'10': '0.01', '50': '0.05', '100': '0.1', '500': '0.5', '1000': '1'}
+    tick = next((step for boundary, step in lower_ticks.items()
+                 if value == Decimal(boundary)), None)
+    return float(value - Decimal(tick or str(get_tick_size(rounded))))
 
 
 def get_up_down_price(stock_id: str, realtime_sdk):
@@ -1040,9 +1060,6 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
 
-    if is_vol_strategy(state):
-        print(f'停損：{flat_price:.2f}，固定停利：{profit_price:.2f}')
-        return
     _protect_loss_per, protect_profit_per = get_protect_loss_profit_percent(state)
     if state.get("side") == TRADE_SIDE_LONG:
         protect_profit_text = f"{entry_price * (1 + protect_profit_per / 100.0):.2f}"
@@ -1053,6 +1070,8 @@ def print_entry_position_prices(state: Dict[str, Any]) -> None:
 
 
 def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
+    if state.get('risk_prices_initialized'):
+        return True
     side = state.get("side")
     if side not in (TRADE_SIDE_SHORT, TRADE_SIDE_LONG):
         return False
@@ -1140,38 +1159,12 @@ def schedule_avg_position_quotes(states: Dict[str, Dict[str, Any]], realtime_sdk
     return get_avg_strategy().schedule_avg_position_quotes(states, realtime_sdk, request_quotes=request_quotes)
 
 
-def state_needs_entry_fill_update(state: Dict[str, Any]) -> bool:
-    has_pending_entry = bool(state.get("entry_order_pending"))
-    legacy_unconfirmed_entry = (
-        bool(state.get("in_position"))
-        and bool(state.get("entry_order_no"))
-        and not state.get("entry_fill_confirmed")
-    )
-    if (not has_pending_entry and not legacy_unconfirmed_entry) or state.get("traded"):
-        return False
-    # DEALT_REPORT 已接管此筆委託後，由後續主動回報累計部分成交；
-    # get_order_results 不再覆寫，也不再為這筆委託持續輪詢。
-    if state.get("entry_price_source") == "dealt_report":
-        return False
-    try:
-        entry_order_qty = int(state.get("entry_order_qty", state.get("qty", 0)) or 0)
-        entry_filled_qty = int(state.get("entry_filled_qty", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    return entry_order_qty > 0 and entry_filled_qty < entry_order_qty
+def state_needs_entry_fill_update(state):
+    return bool(state.get('entry_order_pending'))
 
 
-def state_needs_exit_fill_update(state: Dict[str, Any]) -> bool:
-    if not state.get("exit_order_pending") or state.get("traded"):
-        return False
-    if state.get("exit_price_source") == "dealt_report":
-        return False
-    try:
-        exit_order_qty = int(state.get("exit_order_qty", state.get("qty", 0)) or 0)
-        exit_filled_qty = int(state.get("exit_filled_qty", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    return exit_order_qty > 0 and exit_filled_qty < exit_order_qty
+def state_needs_exit_fill_update(state):
+    return bool(state.get('exit_order_pending'))
 
 
 def get_order_fill_info_by_results(order_no: str, order_results: List[Dict[str, Any]]) -> tuple[float, int]:
@@ -1216,297 +1209,111 @@ def get_order_fill_info_by_results(order_no: str, order_results: List[Dict[str, 
     return avg_price, total_qty
 
 
-def resolve_unknown_order(state: Dict[str, Any], role: str, results: list) -> None:
-    request_id = state.get(f"{role}_request_id")
-    if not request_id or state.get(f"{role}_order_no"):
-        return
-    matches = [row for row in results if isinstance(row, dict) and row.get("user_def") == request_id]
-    expected_action = Action.Sell if (state.get("side") == TRADE_SIDE_SHORT) == (role == "entry") else Action.Buy
-    expected_trade = Trade.DayTradingSell if expected_action == Action.Sell else Trade.Cash
-    valid = [row for row in matches if (
-        str(row.get("stock_no", "")) == state.get("symbol_code")
-        and str(row.get("buy_sell", "")) == expected_action.value
-        and str(row.get("trade", "")) == expected_trade.value
-        and str(row.get("ap_code", "")) == APCode.Common.value
-        and row.get("ord_no")
-        and str(row.get("org_qty", "")) in ("1", "1.0")
-    )]
-    if len(matches) == len(valid) == 1:
-        with ORDER_STATE_LOCK:
-            state[f"{role}_order_no"] = str(valid[0]["ord_no"]).strip()
-            state[f"{role}_outcome_unknown"] = False
-        apply_pending_dealt_reports(state)
-        trade_log("ORDER_UNKNOWN_RESOLVED", **state_symbol_fields(state), role=role,
-                  request_id=request_id, ord_no=state[f"{role}_order_no"])
-        atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
-        return
-    # 查不到不能證明原單不存在；不以逾時或空查詢結果解除 pending。
-    started = state.get(f"{role}_unknown_since_monotonic", time.monotonic())
-    if time.monotonic() - started >= ORDER_UNKNOWN_ALERT_SECONDS and not state.get(f"{role}_unknown_alerted"):
-        state[f"{role}_unknown_alerted"] = True
-        trade_log("ORDER_RECONCILE_REQUIRED", error=True, **state_symbol_fields(state),
-                  role=role, request_id=request_id, matches=len(matches),
-                  action="manual_check_required_keep_pending_no_resubmit")
-
-
-def reconcile_terminal_order(state: Dict[str, Any], role: str, results: list) -> None:
-    """一張委託：僅在確認零成交且全取消／拒單時解除 pending。"""
-    order_no = str(state.get(f"{role}_order_no", "") or "")
-    if not state.get(f"{role}_order_pending") or not order_no:
-        return
-    matches = [row for row in results if isinstance(row, dict) and str(row.get("ord_no", "")) == order_no]
-    if len(matches) != 1:
-        return
-    row = matches[0]
-    try:
-        original = float(row["org_qty"])
-        filled = float(row.get("mat_qty", 0))
-        filled_shares = float(row.get("mat_qty_share", filled * 1000))
-        cancelled = float(row.get("cel_qty", 0))
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return
-    if original != 1 or filled != 0 or filled_shares != 0 or cancelled not in (0, 1):
-        return
-    err_code = str(row.get("err_code", "") or "").strip()
-    rejected = bool(err_code.strip("0")) and str(row.get("celable", "")) == "2"
-    if cancelled < original and not rejected:
-        return
+def resolve_unknown_order(state, role, results):
     with ORDER_STATE_LOCK:
-        # 成交回報可能在查詢之後抵達；不可覆寫已確認的成交。
-        if state.get(f"{role}_fill_confirmed") or not state.get(f"{role}_order_pending"):
-            return
-        state[f"{role}_order_pending"] = False
-        state[f"{role}_outcome_unknown"] = False
-        state[f"{role}_terminal_reason"] = "rejected" if rejected else "cancelled"
-        if role == "entry":
-            state["traded"] = True
-            state["exit_reason"] = "entry_order_terminated_unfilled"
-        else:
-            # 保留平倉意圖；即使價格已離開觸發點，下輪仍須重試平倉。
-            state["exit_retry_reason"] = state.get("exit_reason_pending") or "stop"
-    atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
-    trade_log("ORDER_TERMINATED_UNFILLED", **state_symbol_fields(state), role=role,
-              ord_no=order_no, err_code=err_code, cancelled=cancelled,
-              action="block_entry_today" if role == "entry" else "retry_exit_next_loop")
+        for order_role, order in execution_orders(state):
+            if order_role != role or not order.get('request_id') or order.get('order_no'):
+                continue
+            matches = [row for row in results if row.get('user_def') == order['request_id']]
+            action = Action.Sell if (state.get('side') == TRADE_SIDE_SHORT) == (role == 'entry') else Action.Buy
+            trade = Trade.DayTradingSell if action == Action.Sell else Trade.Cash
+            valid = [row for row in matches if (
+                str(row.get('stock_no', '')) == state.get('symbol_code')
+                and str(row.get('buy_sell', '')) == action.value
+                and str(row.get('trade', '')) == trade.value
+                and str(row.get('ap_code', '')) == APCode.Common.value
+                and row.get('ord_no')
+                and str(row.get('org_qty', '')) in (
+                    str(order['ordered_shares'] // 1000), str(order['ordered_shares'] / 1000)))]
+            if len(matches) == len(valid) == 1:
+                bind_execution_order(state, role, order, valid[0]['ord_no'])
+            elif time.monotonic() - order.get('submitted_monotonic', time.monotonic()) >= ORDER_UNKNOWN_ALERT_SECONDS:
+                if not order.get('unknown_alerted'):
+                    order['unknown_alerted'] = True
+                    trade_log('ORDER_RECONCILE_REQUIRED', error=True, **state_symbol_fields(state),
+                              role=role, request_id=order['request_id'], matches=len(matches))
 
 
-def update_entry_fills_from_order_results(states: Dict[str, Dict[str, Any]], sdk, *, results=None, query_error=None) -> None:
-    """
-    用委託紀錄補成交價量。
-    已知限制：目前實際只使用一張股票完整進出，部分成交或殘量拆單處理刻意延後。
-    """
+def reconcile_terminal_order(state, role, results):
+    """Release reservations only after fills and cancelled remainder reconcile."""
+    with ORDER_STATE_LOCK:
+        for order_role, order in execution_orders(state):
+            if order_role != role or order['terminal'] or not order.get('order_no'):
+                continue
+            rows = [r for r in results if str(r.get('ord_no', '')).strip() == order['order_no']]
+            if len(rows) != 1:
+                continue
+            row = rows[0]
+            try:
+                original = order_result_shares(row, 'org_qty')
+                filled = order_result_shares(row)
+                cancelled = order_result_shares(row, 'cel_qty')
+            except (KeyError, ValueError, TypeError, OverflowError, InvalidOperation):
+                continue
+            if (original != order['ordered_shares'] or filled != order['filled_shares']
+                    or filled + cancelled > original):
+                continue  # A stale query cannot release quantity reserved by newer fills.
+            err = str(row.get('err_code', '') or '').strip()
+            rejected = bool(err.strip('0')) and str(row.get('celable', '')) == '2' and filled == 0
+            if filled + cancelled >= original or rejected:
+                order['terminal'] = True
+        refresh_execution_totals(state)
+
+
+def update_entry_fills_from_order_results(states, sdk, *, results=None, query_error=None):
     global ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC
-    candidates = [st for st in states.values() if state_needs_entry_fill_update(st)]
-    exit_candidates = [st for st in states.values() if state_needs_exit_fill_update(st)]
-    if not candidates and not exit_candidates:
+    if query_error is not None:
+        if 'AGR0005' in str(query_error):
+            ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = time.monotonic() + ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS
+        trade_log('ORDER_RESULTS_ERROR', error=True, error_msg=repr(query_error))
         return
-
-    try:
-        if query_error is not None:
-            raise query_error
-        # 此處只消費背景查詢結果；不得意外退回主執行緒同步查詢。
-        order_results = results
-    except Exception as exc:
-        trade_log(
-            "ORDER_RESULTS_ERROR",
-            error=True,
-            reason="get_order_results_exception",
-            error_msg=repr(exc),
-        )
-        if "AGR0005" in str(exc):
-            ORDER_RESULTS_COOLDOWN_UNTIL_MONOTONIC = (
-                time.monotonic() + ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS
-            )
-            trade_log(
-                "ORDER_RESULTS_RATE_LIMIT",
-                error=True,
-                cooldown_seconds=f"{ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS:.0f}",
-            )
+    if not isinstance(results, list) or any(not isinstance(row, dict) for row in results):
+        trade_log('ORDER_RESULTS_ERROR', error=True, reason='invalid_response_type')
         return
-
-    if not isinstance(order_results, list) or any(not isinstance(row, dict) for row in order_results):
-        trade_log(
-            "ORDER_RESULTS_ERROR",
-            error=True,
-            reason="invalid_response_type",
-            response_type=type(order_results).__name__,
-            response=repr(order_results),
-        )
-        return
-
-    for state in candidates:
-        resolve_unknown_order(state, "entry", order_results)
-        avg_price, mat_qty = get_order_fill_info_by_results(state.get("entry_order_no", ""), order_results)
-        if avg_price <= 0 or mat_qty <= 0:
-            continue
-
-        with ORDER_STATE_LOCK:
-            # WebSocket 與輪詢共用同一把鎖；先成功接管的來源擁有本筆成交校正權。
-            if state.get("entry_price_source") == "dealt_report":
-                continue
-            try:
-                entry_order_qty = int(state.get("entry_order_qty", state.get("qty", 0)) or 0)
-                previous_filled_qty = int(state.get("entry_filled_qty", 0) or 0)
-            except (TypeError, ValueError):
-                entry_order_qty = 0
-                previous_filled_qty = 0
-
-            if mat_qty <= previous_filled_qty and state.get("entry_price_source") == "order_results":
-                continue
-
-            state["entry_price"] = avg_price
-            state["qty"] = mat_qty
-            state["entry_filled_qty"] = mat_qty
-            state["entry_fill_confirmed"] = True
-            state.setdefault("entry_first_fill_time", now_tpe().isoformat())
-            state["entry_fully_filled"] = entry_order_qty > 0 and mat_qty >= entry_order_qty
-            state["entry_order_pending"] = not state["entry_fully_filled"]
-            state["in_position"] = True
-            state["entry_price_source"] = "order_results"
-            state["entry_fill_update_time"] = now_tpe().isoformat()
-            profit_tracking_active = bool(state.get("profit_tracking_active"))
-            if not profit_tracking_active:
-                recalc_entry_position_prices(state)
-            entry_fully_filled = bool(state.get("entry_fully_filled"))
-            entry_order_no = state.get("entry_order_no")
-            state_snapshot = dict(state)
-
-        if profit_tracking_active:
-            print(f"[{state.get('symbol_name')}] 已啟動追蹤停利，成交價量校正不覆寫既有停利軌跡")
-
-        atomic_write_json(state_path(state_snapshot.get("symbol_code_with_suf", "")), state_snapshot)
-        fill_text = "完整成交" if entry_fully_filled else "部分成交"
-        trade_log(
-            "FILL_UPDATE",
-            **state_symbol_fields(state),
-            role="entry",
-            source="get_order_results",
-            fill_status=fill_text,
-            ord_no=entry_order_no,
-            avg_price=f"{avg_price:.4f}",
-            filled_qty=mat_qty,
-            expected_qty=entry_order_qty,
-        )
-        print_entry_position_prices(state_snapshot)
-
-    for state in exit_candidates:
-        resolve_unknown_order(state, "exit", order_results)
-        avg_price, mat_qty = get_order_fill_info_by_results(state.get("exit_order_no", ""), order_results)
-        if avg_price <= 0 or mat_qty <= 0:
-            continue
-
-        with ORDER_STATE_LOCK:
-            if state.get("exit_price_source") == "dealt_report":
-                continue
-            try:
-                exit_order_qty = int(state.get("exit_order_qty", state.get("qty", 0)) or 0)
-                previous_filled_qty = int(state.get("exit_filled_qty", 0) or 0)
-            except (TypeError, ValueError):
-                exit_order_qty = 0
-                previous_filled_qty = 0
-
-            if mat_qty <= previous_filled_qty and state.get("exit_price_source") == "order_results":
-                continue
-
-            state["exit_price"] = avg_price
-            state["exit_filled_qty"] = mat_qty
-            state["exit_fill_confirmed"] = True
-            state["exit_fully_filled"] = exit_order_qty > 0 and mat_qty >= exit_order_qty
-            state["exit_price_source"] = "order_results"
-            state["exit_fill_update_time"] = now_tpe().isoformat()
-
-            if state["exit_fully_filled"]:
-                state["exit_order_pending"] = False
-                state["traded"] = True
-                state["in_position"] = False
-                if state.get("exit_reason_pending"):
-                    state["exit_reason"] = state.get("exit_reason_pending")
-            exit_fully_filled = bool(state.get("exit_fully_filled"))
-            exit_order_no = state.get("exit_order_no")
-            exit_reason = state.get("exit_reason_pending") or state.get("exit_reason")
-            state_snapshot = dict(state)
-
-        atomic_write_json(state_path(state_snapshot.get("symbol_code_with_suf", "")), state_snapshot)
-        fill_text = "完整成交" if exit_fully_filled else "部分成交"
-        trade_log(
-            "FILL_UPDATE",
-            **state_symbol_fields(state),
-            role="exit",
-            source="get_order_results",
-            fill_status=fill_text,
-            ord_no=exit_order_no,
-            exit_reason=exit_reason,
-            avg_price=f"{avg_price:.4f}",
-            filled_qty=mat_qty,
-            expected_qty=exit_order_qty,
-        )
-
-    for role, pending in (("entry", candidates), ("exit", exit_candidates)):
-        for state in pending:
-            reconcile_terminal_order(state, role, order_results)
-
-    # 撤單只能依券商最新原始明細進行，不能依本機猜測的欄位組裝。
-    if sdk is not None:
-        request_expired_entry_cancellations(states, sdk, order_results)
-
-
-def request_expired_entry_cancellations(states, sdk, order_results) -> None:
-    now_local = now_tpe()
     for state in states.values():
+        if not state_needs_entry_fill_update(state) and not state_needs_exit_fill_update(state):
+            continue
+        resolve_unknown_order(state, 'entry', results)
+        resolve_unknown_order(state, 'exit', results)
         with ORDER_STATE_LOCK:
-            if (not state.get("entry_order_pending") or state.get("entry_cancel_requested")
-                    or (now_local.hour, now_local.minute) <= get_entry_check_end_time(state)):
-                continue
-            order_no = str(state.get("entry_order_no", "") or "").strip()
-        rows = [row for row in order_results if str(row.get("ord_no", "") or "").strip() == order_no]
-        if not order_no or len(rows) != 1:
-            continue
-        if time.monotonic() < state.get("entry_cancel_retry_after", 0):
-            continue
-        try:
-            row = dict(rows[0])  # SDK recover_order_result 需使用完整原始欄位。
-            future = start_serialized_trade_call("cancel_order", lambda row=row: sdk.cancel_order(row))
-        except TradeApiBusy:
-            return  # 不排隊，下一次已完成的委託查詢再嘗試。
-        state["entry_cancel_requested"] = True
-        ENTRY_CANCEL_FUTURES[order_no] = (future, state)
-        atomic_write_json(state_path(state["symbol_code_with_suf"]), dict(state))
-        trade_log("ENTRY_CANCEL_REQUESTED", ord_no=order_no,
-                  action="past_entry_deadline_keep_pending_until_broker_confirmation")
+            for role, order in execution_orders(state):
+                rows = [r for r in results if str(r.get('ord_no', '')).strip() == order.get('order_no') and order.get('order_no')]
+                if len(rows) != 1:
+                    continue  # Never sum ambiguous cumulative snapshots.
+                row = rows[0]
+                try:
+                    shares = order_result_shares(row)
+                    price = float(row.get('avg_price', 0) or 0)
+                except (ValueError, TypeError, OverflowError, InvalidOperation):
+                    continue
+                if shares == 0 or finite_positive(price):
+                    apply_execution_fill(state, order, shares, price * shares, 'order_results')
+            reconcile_terminal_order(state, 'entry', results)
+            reconcile_terminal_order(state, 'exit', results)
+            atomic_write_json(state_path(state['symbol_code_with_suf']), state)
+
+
+def request_expired_entry_cancellations(states, sdk, order_results):
+    """Intentionally no cancellation, including after the entry deadline."""
+    return
 
 
 def maintain_pending_orders(states) -> None:
-    for order_no, (future, state) in list(ENTRY_CANCEL_FUTURES.items()):
-        if not future.done():
-            continue
-        ENTRY_CANCEL_FUTURES.pop(order_no, None)
-        try:
-            response = future.result()
-            if not isinstance(response, dict) or str(response.get("ret_code", "")) != "000000":
-                raise RuntimeError(f"cancel response not confirmed: {response!r}")
-            trade_log("ENTRY_CANCEL_ACKNOWLEDGED", ord_no=order_no,
-                      action="await_terminal_order_results_or_fill")
-        except Exception as exc:
-            # 取消失敗不解除 entry pending，也不允許另一筆入場單。
-            state["entry_cancel_requested"] = False
-            state["entry_cancel_retry_after"] = time.monotonic() + ORDER_RESULTS_UPDATE_SECONDS
-            trade_log("ENTRY_CANCEL_ERROR", error=True, ord_no=order_no, error_msg=repr(exc))
     attention_changed = False
     for state in states.values():
-        for role in ("entry", "exit"):
-            if not state.get(f"{role}_order_pending"):
-                continue
-            started = state.get(f"{role}_pending_since_monotonic", time.monotonic())
-            expired_entry = role == "entry" and (now_tpe().hour, now_tpe().minute) > get_entry_check_end_time(state)
-            if ((expired_entry or time.monotonic() - started >= ORDER_UNKNOWN_ALERT_SECONDS)
-                    and not state.get(f"{role}_pending_alerted")):
-                state[f"{role}_pending_alerted"] = True
-                attention_changed = True
-                trade_log("ORDER_PENDING_REQUIRES_ATTENTION", error=True,
-                          **state_symbol_fields(state), role=role,
-                          ord_no=state.get(f"{role}_order_no"),
-                          request_id=state.get(f"{role}_request_id"),
-                          action="keep_reconciling_no_blind_resubmit_manual_broker_check_required")
+        if not state.get('entry_submission_started') or state.get('traded'):
+            continue
+        with ORDER_STATE_LOCK:
+            for role, order in execution_orders(state):
+                if order['terminal'] or order.get('pending_alerted'):
+                    continue
+                if time.monotonic() - order['submitted_monotonic'] >= ORDER_UNKNOWN_ALERT_SECONDS:
+                    order['pending_alerted'] = True
+                    attention_changed = True
+                    trade_log('ORDER_PENDING_REQUIRES_ATTENTION', error=True,
+                              **state_symbol_fields(state), role=role,
+                              ord_no=order.get('order_no'), request_id=order.get('request_id'),
+                              filled_shares=order['filled_shares'], ordered_shares=order['ordered_shares'])
     if attention_changed or (TRADE_API_DEGRADED_EVENT.is_set() and not getattr(maintain_pending_orders, "degraded_reported", False)):
         maintain_pending_orders.degraded_reported = TRADE_API_DEGRADED_EVENT.is_set()
         report_unsettled_trades(states, "pending_order_watchdog")
@@ -1600,26 +1407,6 @@ def calculate_profit_trail_step(price: float, percent: float) -> float:
     return max(price * (percent / 100.0), get_tick_size(price))
 
 
-def floor_price_to_tick_value(price: float) -> float:
-    tick = get_tick_size(price)
-    adjusted = math.floor(price / tick) * tick
-    if adjusted < 100:
-        return round(adjusted, 2)
-    if adjusted < 1000:
-        return round(adjusted, 1)
-    return float(int(adjusted))
-
-
-def ceil_price_to_tick_value(price: float) -> float:
-    tick = get_tick_size(price)
-    adjusted = math.ceil(price / tick - 1e-12) * tick
-    if adjusted < 100:
-        return round(adjusted, 2)
-    if adjusted < 1000:
-        return round(adjusted, 1)
-    return float(int(adjusted))
-
-
 def today_str_tpe() -> str:
     return now_tpe().date().isoformat()  # e.g. "2025-10-01"
 
@@ -1681,6 +1468,9 @@ def atomic_write_json(path: str, data: Dict[str, Any], *, strict: bool = False):
     - 對 Windows / OneDrive 可能的鎖定 (PermissionError) 做重試與 fallback（先嘗試刪除目標檔，再替換；最後備援以複製內容覆蓋）。
     - 確保臨時檔在任何情況下都會適當清理，避免殘留。
     """
+    # 成交回報可同時新增/更新多筆委託；序列化使用一致的深層快照。
+    with ORDER_STATE_LOCK:
+        data = copy.deepcopy(data)
     abs_path = os.path.abspath(path)
     ensure_dir(os.path.dirname(abs_path))
 
@@ -1782,7 +1572,7 @@ def build_initial_state(
         "side": "",  # 'SHORT' or 'LONG'
         "entry_price": 0,
         "entry_time": None,
-        # 已知限制：目前實際只下單一張並假設完整進出；部分成交、殘量、拆單平倉留待後續版本處理。
+        # 原始委託張數不變；淨持倉與各筆回補委託另由 execution ledger 累計。
         "entry_order_pending": False,
         "entry_order_no": "", # 入場委託書號
         "entry_order_qty": qty, # 入場原始委託張數
@@ -1870,8 +1660,6 @@ def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, floa
 
 
 def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tuple[float, float]:
-    if is_avg_strategy(state):
-        return AVG_PROTECT_LOSS_PER, AVG_PROTECT_PROFIT_PER
     return PROTECT_LOSS_PER, PROTECT_PROFIT_PER
 
 
@@ -2095,8 +1883,13 @@ def try_open_position(state: Dict[str, Any], mysdk):
 
             state["profit_tracking_active"] = False  # 追蹤停利尚未啟動，等到首次觸及 profit_price 才開始
             # 最後才公開 ord_no，避免 callback 在估計欄位尚未初始化完成時搶先更新又遭覆寫。
-            state["entry_order_no"] = str(place_order_result)
-            apply_pending_dealt_reports(state)
+            with ORDER_STATE_LOCK:
+                state['entry_order_no'] = str(place_order_result or '')
+                entry = ensure_execution_ledger(state)
+                entry.update(order_no=state['entry_order_no'], request_id=unknown_request_id,
+                             ordered_shares=qty * 1000, terminal=False)
+                refresh_execution_totals(state)
+                apply_pending_dealt_reports(state)
             trade_log(
                 "ORDER_PENDING",
                 **state_symbol_fields(state),
@@ -2119,21 +1912,8 @@ def try_open_position(state: Dict[str, Any], mysdk):
 def try_close_position(state: Dict[str, Any], mysdk):
     if not state.get("in_position"):
         return
-    if state.get("exit_order_pending"):
-        return
-    if state.get("exit_retry_reason"):
-        submit_exit_order(state, mysdk, state["exit_retry_reason"])
-        return
-
-    if is_vol_strategy(state):
-        # v35 uses fixed exits, never profit protection or trailing profit.
-        if force_close_time_reached(state):
-            endtime_close_position(state, mysdk)
-        elif state.get('entry_fill_confirmed'):
-            if reached_stop_to_flat(state):
-                close_flat_position(state, mysdk)
-            elif reached_resize_profit(state):
-                close_profit_position(state, mysdk)
+    if state.get('exit_intent_reason') or state.get('exit_retry_reason'):
+        submit_exit_order(state, mysdk, state.get('exit_intent_reason') or state['exit_retry_reason'])
         return
 
     pl = reached_profitable_limit_price(state)
@@ -2175,38 +1955,26 @@ def try_close_position(state: Dict[str, Any], mysdk):
         return  # 無須平倉
 
 
-def mark_exit_order_pending(state: Dict[str, Any], order_no: str, exit_reason: str, request_id: str = "") -> None:
+def mark_exit_order_pending(state, order_no, exit_reason, request_id='', *, quantity=None):
     with ORDER_STATE_LOCK:
-        state["exit_order_pending"] = True
-        state["exit_pending_since_monotonic"] = time.monotonic()
-        state["exit_pending_alerted"] = False
-        state["exit_order_qty"] = int(state.get("qty", 0) or 0)
-        state["exit_filled_qty"] = 0
-        state["exit_fully_filled"] = False
-        state["exit_fill_confirmed"] = False
-        state["exit_price_source"] = "estimated"
-        state["exit_reason_pending"] = exit_reason
-        state["exit_order_time"] = now_tpe().isoformat()
-        state["exit_dealt_report_filled_shares"] = 0
-        state["exit_dealt_report_filled_value"] = 0.0
-        state["exit_request_id"] = request_id
-        state["exit_outcome_unknown"] = bool(request_id)
-        state["exit_unknown_since_monotonic"] = time.monotonic()
-        state["exit_unknown_alerted"] = False
-        state["exit_retry_reason"] = ""
-        # 初始化完成後才公開書號，避免成交 callback 讀到未完成的欄位。
-        state["exit_order_no"] = str(order_no)
-    apply_pending_dealt_reports(state)
-    atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-    trade_log(
-        "ORDER_PENDING",
-        **state_symbol_fields(state),
-        role="exit",
-        ord_no=state.get("exit_order_no"),
-        request_id=request_id,
-        qty=state.get("exit_order_qty"),
-        exit_reason=exit_reason,
-    )
+        quantity = quantity if quantity is not None else state['qty']
+        order = dict(order_no=str(order_no or ''), request_id=request_id,
+                     ordered_shares=quantity * 1000, filled_shares=0, filled_value=0.0,
+                     ws_shares=0, ws_value=0.0, terminal=False,
+                     submitted_monotonic=time.monotonic())
+        state.setdefault('exit_executions', []).append(order)
+        state.setdefault('exit_intent_reason', exit_reason)
+        state.update(exit_order_no=order['order_no'], exit_request_id=request_id,
+                     exit_order_qty=quantity, exit_reason_pending=state['exit_intent_reason'],
+                     exit_outcome_unknown=bool(request_id), exit_retry_reason=state['exit_intent_reason'],
+                     exit_pending_since_monotonic=time.monotonic(), exit_pending_alerted=False,
+                     exit_unknown_since_monotonic=time.monotonic(), exit_unknown_alerted=False)
+        refresh_execution_totals(state)
+        apply_pending_dealt_reports(state)
+        atomic_write_json(state_path(state['symbol_code_with_suf']), state)
+    trade_log('ORDER_PENDING', **state_symbol_fields(state), role='exit',
+              ord_no=order['order_no'], request_id=request_id, qty=quantity,
+              exit_reason=state['exit_intent_reason'])
 
 
 def _protect_profit_stop(state: Dict[str, Any]):
@@ -2338,8 +2106,8 @@ def _advance_profit_trail(state: Dict[str, Any]):
         return
 
     side = state.get("side")
-    target_percent = AVG_PROFIT_TARGET_PERCENT if is_avg_strategy(state) else PROFIT_TARGET_PERCENT
-    back_percent = AVG_PROFIT_BACK_PERCENT if is_avg_strategy(state) else PROFIT_BACK_PERCENT
+    target_percent = PROFIT_TARGET_PERCENT
+    back_percent = PROFIT_BACK_PERCENT
     target_step = calculate_profit_trail_step(px, target_percent)
     back_step = calculate_profit_trail_step(px, back_percent)
     if side == TRADE_SIDE_LONG:
@@ -2366,68 +2134,54 @@ def _exit_order_params(side: str, fallback: bool = False) -> Optional[tuple[Any,
     return None
 
 
-def submit_exit_order(
-    state: Dict[str, Any],
-    mysdk,
-    exit_reason: str,
-    *,
-    fallback_success_message: str = "",
-    fallback_failure_message: str = "",
-) -> bool:
-    if state.get("exit_order_pending") or not state.get("in_position") or state.get("traded"):
-        return False
-
-    side = state.get("side")
-    market_params = _exit_order_params(side)
-    if market_params is None:
-        trade_log(
-            "EXIT_ORDER_SKIPPED",
-            error=True,
-            **state_symbol_fields(state),
-            reason="invalid_side",
-            exit_reason=exit_reason,
-        )
-        return False
-
-    def attempt(params) -> Optional[bool]:
-        action_type, trade_type, price_flag = params
+def submit_exit_order(state, mysdk, exit_reason, *, fallback_success_message='', fallback_failure_message=''):
+    """Reserve each accepted/unknown exit. Never send more than unreserved net lots."""
+    with ORDER_STATE_LOCK:
+        state.setdefault('exit_intent_reason', exit_reason)
+        state['exit_retry_reason'] = state['exit_intent_reason']
+        net = refresh_execution_totals(state)
+        available = net - state['exit_reserved_shares']
+        if available < 1000 or state.get('exit_submission_busy'):
+            return False
+        quantity = available // 1000
+        params = _exit_order_params(state.get('side'))
+        if params is None:
+            return False
+        state['exit_submission_busy'] = True
+        atomic_write_json(state_path(state['symbol_code_with_suf']), state)
+    try:
+        action, trade, price_flag = params
         try:
-            order_no = type_place_order(
-                mysdk, state["symbol_code_with_suf"], action_type, trade_type,
-                quantity=state.get("qty", 0), price_flag=price_flag,
-                price=state.get("last_price", 0.0),
-            )
+            order_no = type_place_order(mysdk, state['symbol_code_with_suf'], action, trade,
+                                        quantity=quantity, price_flag=price_flag,
+                                        price=state.get('last_price', 0))
         except TradeApiBusy:
-            state["exit_retry_reason"] = exit_reason
-            return None
+            return False
         except OrderOutcomeUnknown as exc:
-            mark_exit_order_pending(state, "", exit_reason, request_id=exc.request_id)
-            return True  # 結果未知也必須停止後續補單，留待查詢對帳。
+            mark_exit_order_pending(state, '', exit_reason, exc.request_id, quantity=quantity)
+            return True
+        if not order_no:
+            # Definitive market rejection only: retain existing limit-price fallback.
+            params = _exit_order_params(state.get('side'), fallback=True)
+            if params is None:
+                return False
+            try:
+                order_no = type_place_order(mysdk, state['symbol_code_with_suf'], *params[:2],
+                                            quantity=quantity, price_flag=params[2],
+                                            price=state.get('last_price', 0))
+            except TradeApiBusy:
+                return False
+            except OrderOutcomeUnknown as exc:
+                mark_exit_order_pending(state, '', exit_reason, exc.request_id, quantity=quantity)
+                return True
         if not order_no:
             return False
-        mark_exit_order_pending(state, order_no, exit_reason)
+        mark_exit_order_pending(state, order_no, exit_reason, quantity=quantity)
         return True
-
-    first_attempt = attempt(market_params)
-    if first_attempt is not False:
-        return bool(first_attempt)
-
-    fallback_params = _exit_order_params(side, fallback=True)
-    if fallback_params is None:
-        return False
-
-    fallback_attempt = attempt(fallback_params)
-    if fallback_attempt is None:
-        return False
-    if not fallback_attempt:
-        state["exit_retry_reason"] = exit_reason
-        if fallback_failure_message:
-            print(fallback_failure_message)
-        return False
-
-    if fallback_success_message and not state.get("exit_outcome_unknown"):
-        print(fallback_success_message)
-    return True
+    finally:
+        with ORDER_STATE_LOCK:
+            state['exit_submission_busy'] = False
+            atomic_write_json(state_path(state['symbol_code_with_suf']), state)
 
 
 def close_profit_position(state: Dict[str, Any], mysdk, exit_reason: str = "profit") -> bool:
@@ -2453,13 +2207,7 @@ def close_flat_position(state: Dict[str, Any], mysdk, exit_reason: str = "stop")
 
 
 def endtime_close_position(state: Dict[str, Any], mysdk, exit_reason: str = "force_close") -> bool:
-    if state.get("traded") == True or state.get("in_position") == False:  # 已完成交易，不用平倉
-        print(f'[{state.get("symbol_name")}] 已完成交易，不須強制平倉')
-        state["traded"] = True
-        state["in_position"] = False  # 確保持倉狀態為 False
-        atomic_write_json(state_path(state.get("symbol_code_with_suf", "")), state)
-        return False  # 這裡直接返回，是因為若無建倉就下平倉單，反而變成另起一張訂單
-
+    # 暫時零持倉仍可能有入場殘單；只鎖定出場意圖，由 ledger 判斷可回補量。
     return submit_exit_order(
         state,
         mysdk,
@@ -2469,6 +2217,21 @@ def endtime_close_position(state: Dict[str, Any], mysdk, exit_reason: str = "for
 
 
 # ============ 主監控流程 ============
+def process_exit_intents(states, sdk):
+    """Run every monitor iteration, including after query results and without quotes."""
+    for state in states.values():
+        with ORDER_STATE_LOCK:
+            if not state.get('entry_submission_started') or state.get('traded'):
+                continue
+            if force_close_time_reached(state):
+                if not state.get('exit_intent_reason'):
+                    state['exit_intent_reason'] = 'force_close'
+                    atomic_write_json(state_path(state['symbol_code_with_suf']), state)
+            reason = state.get('exit_intent_reason')
+        if reason:
+            submit_exit_order(state, sdk, reason)
+
+
 def load_or_init_state(
     symbol: str,
     qty: int,
@@ -2663,6 +2426,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
     order_query_stall_announced = False
     candidate_flow = SharedCandidateFlow(globals())
     while True:
+        stop_at_force_exit_time(states)
         order_states = all_order_states(states)
         consume_late_order_responses(order_states)
         check_trade_api_watchdog(order_states)
@@ -2726,6 +2490,8 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
                 last_order_results_update_monotonic = now_monotonic
 
 
+        process_exit_intents(order_states, mysdk)
+
         # 已全數完成交易則收工
         if (entry_mode_decided
                 and not candidate_flow.rows and not candidate_flow.candles
@@ -2739,10 +2505,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
             break
 
         # print("========= 下一輪監控等待中... =========")
-        now_local = now_tpe()
-        if (now_local.hour, now_local.minute) >= FORCE_EXIT_TIME:
-            print(f"當前時間 {now_local.strftime('%Y-%m-%d %H:%M:%S')} >= {FORCE_EXIT_TIME[0]:02d}:{FORCE_EXIT_TIME[1]:02d}，程式結束。")
-            sys.exit(2 if report_unsettled_trades(states, "force_exit_time") else 0)
+        stop_at_force_exit_time(states)
 
         now = now_tpe()
         nxt = ceil_next_interval(now, 5) # 秒數在5的倍數輪巡

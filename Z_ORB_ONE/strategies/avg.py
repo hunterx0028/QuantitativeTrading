@@ -45,6 +45,7 @@ class AvgConfig:
     # 舊三策略入口的相容參數；AVG/BROKEN 入口不再依賴 LOWER。
     STRATEGY_START_LOWER_3: tuple[int, int] | None = None
     ENABLE_PROFIT_PROTECTION: bool = True  # 舊入口維持原行為；v17明確傳入開關
+    AVG_MAX_MISSING_SLOPE_BARS: int = 5
 
 
 @dataclass
@@ -119,8 +120,8 @@ class AvgStrategy:
                       self.config.AVG_STAGE_4_MIN_BARS):
             if type(value) is not int or value <= 0:
                 raise ValueError("AVG 分K根數必須為正整數")
-        if type(self.config.AVG_ENTRY_ORDER_QUANTITY) is not int or self.config.AVG_ENTRY_ORDER_QUANTITY != 1:
-            raise ValueError("AVG 目前每檔只允許一張")
+        if type(self.config.AVG_ENTRY_ORDER_QUANTITY) is not int or self.config.AVG_ENTRY_ORDER_QUANTITY <= 0:
+            raise ValueError("AVG 張數必須為正整數")
         if type(self.config.AVG_CANDLE_POLL_SECOND) is not int or not 0 <= self.config.AVG_CANDLE_POLL_SECOND <= 59:
             raise ValueError("AVG_CANDLE_POLL_SECOND 必須介於 0~59")
         if (
@@ -138,6 +139,8 @@ class AvgStrategy:
             )
         if not math.isfinite(self.config.AVG_MAX_NORMALIZED_SLOPE):
             raise ValueError("AVG 斜率門檻必須為有限數值")
+        if type(self.config.AVG_MAX_MISSING_SLOPE_BARS) is not int or self.config.AVG_MAX_MISSING_SLOPE_BARS < 0:
+            raise ValueError("AVG_MAX_MISSING_SLOPE_BARS 必須為非負整數")
         protection_values = ((self.config.AVG_PROTECT_PROFIT_PER, self.config.AVG_PROTECT_LOSS_PER)
                              if self.config.ENABLE_PROFIT_PROTECTION else ())
         for value in (self.config.AVG_STOP_LOSS_PERCENT, self.config.AVG_TAKE_PROFIT_PERCENT, *protection_values,
@@ -190,14 +193,28 @@ class AvgStrategy:
         return bars
 
     def calculate_avg_normalized_slope(self, bars: list[Dict[str, Any]], previous_close: float) -> Optional[float]:
+        """缺棒與無效 average 計入容許量；依實際分鐘數回歸，不補值。"""
         samples = []
+        seen_minutes = set()
+        cutoff = self.config.AVG_SLOPE_CUTOFF_TIME[0] * 60 + self.config.AVG_SLOPE_CUTOFF_TIME[1]
+        expected_count = cutoff - 9 * 60
         for bar in bars:
             dt = bar["dt"]
-            if bar["average"] is None:
+            minute = dt.hour * 60 + dt.minute
+            if not 9 * 60 <= minute < cutoff:
                 continue
-            if not (9 * 60 <= dt.hour * 60 + dt.minute < self.config.AVG_SLOPE_CUTOFF_TIME[0] * 60 + self.config.AVG_SLOPE_CUTOFF_TIME[1]):
+            if dt.second or dt.microsecond or minute in seen_minutes:
+                return None
+            seen_minutes.add(minute)
+            try:
+                average = float(bar.get('average'))
+            except (TypeError, ValueError, OverflowError):
                 continue
-            samples.append((dt.hour * 60 + dt.minute + dt.second / 60.0, bar["average"]))
+            if not math.isfinite(average) or average <= 0:
+                continue
+            samples.append((minute, average))
+        if expected_count - len(samples) > self.config.AVG_MAX_MISSING_SLOPE_BARS:
+            return None
         if len(samples) < 2 or not math.isfinite(previous_close) or previous_close <= 0:
             return None
         x_mean = sum(x for x, _ in samples) / len(samples)
