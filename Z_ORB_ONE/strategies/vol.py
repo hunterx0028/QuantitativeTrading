@@ -99,6 +99,7 @@ class VolConfig:
             return False
         try:
             days = history['volume_dates']
+            previous_volume = float(history['previous_volume_shares'])
             return (
                 history['source'] == 'historical.minute_sum' and history['volume_unit'] == 'shares'
                 and len(days) == self.average_days and days == sorted(set(days))
@@ -107,32 +108,25 @@ class VolConfig:
                 and positive(history['previous_close']) is not None
                 and Decimal(str(history['previous_close'])) == Decimal(str(previous_close))
                 and positive(history['average_daily_volume_shares']) is not None
-                and positive(history['previous_volume_shares']) is not None
+                and math.isfinite(previous_volume) and previous_volume >= 0
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
 
     def build_turnover_eligibility(self, rows, histories, reference_date, now):
-        """Freeze ranking over the selected pool before ticker/strategy filtering.
+        """Freeze ranking over stocks with valid five-day volume history.
 
         Match v35: count strictly lower turnovers, including ties in the denominator.
-        Ranking only needs the previous session; five-day eligibility is checked later.
+        Like v35, require positive multi-day average before ranking; yesterday may be zero.
         """
         turnovers = {}
         for symbol, row in rows.items():
             history = histories.get(symbol)
-            if not isinstance(history, dict) or not reference_date:
-                continue
             try:
+                if not self.validate_history(history, row[5], reference_date, now):
+                    continue
                 close = positive(history.get('previous_close'))
                 volume = float(history['previous_volume_shares'])
-                if (history.get('as_of_date') != reference_date
-                        or date.fromisoformat(reference_date) >= now.date()
-                        or history.get('source') != 'historical.minute_sum'
-                        or history.get('volume_unit') != 'shares'
-                        or close is None or not math.isfinite(volume) or volume < 0
-                        or Decimal(str(close)) != Decimal(str(row[5]))):
-                    continue
                 turnovers[symbol] = Decimal(str(volume)) * Decimal(str(close))
             except (KeyError, TypeError, ValueError, IndexError, OverflowError):
                 continue

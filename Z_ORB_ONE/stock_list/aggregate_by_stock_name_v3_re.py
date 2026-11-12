@@ -45,8 +45,8 @@ def lists_to_tuples(value):
 
 def load_cache(cache_path: Path) -> tuple[list[str], list[dict]]:
     cache = json.loads(cache_path.read_text(encoding="utf-8"))
-    if cache.get("schema_version") != 2:
-        raise ValueError(f"不支援的快取格式版本: {cache.get('schema_version')}")
+    if cache.get("schema_version") != 3:
+        raise ValueError("快取需為 schema_version=3；請先重跑 aggregate_by_stock_name_v3.py，舊漲跌停資料不能推算一般漲跌")
 
     trading_dates = sorted({str(item) for item in cache.get("trading_dates", [])})
     stocks = cache.get("stocks")
@@ -69,26 +69,27 @@ def count_recent_consecutive_occurrences(
     return count
 
 
-def count_recent_consecutive_limit_days(
-    daily_limit_states: list[dict],
-    limit_trading_dates: list[str],
+def count_recent_consecutive_days(
+    daily_price_states: list[dict],
+    price_trading_dates: list[str],
     state_name: str,
 ) -> int:
     """由 API 資料的最新交易日起累計，遇到缺日或不符合即停止。"""
     state_by_date = {
         str(state.get("date")): bool(state.get(state_name))
-        for state in daily_limit_states
+        for state in daily_price_states
         if isinstance(state, dict) and state.get("date")
     }
     count = 0
-    for trading_date in reversed(limit_trading_dates):
+    for trading_date in reversed(price_trading_dates):
         if not state_by_date.get(trading_date, False):
             break
         count += 1
     return count
 
 
-def apply_limit_counts(record: tuple, up_count: int, down_count: int) -> tuple:
+def apply_price_counts(record: tuple, up_count: int, down_count: int) -> tuple:
+    """末欄固定為（連續上漲天數，連續下跌天數），以收盤對前收比較。"""
     updated = list(record)
     if len(updated) >= 2:
         updated[-1] = (int(up_count), int(down_count))
@@ -103,11 +104,11 @@ def build_ranked_records(
 ) -> tuple[list[tuple[tuple, int]], list[tuple[tuple, int]]]:
     total_ranked = []
     consecutive_ranked = []
-    limit_trading_dates = sorted(
+    price_trading_dates = sorted(
         {
             str(state.get("date"))
             for stock in stocks
-            for state in stock.get("daily_limit_states", [])
+            for state in stock.get("daily_price_states", [])
             if isinstance(state, dict) and state.get("date")
         }
     )
@@ -115,20 +116,20 @@ def build_ranked_records(
         record = lists_to_tuples(stock.get("record"))
         if not isinstance(record, tuple):
             continue
-        daily_limit_states = stock.get("daily_limit_states", [])
-        if not isinstance(daily_limit_states, list):
-            daily_limit_states = []
-        up_count = count_recent_consecutive_limit_days(
-            daily_limit_states,
-            limit_trading_dates,
-            "is_limit_up",
+        daily_price_states = stock.get("daily_price_states", [])
+        if not isinstance(daily_price_states, list):
+            daily_price_states = []
+        up_count = count_recent_consecutive_days(
+            daily_price_states,
+            price_trading_dates,
+            "is_up",
         )
-        down_count = count_recent_consecutive_limit_days(
-            daily_limit_states,
-            limit_trading_dates,
-            "is_limit_down",
+        down_count = count_recent_consecutive_days(
+            daily_price_states,
+            price_trading_dates,
+            "is_down",
         )
-        record = apply_limit_counts(record, up_count, down_count)
+        record = apply_price_counts(record, up_count, down_count)
         occurrence_dates = [str(item) for item in stock.get("occurrence_dates", [])]
         total_ranked.append((record, len(set(occurrence_dates))))
         consecutive_ranked.append(
@@ -421,22 +422,25 @@ def replace_stock_records_assignment(source: str, name: str, records: list[tuple
     return "\n".join(lines[:start_line] + replacement + lines[end_line:]) + "\n"
 
 
-def get_limit_repeat_counts(record: tuple) -> tuple[int, int]:
-    repeat_counts = record[-1] if record else None
-    if not isinstance(repeat_counts, tuple) or len(repeat_counts) < 2:
-        return 0, 0
-
-    return int(repeat_counts[0]), int(repeat_counts[1])
+def build_limit_counts_by_name(stocks: list[dict]) -> dict[str, tuple[int, int]]:
+    """LIMIT 名單繼續使用實際漲跌停天數，與 record 末欄的一般漲跌分開。"""
+    dates = sorted({str(state['date']) for stock in stocks
+                    for state in stock.get('daily_price_states', []) if state.get('date')})
+    return {stock['record'][0]: tuple(
+        count_recent_consecutive_days(stock.get('daily_price_states', []), dates, key)
+        for key in ('is_limit_up', 'is_limit_down'))
+        for stock in stocks if stock.get('record')}
 
 
 def split_records_by_limit_repeat(
     records: list[tuple],
+    limit_counts_by_name: dict[str, tuple[int, int]],
 ) -> tuple[list[tuple], list[tuple], list[tuple]]:
     selected_records = []
     limit_up_records = []
     limit_down_records = []
     for record in records:
-        up_repeat_count, down_repeat_count = get_limit_repeat_counts(record)
+        up_repeat_count, down_repeat_count = limit_counts_by_name.get(record[0], (0, 0))
         if up_repeat_count in LONG_LIMIT_UP_DAYS:
             limit_up_records.append(record)
         elif down_repeat_count in SHORT_LIMIT_DOWN_DAYS:
@@ -598,13 +602,14 @@ def main() -> None:
     output_result_path.write_text("".join(updated_lines), encoding="utf-8")
     # 一般名單仍須通過價位、ATR、產業與出現次數篩選；符合連續漲跌停天數者則直接從
     # 來源完整排名資料挑選，優先寫入 LIMIT 名單，不受上述篩選條件限制。
-    selected_stock_records, _, _ = split_records_by_limit_repeat(repeat_records)
+    limit_counts_by_name = build_limit_counts_by_name(cached_stocks)
+    selected_stock_records, _, _ = split_records_by_limit_repeat(repeat_records, limit_counts_by_name)
     all_ranked_stock_records = [record for record, _count in ranked_records]
     (
         _,
         selected_limit_up_stock_records,
         selected_limit_down_stock_records,
-    ) = split_records_by_limit_repeat(all_ranked_stock_records)
+    ) = split_records_by_limit_repeat(all_ranked_stock_records, limit_counts_by_name)
     pool = {record[0] for record in [*selected_stock_records, *total_stock_records]}
     vol_history_by_symbol = {
         stock['record'][0].split(':', 1)[1]: stock['vol_history']

@@ -129,17 +129,25 @@ def normalize_candle_date(value) -> str:
     return normalized[:8]
 
 
-def build_daily_limit_states(response_data: Dict) -> list[dict]:
-    """只記錄每個交易日是否收漲停／跌停，不在 API 程式累計天數。"""
+def build_daily_price_states(response_data: Dict) -> list[dict]:
+    """依相鄰交易日收盤記錄漲跌及漲跌停；平盤不屬於上漲或下跌。"""
     bars = response_data.get("data", [])
     if len(bars) < 2:
         return []
 
     dated_bars = []
+    seen_dates = set()
     for bar in bars:
         candle_date = normalize_candle_date(bar.get("date"))
         if len(candle_date) != 8 or not candle_date.isdigit():
             raise ValueError(f"K 棒缺少有效日期: {bar}")
+        datetime.strptime(candle_date, '%Y%m%d')
+        if candle_date in seen_dates:
+            raise ValueError(f"K 棒日期重複: {candle_date}")
+        seen_dates.add(candle_date)
+        close = Decimal(str(bar['close']))
+        if not close.is_finite() or close <= 0:
+            raise ValueError(f"K 棒收盤價無效: {bar}")
         dated_bars.append((candle_date, bar))
     dated_bars.sort(key=lambda item: item[0], reverse=True)
 
@@ -149,9 +157,13 @@ def build_daily_limit_states(response_data: Dict) -> list[dict]:
         _previous_date, previous_bar = dated_bars[index + 1]
         limit_up, limit_down = calculate_limit_prices(float(previous_bar["close"]))
         close_price = float(bar["close"])
+        previous_close = Decimal(str(previous_bar["close"]))
+        current_close = Decimal(str(bar["close"]))
         states.append(
             {
                 "date": candle_date,
+                "is_up": current_close > previous_close,
+                "is_down": current_close < previous_close,
                 "is_limit_up": abs(close_price - limit_up) < 1e-8,
                 "is_limit_down": abs(close_price - limit_down) < 1e-8,
             }
@@ -175,13 +187,18 @@ def get_symbol_historical_data(stock_id: str, sdk):
     )
     time.sleep(REQUEST_INTERVAL_SEC)
 
-    daily_limit_states = build_daily_limit_states(response_data)
+    now = datetime.now()
+    completed_response = {**response_data, 'data': [bar for bar in response_data.get('data', [])
+        if normalize_candle_date(bar.get('date')) < today.strftime('%Y%m%d')
+        or (normalize_candle_date(bar.get('date')) == today.strftime('%Y%m%d')
+            and (now.hour, now.minute) >= (13, 35))]}
+    daily_price_states = build_daily_price_states(completed_response)
     atr = calculate_atr(response_data)
-    return daily_limit_states, atr, response_data
+    return daily_price_states, atr, response_data
 
 
 def get_vol_history(symbol, rest_stock, daily_response, stats_response, expected_close, prepared_at):
-    """Prepare v35-compatible volume independently; failure must not remove AVG/BROKEN stocks."""
+    """優先準備 VOL 五日量能；不足時保留 GAP 所需的最近一日完整量能。"""
     now = datetime.now()
     # The daily generator is normally run after market close for the next session.
     completed_dates = sorted({str(bar['date'])[:10] for bar in daily_response.get('data', [])
@@ -194,7 +211,11 @@ def get_vol_history(symbol, rest_stock, daily_response, stats_response, expected
         raise ValueError('VOL stats date does not match latest completed daily candle')
     time.sleep(REQUEST_INTERVAL_SEC)
     response = rest_stock.historical.candles(symbol=symbol, timeframe='1')
-    history = build_volume_history(response.get('data', []), completed_dates, prepared_at)
+    try:
+        history = build_volume_history(response.get('data', []), completed_dates, prepared_at)
+    except ValueError:
+        history = build_volume_history(response.get('data', []), completed_dates, prepared_at, days=1)
+        log(f'[WARN] {symbol} 僅有最近一日完整量能，保留GAP資格；VOL仍需五日資料')
     if Decimal(str(history['previous_close'])) != Decimal(str(expected_close)):
         raise ValueError('VOL minute close does not match stats previous close')
     return history
@@ -338,7 +359,7 @@ def main() -> None:
     sdk, rest_stock = init_rest_stock(project_dir)
     log("[INFO] SDK 登入成功，開始逐檔更新")
     updated_by_stock: dict[str, tuple] = {}
-    daily_limit_states_by_stock: dict[str, list[dict]] = {}
+    daily_price_states_by_stock: dict[str, list[dict]] = {}
     vol_history_by_stock: dict[str, dict] = {}
     reference_dates = []
     stock_names = sorted(first_record_by_stock.keys())
@@ -356,21 +377,25 @@ def main() -> None:
             time.sleep(REQUEST_INTERVAL_SEC)
             stats_response = rest_stock.historical.stats(symbol=symbol)
             updated = apply_stats_price(original, stats_response)
-            daily_limit_states, atr, daily_response = get_symbol_historical_data(
+            daily_price_states, atr, daily_response = get_symbol_historical_data(
                 symbol,
                 sdk,
             )
+            stats = stats_response.get('data', stats_response)
+            stats_date = normalize_candle_date(stats.get('date', stats_response.get('date')))
+            if not daily_price_states or stats_date != daily_price_states[0]['date']:
+                raise ValueError('stats 日期與最近已完成日K不一致，不能寫入漲跌天數')
             updated = apply_atr(updated, atr)
 
             updated_by_stock[stock_name] = updated
-            daily_limit_states_by_stock[stock_name] = daily_limit_states
+            daily_price_states_by_stock[stock_name] = daily_price_states
             reference_dates.extend(str(bar['date'])[:10] for bar in daily_response.get('data', [])
                                    if bar.get('date'))
             try:
                 vol_history_by_stock[stock_name] = get_vol_history(
                     symbol, rest_stock, daily_response, stats_response, updated[5], execution_start_time)
             except Exception as vol_exc:
-                log(f'[WARN] {stock_name} VOL量能不足或不一致，僅停用VOL: {vol_exc}')
+                log(f'[WARN] {stock_name} 昨日量能不足或不一致，停用VOL/GAP: {vol_exc}')
             success_count += 1
         except Exception as exc:
             log(f"[WARN] {stock_name}({symbol}) API 更新失敗，本次排除: {exc}")
@@ -381,7 +406,8 @@ def main() -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     output_path = cache_dir / CACHE_FILE_NAME
     cache = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "record_streak_fields": ["consecutive_up_days", "consecutive_down_days"],
         "generated_at": execution_start_time,
         "trading_dates": trading_dates,
         "vol_history_reference_date": max(reference_dates, default=None),
@@ -389,7 +415,7 @@ def main() -> None:
             {
                 "stock_name": stock_name,
                 "occurrence_dates": occurrence_dates_by_stock.get(stock_name, []),
-                "daily_limit_states": daily_limit_states_by_stock[stock_name],
+                "daily_price_states": daily_price_states_by_stock[stock_name],
                 "record": updated_by_stock[stock_name],
                 "vol_history": vol_history_by_stock.get(stock_name),
             }

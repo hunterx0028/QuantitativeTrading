@@ -25,7 +25,6 @@ STRATEGY_LOWER = 'GAP_UP_RUNUP_PULLBACK_V36'
 PREVIOUS_TURNOVER_TOP_PERCENT = 20.0  # 沿用 v35：昨日成交值排名前此百分比
 MIN_PREVIOUS_TURNOVER = 300_000_000  # 昨日成交值保底（元），非多日平均成交值
 VOLUME_UNIT_SHARES = 1000  # 分K成交量單位為張
-VOLUME_AVERAGE_DAYS = 5  # 排名母體需前此數個有資料交易日齊備且均量大於零
 MIN_OPEN_GAP_PERCENT = 1.0  # 今日開盤相對昨收漲幅須嚴格大於此值
 MIN_RUNUP_PERCENT = 6.0  # 累計最高價至少為開盤價上漲此百分比
 PULLBACK_PERCENT = 2.0  # 收盤價小於等於累計最高價回落此百分比
@@ -116,13 +115,12 @@ def find_signal(session_bars, day_info):
 
 
 def build_market_context(bars_by_stock, target_date):
-    """沿用 v35 昨日成交值排名及排名母體，不加入量比或 average 入場條件。"""
+    """以昨日成交值建立排名；不要求多日均量或 average 入場條件。"""
     return build_previous_turnover_table(bars_by_stock, target_date)
 
 
 def validate_strategy_settings():
-    for name, value in (('VOLUME_UNIT_SHARES', VOLUME_UNIT_SHARES),
-                        ('VOLUME_AVERAGE_DAYS', VOLUME_AVERAGE_DAYS)):
+    for name, value in (('VOLUME_UNIT_SHARES', VOLUME_UNIT_SHARES),):
         if type(value) is not int or value <= 0:
             raise ValueError(f'{name} 必須為正整數')
     for name, value in (('MIN_PREVIOUS_TURNOVER', MIN_PREVIOUS_TURNOVER),
@@ -143,7 +141,7 @@ def strategy_header_lines():
         '策略：v36 昨日收漲、開盤跳空、衝高回落放空。',
         f'成交值沿用v35：昨日成交量×{VOLUME_UNIT_SHARES}×昨收，'
         f'排名前{PREVIOUS_TURNOVER_TOP_PERCENT:g}%且至少{MIN_PREVIOUS_TURNOVER:,}元；'
-        f'排名母體須前{VOLUME_AVERAGE_DAYS}個有資料交易日齊備且均量大於零，當日無分K者不列入；'
+        '排名母體只須有前一有資料交易日資料，當日無分K者不列入；不要求5日歷史量能。'
         f'金額嚴格較低股票占比至少{100 - PREVIOUS_TURNOVER_TOP_PERCENT:g}%。',
         f'選股：昨日收盤嚴格高於前一有資料交易日收盤；今日開盤相對昨收跳空嚴格大於{MIN_OPEN_GAP_PERCENT:g}%。',
         f'訊號：09:00起累計最高價（含訊號棒）≥開盤價×{1 + MIN_RUNUP_PERCENT / 100:g}，'
@@ -167,26 +165,22 @@ def build_previous_turnover_table(bars_by_stock: dict, target_date: date) -> dic
     """各交易日清單內所有股票的前一有資料交易日成交金額。
     回傳 dict[YYYY-MM-DD -> {'by_stock': {股票: 金額}, 'sorted': 由小到大金額}]；
     當日無分K的股票不列入。
-    排名母體與「當日可交易」的條件一致（對齊實機 VOL）：之前有資料的交易日不足
-    VOLUME_AVERAGE_DAYS 日，或這幾日均量為零的股票，當日本來就不會交易，也不列入排名。
+    排名只要求有前一有資料交易日，不以多日均量篩選母體；昨日收漲另由 find_signal 判斷。
     僅使用當日之前的資料，當日開盤前即可算出。"""
     target_key = target_date.strftime('%Y-%m-%d')
     table: dict[str, dict] = {}
     for stock_name, bars_by_date in bars_by_stock.items():
         previous_bars = None
-        previous_volumes = []  # 之前各有資料交易日的日量，由舊到新
         for date_key in sorted(bars_by_date):
             if date_key > target_key:
                 break
             bars = bars_by_date[date_key]
             if not bars:
                 continue
-            recent_volumes = previous_volumes[-VOLUME_AVERAGE_DAYS:]
-            if len(recent_volumes) == VOLUME_AVERAGE_DAYS and sum(recent_volumes) > 0:
-                turnover = recent_volumes[-1] * VOLUME_UNIT_SHARES * previous_bars[-1]['close']
+            if previous_bars is not None:
+                turnover = sum(bar['volume'] for bar in previous_bars) * VOLUME_UNIT_SHARES * previous_bars[-1]['close']
                 table.setdefault(date_key, {'by_stock': {}})['by_stock'][stock_name] = turnover
             previous_bars = bars
-            previous_volumes.append(sum(bar['volume'] for bar in bars))
     for entry in table.values():
         entry['sorted'] = sorted(entry['by_stock'].values())
     return table
