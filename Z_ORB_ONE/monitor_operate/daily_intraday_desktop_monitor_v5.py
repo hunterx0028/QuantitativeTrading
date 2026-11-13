@@ -36,8 +36,12 @@ from Z_ORB_ONE.stock_data import (
     selected_limit_down_stocks,
 )
 
-# 可指定多個區塊，例如 ["U", "D"]；重複股票保留首次出現的資料。
+# 可混用多個區塊與股票代碼；依指定順序加入，同代碼重複出現僅監看一筆。
 # S: selected_stocks，T: total_stocks，U: selected_limit_up_stocks，D: selected_limit_down_stocks
+# 例如 ["2330", "6456"]：只監看這兩檔；["U", "2330", "6456"]：漲停區塊加上指定股票。
+# 指定代碼必須存在於 stock_data.py 上述四份清單之一；找不到會報錯，不向 API 自行補建資料。
+# 代碼可用字串或整數；有前導 0 的代碼請使用字串，例如 "0050"。
+# 指定代碼的資料依 S、T、U、D 順序尋找；區塊／代碼重複時保留首次加入的資料。
 MONITOR_STOCK_BLOCKS = ["S","T","U","D"]
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
@@ -117,21 +121,28 @@ def get_pure_symbol(symbol_str: str) -> tuple[str, str]:
     return symbol, symbol_with_suffix
 
 
-def build_monitor_stocks(blocks: list[str]) -> list[tuple]:
+def build_monitor_stocks(blocks: list[str | int]) -> list[tuple]:
     stock_blocks = {
         "S": selected_stocks,
         "T": total_stocks,
         "U": selected_limit_up_stocks,
         "D": selected_limit_down_stocks,
     }
-    invalid_blocks = [block for block in blocks if block not in stock_blocks]
-    if invalid_blocks:
-        raise ValueError(f"未知的監看區塊：{invalid_blocks}，請使用 S、T、U、D。")
+    stocks_by_code = {}
+    for source in stock_blocks.values():
+        for stock in source:
+            symbol_code, _ = get_pure_symbol(stock[0])
+            stocks_by_code.setdefault(symbol_code, stock)
+    selectors = [str(block).strip().upper() for block in blocks]
+    invalid = [selector for selector in selectors if selector not in stock_blocks and selector not in stocks_by_code]
+    if invalid:
+        raise ValueError(f"未知的監看區塊或股票代碼：{invalid}，請使用 S、T、U、D 或 stock_data.py 中的股票代碼。")
 
     stocks = []
     seen_codes: set[str] = set()
-    for block in blocks:
-        for stock in stock_blocks[block]:
+    for selector in selectors:
+        source = stock_blocks[selector] if selector in stock_blocks else [stocks_by_code[selector]]
+        for stock in source:
             symbol_code, _ = get_pure_symbol(stock[0])
             if symbol_code in seen_codes:
                 continue
@@ -1081,7 +1092,7 @@ def main():
         log("沒有可監看的股票，程式結束。")
         return
 
-    log(f"監看區塊：{MONITOR_STOCK_BLOCKS} | 去重後股票數量：{len(monitor_stocks)}")
+    log(f"監看區塊／股票代碼：{MONITOR_STOCK_BLOCKS} | 去重後股票數量：{len(monitor_stocks)}")
     root = tk.Tk()
     app = DesktopIntradayMonitorApp(root, rest_stock)
     app.initialize_states(monitor_stocks)

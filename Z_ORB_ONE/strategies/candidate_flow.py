@@ -102,8 +102,18 @@ class SharedCandidateFlow:
         ticker = self.tickers.get(symbol)
         if ticker is None:
             ticker = a.get_up_down_price(symbol, sdk)
-            self.tickers[symbol] = ticker
+            if not self.ticker_missing_fields(ticker):
+                self.tickers[symbol] = ticker
         return response, ticker, requested_at
+
+    def ticker_missing_fields(self, ticker):
+        a = self.api
+        up, down, can_trade, disposition = ticker
+        return [key for key, valid in (
+            ('limitUpPrice', not isinstance(up, bool) and a.finite_positive(up)),
+            ('limitDownPrice', not isinstance(down, bool) and a.finite_positive(down)),
+            ('canDayTrade', isinstance(can_trade, bool)),
+            ('isDisposition', isinstance(disposition, bool))) if not valid]
 
     def persist(self, state):
         a = self.api
@@ -187,7 +197,13 @@ class SharedCandidateFlow:
             return
         row = self.rows[symbol]
         up, down, can_trade, disposition = ticker
-        if (not can_trade or disposition is None or disposition
+        missing = self.ticker_missing_fields(ticker)
+        if missing:
+            self.tickers.pop(symbol, None)
+            a.trade_log('CANDIDATE_TICKER_INCOMPLETE', error=True, symbol=symbol,
+                        missing_fields=','.join(missing), action='資格欄位缺失或無效，等待下一輪重查')
+            return
+        if (not can_trade or disposition
                 or not all(a.finite_positive(v) for v in (up, down, row[4], row[5]))):
             disabled.update(a.STRATEGY_PRIORITY)
             self.prune(symbol, now)
@@ -245,17 +261,17 @@ class SharedCandidateFlow:
         self.prune(symbol, now)
 
     def update_quote(self, state, quote, now):
+        a = self.api
+        quote = tuple(float(v) if not isinstance(v, bool) and a.finite_positive(v) else None for v in quote)
         px, opening, high, low, close, average, bid, ask = quote
         state.update(pre_last_price=state.get('last_price'), pre_last_price_time=state.get('last_price_time'),
-                     last_price=float(px), last_price_time=now.isoformat(), open_price=opening,
+                     last_price=px, last_price_time=now.isoformat() if px is not None else None, open_price=opening,
                      high_price=high, low_price=low, close_price=close, avg_price=average,
                      best_bid_price=bid, best_ask_price=ask)
 
     def apply_quote(self, state, quote, sdk, now):
         """已送單的唯一狀態只管理委託與持倉，不重新尋找進場策略。"""
         a = self.api
-        if not all(a.finite_positive(v) for v in quote[:4]):
-            return
         self.update_quote(state, quote, now)
         if state.get('in_position'):
             a.try_close_position(state, sdk)
@@ -267,10 +283,18 @@ class SharedCandidateFlow:
         if symbol in states or symbol not in self.rows:
             return
         self.prune(symbol, now)
-        if symbol not in self.rows or not all(a.finite_positive(v) for v in quote[:4]):
+        if symbol not in self.rows:
+            return
+        missing = [key for key, value in zip(('lastPrice', 'openPrice', 'highPrice', 'lowPrice'), quote[:4])
+                   if isinstance(value, bool) or not a.finite_positive(value)]
+        if missing:
+            for state in self.candidates.get(symbol, {}).values():
+                self.update_quote(state, quote, now)
+            a.trade_log('ENTRY_QUOTE_INCOMPLETE', error=True, symbol=symbol, missing_fields=','.join(missing),
+                        action='必要欄位缺失或無效，跳過本輪進場，等待下一輪')
             return
         candidates = self.candidates.get(symbol, {})
-        px, _, high, low = quote[:4]
+        px, _, high, low = map(float, quote[:4])
         for strategy in a.STRATEGY_PRIORITY:
             state = candidates.get(strategy)
             if state is None:

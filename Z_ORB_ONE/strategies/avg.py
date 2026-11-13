@@ -95,7 +95,7 @@ class AvgStrategy:
             return list(self.services.selected_stocks)
         raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
 
-    def validate_avg_config(self) -> None:
+    def validate_avg_config(self, *, validate_shared_risk: bool = True) -> None:
         if self.config.AVG_STOCK_DATA_SOURCE not in ("T", "S"):
             raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
         for name in ("AVG_STAGE_1_START_TIME", "AVG_CANDLES_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
@@ -141,10 +141,13 @@ class AvgStrategy:
             raise ValueError("AVG 斜率門檻必須為有限數值")
         if type(self.config.AVG_MAX_MISSING_SLOPE_BARS) is not int or self.config.AVG_MAX_MISSING_SLOPE_BARS < 0:
             raise ValueError("AVG_MAX_MISSING_SLOPE_BARS 必須為非負整數")
-        protection_values = ((self.config.AVG_PROTECT_PROFIT_PER, self.config.AVG_PROTECT_LOSS_PER)
-                             if self.config.ENABLE_PROFIT_PROTECTION else ())
-        for value in (self.config.AVG_STOP_LOSS_PERCENT, self.config.AVG_TAKE_PROFIT_PERCENT, *protection_values,
-                      self.config.AVG_PROFIT_BACK_PERCENT, self.config.AVG_PROFIT_TARGET_PERCENT):
+        # 舊入口預設保留完整驗證；多策略入口改由獨立共用驗證處理。
+        shared_values = ()
+        if validate_shared_risk:
+            shared_values = (self.config.AVG_PROFIT_BACK_PERCENT, self.config.AVG_PROFIT_TARGET_PERCENT)
+            if self.config.ENABLE_PROFIT_PROTECTION:
+                shared_values += (self.config.AVG_PROTECT_PROFIT_PER, self.config.AVG_PROTECT_LOSS_PER)
+        for value in (self.config.AVG_STOP_LOSS_PERCENT, self.config.AVG_TAKE_PROFIT_PERCENT, *shared_values):
             if not math.isfinite(value) or not 0 < value < 100:
                 raise ValueError("AVG 風控百分比必須介於 0 與 100")
         for value in (self.config.AVG_STAGE_1_AMPLITUDE_PERCENT, self.config.AVG_STAGE_2_AMPLITUDE_PERCENT,
