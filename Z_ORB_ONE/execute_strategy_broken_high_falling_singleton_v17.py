@@ -36,7 +36,6 @@ vol_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.vol import VolConfig
-from strategies.gap import GapConfig
 
 
 class TeeStream:
@@ -74,7 +73,6 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 # 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_AVG = 'AVG'
 STRATEGY_VOL = 'VOL'
-STRATEGY_GAP = 'GAP'
 
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
@@ -93,11 +91,10 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["GAP", "VOL", "AVG"]
+STRATEGY_PRIORITY = ["AVG", "VOL"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
 ENABLE_VOL = True
-ENABLE_GAP = True
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
 AVG_STAGE_1_START_TIME = (9, 0)
@@ -120,7 +117,7 @@ AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
 AVG_STOP_LOSS_PERCENT = 2.0
 AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
-AVG_ENTRY_ORDER_QUANTITY = 1
+AVG_ENTRY_ORDER_QUANTITY = 2
 
 # VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
@@ -139,22 +136,6 @@ VOL_TAKE_PROFIT_PERCENT = 6.0
 VOL_FORCE_CLOSE_TIME = (12, 50)
 VOL_ENTRY_ORDER_QUANTITY = 1
 
-# GAP: v36 昨日收漲、開盤跳空、衝高回落放空；單根K棒內完成訊號確認 -> 下一分鐘報價入場。
-# 前置資料沿用 vol_history_by_symbol／vol_history_reference_date，只要求昨日量能及昨收。
-# 「昨收>前昨收」用 up_streak_days>=1 判斷，需 aggregate 將該欄位定義為
-# 「以T-1收盤為結尾的連續上漲收盤天數」才成立（移植說明已記錄此依賴）。
-GAP_SIGNAL_START_TIME = (9, 5)
-GAP_ENTRY_DEADLINE = (10, 0)
-GAP_PREVIOUS_TURNOVER_TOP_PERCENT = 20.0
-GAP_MIN_PREVIOUS_TURNOVER = 300_000_000
-GAP_MIN_OPEN_GAP_PERCENT = 1.0
-GAP_MIN_RUNUP_PERCENT = 6.0
-GAP_PULLBACK_PERCENT = 2.0
-GAP_VOLUME_UNIT_SHARES = 1000
-GAP_STOP_LOSS_PERCENT = 2.5
-GAP_TAKE_PROFIT_PERCENT = 6.0
-GAP_FORCE_CLOSE_TIME = (12, 50)
-GAP_ENTRY_ORDER_QUANTITY = 1
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 開盤前不查委託結果，09:00 後才補成交價量
@@ -338,7 +319,7 @@ def verify_startup_snapshot_date(realtime_sdk):
             actual = str(record.get('time', ''))[:10] if isinstance(record, dict) else ''
             if actual != expected:
                 raise ValueError(f'{key} 快照日期={actual!r}，最近交易日={expected}')
-        if (ENABLE_VOL or ENABLE_GAP) and vol_history_reference_date != expected:
+        if ENABLE_VOL and vol_history_reference_date != expected:
             raise ValueError(f'量能參考日={vol_history_reference_date!r}，最近交易日={expected}')
         trade_log('SNAPSHOT_DATE_VERIFIED', reference_date=expected)
         return expected
@@ -348,31 +329,6 @@ def verify_startup_snapshot_date(realtime_sdk):
         message = '歷史資料日期驗證失敗，程序終止，請更新或確認資料後再啟動'
         trade_log('SNAPSHOT_DATE_FAILED', error=True, message=message, error_msg=repr(exc))
         raise RuntimeError(message) from exc
-
-
-def is_gap_strategy(state):
-    return bool(state and state.get('strategy_type') == STRATEGY_GAP)
-
-
-def get_gap_config():
-    return GapConfig(signal_start=GAP_SIGNAL_START_TIME, entry_deadline=GAP_ENTRY_DEADLINE,
-                     min_previous_turnover=GAP_MIN_PREVIOUS_TURNOVER,
-                     previous_turnover_top_percent=GAP_PREVIOUS_TURNOVER_TOP_PERCENT,
-                     min_open_gap_percent=GAP_MIN_OPEN_GAP_PERCENT,
-                     min_runup_percent=GAP_MIN_RUNUP_PERCENT,
-                     pullback_percent=GAP_PULLBACK_PERCENT,
-                     minute_volume_shares=GAP_VOLUME_UNIT_SHARES)
-
-
-def validate_gap_config():
-    get_gap_config().validate()
-    if type(GAP_ENTRY_ORDER_QUANTITY) is not int or GAP_ENTRY_ORDER_QUANTITY <= 0:
-        raise ValueError('GAP 張數必須為正整數')
-    for value in (GAP_STOP_LOSS_PERCENT, GAP_TAKE_PROFIT_PERCENT):
-        if not math.isfinite(value) or not 0 < value < 100:
-            raise ValueError('GAP 風控百分比必須介於0與100')
-    if not GAP_ENTRY_DEADLINE < GAP_FORCE_CLOSE_TIME <= (13, 30):
-        raise ValueError('GAP 平倉時間必須晚於入場截止且不晚於13:30')
 
 
 def all_order_states(states):
@@ -858,7 +814,6 @@ def type_place_order(mysdk, symbol_code_with_suf, action_type, trade_type, quant
     return order_no
 
 
-
 def ensure_execution_ledger(state):
     """All ledger quantities are shares; API order quantities remain lots."""
     if 'entry_execution' not in state:
@@ -1300,7 +1255,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_vol_strategy(state) or is_gap_strategy(state):
+        if is_avg_strategy(state) or is_vol_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
@@ -1879,8 +1834,6 @@ def get_current_entry_mode() -> int:
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if is_vol_strategy(state):
         return VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT
-    if is_gap_strategy(state):
-        return GAP_STOP_LOSS_PERCENT, GAP_TAKE_PROFIT_PERCENT
     if is_avg_strategy(state):
         return AVG_STOP_LOSS_PERCENT, AVG_TAKE_PROFIT_PERCENT
     raise ValueError("未支援的策略，無法取得停損停利設定")
@@ -1893,8 +1846,6 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if is_vol_strategy(state):
         return VOL_FORCE_CLOSE_TIME
-    if is_gap_strategy(state):
-        return GAP_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
         return AVG_FORCE_CLOSE_TIME
     return FORCE_EXIT_TIME
@@ -1903,8 +1854,6 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
     if strategy_type == STRATEGY_VOL or is_vol_strategy(state):
         return VOL_ENTRY_ORDER_QUANTITY
-    if strategy_type == STRATEGY_GAP or is_gap_strategy(state):
-        return GAP_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
         return AVG_ENTRY_ORDER_QUANTITY
     return 0
@@ -1942,8 +1891,6 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if is_vol_strategy(state):
         return VOL_ENTRY_DEADLINE
-    if is_gap_strategy(state):
-        return GAP_ENTRY_DEADLINE
     if is_avg_strategy(state):
         return AVG_ENTRY_DEADLINE
     return AVG_ENTRY_DEADLINE
@@ -1951,11 +1898,9 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME, GAP_SIGNAL_START_TIME)
+        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME)
     if is_vol_strategy(state):
         return VOL_SIGNAL_START_TIME
-    if is_gap_strategy(state):
-        return GAP_SIGNAL_START_TIME
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
         return AVG_ENTRY_START_TIME
     return AVG_ENTRY_START_TIME
@@ -1963,7 +1908,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE, GAP_ENTRY_DEADLINE]
+    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
 
@@ -1973,7 +1918,6 @@ def is_strategy_enabled(strategy_type: str) -> bool:
     return {
         STRATEGY_AVG: ENABLE_AVG,
         STRATEGY_VOL: ENABLE_VOL,
-        STRATEGY_GAP: ENABLE_GAP,
     }.get(strategy_type, False)
 
 
@@ -1992,7 +1936,7 @@ def validate_shared_risk_config() -> None:
 def validate_strategy_switches() -> None:
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
-    for name in ('ENABLE_AVG', 'ENABLE_VOL', 'ENABLE_GAP'):
+    for name in ('ENABLE_AVG', 'ENABLE_VOL'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
 
@@ -2014,11 +1958,6 @@ def try_open_position(state: Dict[str, Any], mysdk):
     if is_vol_strategy(state):
         if (not state.get('vol_entry_time')
                 or datetime.fromisoformat(state['vol_entry_time']) > now_tpe()
-                or not finite_positive(state.get('last_price'))):
-            return
-    elif is_gap_strategy(state):
-        if (not state.get('gap_entry_time')
-                or datetime.fromisoformat(state['gap_entry_time']) > now_tpe()
                 or not finite_positive(state.get('last_price'))):
             return
     elif is_avg_strategy(state):
@@ -2779,15 +2718,11 @@ def main(*, runtime_mode: str | None = None):
             vol_history_by_symbol = {}
         if ENABLE_VOL and not vol_history_by_symbol:
             print('[WARN] stock_data沒有VOL歷史量能，本日僅停用各檔VOL；請先重跑aggregate v3及v3_re')
-        if ENABLE_GAP and not vol_history_by_symbol:
-            print('[WARN] stock_data沒有VOL歷史量能（GAP沿用同一份資料），本日僅停用各檔GAP；請先重跑aggregate v3及v3_re')
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         if ENABLE_AVG:
             validate_avg_config()
         if ENABLE_VOL:
             validate_vol_config()
-        if ENABLE_GAP:
-            validate_gap_config()
         wait_until_main_start_time()
         TRADE_API_DEGRADED_EVENT.clear()
         AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})

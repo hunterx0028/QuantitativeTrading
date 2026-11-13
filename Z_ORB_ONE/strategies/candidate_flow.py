@@ -19,7 +19,6 @@ class SharedCandidateFlow:
         self.initialized = False
         self.tickers = {}
         self.vol_turnover_eligibility = {}
-        self.gap_turnover_eligibility = {}
         self.scan_timing = None
         self.scan_timing_lock = Lock()
 
@@ -58,8 +57,6 @@ class SharedCandidateFlow:
         supported = {a.STRATEGY_AVG}
         if hasattr(a, 'STRATEGY_VOL'):
             supported.add(a.STRATEGY_VOL)
-        if hasattr(a, 'STRATEGY_GAP'):
-            supported.add(a.STRATEGY_GAP)
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
             raise ValueError(f"STRATEGY_PRIORITY 必須各包含 {sorted(supported)} 一次")
         if a.STOCK_DATA_SOURCE not in ("T", "S"):
@@ -76,15 +73,6 @@ class SharedCandidateFlow:
             a.trade_log('VOL_TURNOVER_FILTER', pool_count=len(self.rows),
                         ranked_count=len(self.vol_turnover_eligibility),
                         eligible_count=sum(self.vol_turnover_eligibility.values()))
-        if hasattr(a, 'STRATEGY_GAP') and self.strategy_enabled(a.STRATEGY_GAP):
-            self.gap_turnover_eligibility = a.get_gap_config().build_turnover_eligibility(
-                self.rows, a.vol_history_by_symbol, a.get_vol_reference_date(), a.now_tpe())
-            for symbol in self.rows:
-                if not self.gap_turnover_eligibility.get(symbol, False):
-                    self.disabled.setdefault(symbol, set()).add(a.STRATEGY_GAP)
-            a.trade_log('GAP_TURNOVER_FILTER', pool_count=len(self.rows),
-                        ranked_count=len(self.gap_turnover_eligibility),
-                        eligible_count=sum(self.gap_turnover_eligibility.values()))
         self.initialized = True
 
     def strategy_enabled(self, strategy):
@@ -124,8 +112,6 @@ class SharedCandidateFlow:
         deadlines = [(a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE)]
         if hasattr(a, 'STRATEGY_VOL'):
             deadlines.append((a.STRATEGY_VOL, a.VOL_ENTRY_DEADLINE))
-        if hasattr(a, 'STRATEGY_GAP'):
-            deadlines.append((a.STRATEGY_GAP, a.GAP_ENTRY_DEADLINE))
         return deadlines
 
     def check_avg_eligibility(self, symbol, completed, previous_close, now, disabled):
@@ -227,18 +213,6 @@ class SharedCandidateFlow:
                 state = self.add_candidate(symbol, a.STRATEGY_VOL, signal, ticker, now)
                 # Never enter using a quote requested before confirmation was available.
                 state['vol_quote_not_before'] = a.time.monotonic()
-        if (hasattr(a, 'STRATEGY_GAP') and a.STRATEGY_GAP not in disabled
-                and a.STRATEGY_GAP not in candidates):
-            signal, rejected = a.get_gap_config().find_candidate(
-                bars, float(row[5]), row[8][0] >= 1, a.vol_history_by_symbol.get(symbol),
-                a.get_vol_reference_date(), cutoff, up)
-            if rejected:
-                disabled.add(a.STRATEGY_GAP)
-                a.trade_log('GAP_REJECTED', symbol=symbol,
-                            reason='history_turnover_closed_up_or_signal_invalid')
-            elif signal:
-                state = self.add_candidate(symbol, a.STRATEGY_GAP, signal, ticker, now)
-                state['gap_quote_not_before'] = a.time.monotonic()
         if a.STRATEGY_AVG not in disabled:
             checks = self.check_avg_eligibility(symbol, completed, float(row[5]), cutoff, disabled)
             if (a.STRATEGY_AVG not in disabled and a.STRATEGY_AVG not in candidates
@@ -301,7 +275,6 @@ class SharedCandidateFlow:
                 continue
             self.update_quote(state, quote, now)
             is_vol = strategy == getattr(a, 'STRATEGY_VOL', None)
-            is_gap = strategy == getattr(a, 'STRATEGY_GAP', None)
             # 所有策略共用：入場前曾觸及漲跌停，當日不得進場。
             if high >= state['limit_up_price'] or low <= state['limit_down_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
@@ -317,12 +290,6 @@ class SharedCandidateFlow:
                         or datetime.fromisoformat(state['vol_entry_time']) > now
                         or requested_at is None
                         or requested_at < state.get('vol_quote_not_before', float('inf'))):
-                    continue
-            elif is_gap:
-                if (not state.get('gap_entry_time')
-                        or datetime.fromisoformat(state['gap_entry_time']) > now
-                        or requested_at is None
-                        or requested_at < state.get('gap_quote_not_before', float('inf'))):
                     continue
             elif a.is_avg_strategy(state):
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
@@ -383,8 +350,6 @@ class SharedCandidateFlow:
             starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
         if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
             starts.append(a.VOL_SIGNAL_START_TIME)
-        if hasattr(a, 'STRATEGY_GAP') and self.strategy_enabled(a.STRATEGY_GAP):
-            starts.append(a.GAP_SIGNAL_START_TIME)
         start = min(starts) if starts else (23, 59)
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND
