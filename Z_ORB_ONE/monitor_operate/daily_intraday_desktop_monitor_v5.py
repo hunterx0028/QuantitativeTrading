@@ -42,7 +42,8 @@ from Z_ORB_ONE.stock_data import (
 # 指定代碼必須存在於 stock_data.py 上述四份清單之一；找不到會報錯，不向 API 自行補建資料。
 # 代碼可用字串或整數；有前導 0 的代碼請使用字串，例如 "0050"。
 # 指定代碼的資料依 S、T、U、D 順序尋找；區塊／代碼重複時保留首次加入的資料。
-MONITOR_STOCK_BLOCKS = ["S","T","U","D"]
+# [] 或 [""] 均為無效設定，會在登入 API 前報錯中止。
+MONITOR_STOCK_BLOCKS = [""]
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 TZ = pytz.timezone("Asia/Taipei")
@@ -122,6 +123,8 @@ def get_pure_symbol(symbol_str: str) -> tuple[str, str]:
 
 
 def build_monitor_stocks(blocks: list[str | int]) -> list[tuple]:
+    if not blocks:
+        raise ValueError("監看選項不可為空，請指定 S、T、U、D 或 stock_data.py 中的股票代碼。")
     stock_blocks = {
         "S": selected_stocks,
         "T": total_stocks,
