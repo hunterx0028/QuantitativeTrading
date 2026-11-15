@@ -62,6 +62,9 @@ PROFIT_TARGET_PERCENT = 1.0  # 下一個追蹤目標相對當次low再向下的�
 STOP_SLIPPAGE_TICKS = 0  # 停損（含跳空停損）出場價向上加計的tick數；0為不計滑價
 
 INTRADAY_COMPARE_END_LOWER = (12, 50)  # 強制平倉時間，以該分K open 平倉
+# 歷史資料無法得知股票於當日是否為撮合或處置股票，因此以開盤後前半小時
+# （09:00～09:29）的分K數作為替代判別依據；此篩選用途並非事先窺探未來行情。
+# 實機程式每天可由 API 取得股票即時資訊，直接判別當日狀態，不需要此替代篩選。
 MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
 # 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
@@ -438,6 +441,7 @@ def has_enough_minute_bars_before_0930(today_bars):
     minutes = {bar['dt'] for bar in today_bars
                if (9, 0) <= (bar['dt'].hour, bar['dt'].minute) < (9, 30)
                and not bar['dt'].second and not bar['dt'].microsecond}
+    # 歷史回測以早盤分K數替代判別當日撮合／處置狀態，目的為股票資格篩選。
     return len(minutes) >= MIN_MINUTE_BARS_BEFORE_0930
 
 
