@@ -117,7 +117,7 @@ AVG_MIN_PRE_ENTRY_RANGE_PERCENT = 5.0
 AVG_STOP_LOSS_PERCENT = 2.0
 AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
-AVG_ENTRY_ORDER_QUANTITY = 2
+AVG_ENTRY_ORDER_QUANTITY = 1
 
 # VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
