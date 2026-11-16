@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from threading import Lock
+from concurrent.futures import as_completed
 
 
 class SharedCandidateFlow:
@@ -21,6 +22,11 @@ class SharedCandidateFlow:
         self.vol_turnover_eligibility = {}
         self.scan_timing = None
         self.scan_timing_lock = Lock()
+        self.ind_runtime = None
+        self.ind_market_future = None
+        self.ind_quote_future = None
+        self.ind_market_retry_at = 0.0
+        self.ind_quote_retry_at = 0.0
 
     def record_scan_completion(self, batch, future):
         """背景完成時記錄時間；僅由主流程列印整輪摘要。"""
@@ -57,6 +63,10 @@ class SharedCandidateFlow:
         supported = {a.STRATEGY_AVG}
         if hasattr(a, 'STRATEGY_VOL'):
             supported.add(a.STRATEGY_VOL)
+        if hasattr(a, 'STRATEGY_IND'):
+            supported.add(a.STRATEGY_IND)
+            if self.strategy_enabled(a.STRATEGY_IND):
+                self.ind_runtime = a.get_ind_runtime()
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
             raise ValueError(f"STRATEGY_PRIORITY 必須各包含 {sorted(supported)} 一次")
         if a.STOCK_DATA_SOURCE not in ("T", "S"):
@@ -74,6 +84,40 @@ class SharedCandidateFlow:
                         ranked_count=len(self.vol_turnover_eligibility),
                         eligible_count=sum(self.vol_turnover_eligibility.values()))
         self.initialized = True
+
+    def prepare_tickers(self, sdk):
+        """開盤前共用資格檢查；確定不合格即排除，欄位缺失不猜值。
+
+        有限次重試後仍缺資料者保留待查，盤中取分K時重查，確認前不可建立候選。
+        """
+        a = self.api
+        for attempt in range(a.PREOPEN_TICKER_ATTEMPTS):
+            missing = [symbol for symbol in self.rows if symbol not in self.tickers]
+            if not missing:
+                break
+            futures = {a.AVG_CANDLE_EXECUTOR.submit(a.get_up_down_price, symbol, sdk): symbol
+                       for symbol in missing}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    ticker = future.result()
+                    if self.ticker_missing_fields(ticker):
+                        a.trade_log('PREOPEN_TICKER_INCOMPLETE', symbol=symbol, attempt=attempt + 1)
+                        continue
+                    up, down, can_trade, disposition = ticker
+                    if not can_trade or disposition:
+                        self.disabled.setdefault(symbol, set()).update(a.STRATEGY_PRIORITY)
+                        self.rows.pop(symbol, None)
+                        a.trade_log('PREOPEN_TICKER_REJECTED', symbol=symbol,
+                                    can_day_trade=can_trade, disposition=disposition)
+                        continue
+                    self.tickers[symbol] = ticker
+                except Exception as exc:
+                    a.trade_log('PREOPEN_TICKER_ERROR', error=True, symbol=symbol,
+                                attempt=attempt + 1, error_msg=repr(exc))
+        a.trade_log('PREOPEN_TICKER_COMPLETE', pool_count=len(self.rows),
+                    verified_count=len(self.tickers),
+                    retry_pending_count=sum(symbol not in self.tickers for symbol in self.rows))
 
     def strategy_enabled(self, strategy):
         # 舊版入口未提供開關時，維持所有策略開啟的既有行為。
@@ -112,6 +156,8 @@ class SharedCandidateFlow:
         deadlines = [(a.STRATEGY_AVG, a.AVG_ENTRY_DEADLINE)]
         if hasattr(a, 'STRATEGY_VOL'):
             deadlines.append((a.STRATEGY_VOL, a.VOL_ENTRY_DEADLINE))
+        if hasattr(a, 'STRATEGY_IND'):
+            deadlines.append((a.STRATEGY_IND, a.IND_ENTRY_DEADLINE))
         return deadlines
 
     def check_avg_eligibility(self, symbol, completed, previous_close, now, disabled):
@@ -134,6 +180,9 @@ class SharedCandidateFlow:
         disabled = self.disabled.setdefault(symbol, set())
         disabled.update(strategy for strategy in a.STRATEGY_PRIORITY
                         if not self.strategy_enabled(strategy))
+        if (self.ind_runtime is not None and (self.ind_runtime.halted
+                or (self.ind_runtime.decision is not None and not self.ind_runtime.decision['passed']))):
+            disabled.add(a.STRATEGY_IND)
         for strategy, deadline in self.strategy_deadlines():
             if (now.hour, now.minute) > deadline:
                 disabled.add(strategy)
@@ -169,6 +218,9 @@ class SharedCandidateFlow:
         for strategy in a.STRATEGY_PRIORITY:
             if strategy in disabled or not self.strategy_enabled(strategy):
                 continue
+            if strategy == getattr(a, 'STRATEGY_IND', None) and (
+                    self.ind_runtime is None or self.ind_runtime.decision is None):
+                continue  # 大盤資格尚未確認，避免為IND重複掃描整個股票池。
             state = candidates.get(strategy)
             if state is None:
                 return True
@@ -200,6 +252,16 @@ class SharedCandidateFlow:
         bars = a.parse_avg_candles(response.get('data'), cutoff)
         completed = [b for b in bars if b['dt'] < cutoff.replace(second=0, microsecond=0)]
         candidates = self.candidates.setdefault(symbol, {})
+        if (self.ind_runtime is not None and a.STRATEGY_IND not in disabled
+                and a.STRATEGY_IND not in candidates):
+            signal, rejected = a.get_ind_config().find_candidate(
+                bars, float(row[5]), self.ind_runtime.decision, cutoff, up, down)
+            if rejected:
+                disabled.add(a.STRATEGY_IND)
+                a.trade_log('IND_REJECTED', symbol=symbol, reason='selection_limit_or_signal_invalid')
+            elif signal:
+                state = self.add_candidate(symbol, a.STRATEGY_IND, signal, ticker, now)
+                state['ind_quote_not_before'] = a.time.monotonic()
         if (hasattr(a, 'STRATEGY_VOL') and a.STRATEGY_VOL not in disabled
                 and a.STRATEGY_VOL not in candidates):
             signal, rejected = a.get_vol_config().find_candidate(
@@ -275,6 +337,7 @@ class SharedCandidateFlow:
                 continue
             self.update_quote(state, quote, now)
             is_vol = strategy == getattr(a, 'STRATEGY_VOL', None)
+            is_ind = strategy == getattr(a, 'STRATEGY_IND', None)
             # 所有策略共用：入場前曾觸及漲跌停，當日不得進場。
             if high >= state['limit_up_price'] or low <= state['limit_down_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
@@ -285,7 +348,13 @@ class SharedCandidateFlow:
                 continue
             if not a.get_entry_check_start_time(state) <= (now.hour, now.minute) <= a.get_entry_check_end_time(state):
                 continue
-            if is_vol:
+            if is_ind:
+                if (not state.get('ind_entry_time')
+                        or datetime.fromisoformat(state['ind_entry_time']) > now
+                        or requested_at is None
+                        or requested_at < state.get('ind_quote_not_before', float('inf'))):
+                    continue
+            elif is_vol:
                 if (not state.get('vol_entry_time')
                         or datetime.fromisoformat(state['vol_entry_time']) > now
                         or requested_at is None
@@ -300,6 +369,9 @@ class SharedCandidateFlow:
             if float(px) * (1 + loss_percent / 100) >= state['limit_up_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
                 a.trade_log('CANDIDATE_STOP_SPACE_REJECTED', symbol=symbol, strategy=strategy)
+                continue
+            if is_ind and not a.check_ind_entry_market(state, now):
+                self.prune(symbol, now)
                 continue
             state.update(entry_trigger_price=float(px), entry_signal_price=float(px), entry_signal_time=now.isoformat())
             # SDK callback 與未知結果對帳必須在送單前即可找到唯一狀態。
@@ -331,9 +403,55 @@ class SharedCandidateFlow:
             # 同一報價只嘗試一個完整合格策略；Busy/暫停等下一輪重新仲裁。
             return
 
+    def process_ind_market(self, sdk, now):
+        """指數背景查詢全股票共用；只有主監控更新凍結判定與最新報價。"""
+        if self.ind_runtime is None:
+            return
+        a = self.api
+        config = a.get_ind_config()
+        runtime = self.ind_runtime
+        monotonic = a.time.monotonic()
+        if self.ind_market_future is not None and self.ind_market_future.done():
+            future, self.ind_market_future = self.ind_market_future, None
+            try:
+                response, requested_at = future.result()
+                cutoff = min(requested_at, now)
+                bars = a.parse_avg_candles(response.get('data'), cutoff)
+                decision = runtime.confirm_market(config, bars,
+                    a.get_ind_market_snapshot()['previous_close'], cutoff)
+                if decision is not None:
+                    a.trade_log('IND_MARKET_DECISION', passed=decision['passed'],
+                                market_time=decision['dt'].isoformat(), change=decision['change'])
+                    if decision['passed']:
+                        self.last_scan = None  # 本分鐘先前可能因等待大盤而略過IND，立即允許首輪掃描。
+            except Exception as exc:
+                a.trade_log('IND_MARKET_CANDLE_ERROR', error=True, error_msg=repr(exc))
+            self.ind_market_retry_at = monotonic + a.IND_MARKET_RETRY_SECONDS
+        if self.ind_quote_future is not None and self.ind_quote_future.done():
+            future, self.ind_quote_future = self.ind_quote_future, None
+            try:
+                runtime.quote = future.result()
+            except Exception as exc:
+                runtime.quote = None
+                a.trade_log('IND_MARKET_QUOTE_ERROR', error=True, error_msg=repr(exc))
+            self.ind_quote_retry_at = monotonic + a.IND_MARKET_RETRY_SECONDS
+        if (now.hour, now.minute) > config.entry_deadline or runtime.halted:
+            return
+        decision_ready = now.replace(hour=config.market_check_time[0],
+                                     minute=config.market_check_time[1], second=0, microsecond=0) + timedelta(minutes=1)
+        if (runtime.decision is None and self.ind_market_future is None
+                and now >= decision_ready and monotonic >= self.ind_market_retry_at):
+            self.ind_market_future = a.MARKET_SCAN_EXECUTOR.submit(a.fetch_ind_market_candles, sdk)
+        if (config.enable_market_entry_recheck and runtime.decision is not None
+                and runtime.decision['passed'] and self.ind_quote_future is None
+                and monotonic >= self.ind_quote_retry_at
+                and any(a.STRATEGY_IND in states for states in self.candidates.values())):
+            self.ind_quote_future = a.MARKET_SCAN_EXECUTOR.submit(a.fetch_ind_market_quote, sdk)
+
     def process(self, states, sdk, trade_sdk):
         a = self.api
         now = a.now_tpe()
+        self.process_ind_market(sdk, now)
         for future, symbol in list(self.candles.items()):
             if not future.done():
                 continue
@@ -350,6 +468,8 @@ class SharedCandidateFlow:
             starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
         if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
             starts.append(a.VOL_SIGNAL_START_TIME)
+        if self.ind_runtime is not None and self.strategy_enabled(a.STRATEGY_IND):
+            starts.append(min(a.IND_MARKET_CHECK_TIME, a.IND_STOCK_SCAN_START_TIME))
         start = min(starts) if starts else (23, 59)
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND
@@ -403,6 +523,12 @@ class SharedCandidateFlow:
                     position = bool(state and state.get('in_position'))
                     priority = a.MARKETDATA_PRIORITY_POSITION if position else a.MARKETDATA_PRIORITY_CANDIDATE
                     executor = a.AVG_POSITION_QUOTE_EXECUTOR if position else a.CANDIDATE_QUOTE_EXECUTOR
-                    self.quotes[symbol] = executor.submit(a.fetch_candidate_quote, symbol, sdk, priority)
+                    candidate = self.candidates.get(symbol, {}).get(getattr(a, 'STRATEGY_IND', None))
+                    if candidate is not None and state is None:
+                        self.quotes[symbol] = executor.submit(
+                            a.fetch_candidate_quote, symbol, sdk, priority,
+                            not_before=candidate['ind_quote_not_before'])
+                    else:
+                        self.quotes[symbol] = executor.submit(a.fetch_candidate_quote, symbol, sdk, priority)
             except Exception as exc:
                 a.trade_log('CANDIDATE_MONITOR_ERROR', error=True, symbol=symbol, error_msg=repr(exc))

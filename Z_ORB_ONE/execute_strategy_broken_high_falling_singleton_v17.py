@@ -36,6 +36,7 @@ vol_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.vol import VolConfig
+from strategies.ind import IndConfig, IndRuntime, parse_market_quote
 
 
 class TeeStream:
@@ -73,6 +74,7 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 # 單日策略前提：每檔股票在當日只會有一個固定交易方向。
 STRATEGY_AVG = 'AVG'
 STRATEGY_VOL = 'VOL'
+STRATEGY_IND = 'IND'
 
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
@@ -91,10 +93,12 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["AVG", "VOL"]
+STRATEGY_PRIORITY = ["AVG", "VOL", "IND"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
 ENABLE_VOL = True
+ENABLE_IND = True
+PREOPEN_TICKER_ATTEMPTS = 2  # 開盤前資格查詢輪數；仍缺資料者盤中重試，確認前禁止入場
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
 AVG_STAGE_1_START_TIME = (9, 0)
@@ -136,6 +140,21 @@ VOL_TAKE_PROFIT_PERCENT = 6.0
 VOL_FORCE_CLOSE_TIME = (12, 50)
 VOL_ENTRY_ORDER_QUANTITY = 1
 
+# IND：v40 完成分K確認後取得新即時報價，不等待下一根open。
+IND_MARKET_KEY = 'TWSE:MARKET'  # symbol/昨收由開盤前已驗證快照取得（IX0001）
+IND_MARKET_CHECK_TIME = (9, 15)
+IND_STOCK_SCAN_START_TIME = (9, 16)
+IND_MARKET_DROP_PERCENT = 1.5
+IND_STOCK_MAX_DROP_PERCENT = 0.5
+IND_ENABLE_MARKET_ENTRY_RECHECK = False  # 開啟後反彈只封鎖當日後續IND，不影響AVG/VOL或已送單持倉
+IND_MARKET_RETRY_SECONDS = 5.0
+IND_MARKET_QUOTE_MAX_AGE_SECONDS = 15.0
+IND_ENTRY_DEADLINE = (12, 0)
+IND_STOP_LOSS_PERCENT = 2.0
+IND_TAKE_PROFIT_PERCENT = 5.0
+IND_FORCE_CLOSE_TIME = (12, 50)
+IND_ENTRY_ORDER_QUANTITY = 1
+
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
 ORDER_RESULTS_QUERY_START_TIME = (9, 0)  # 開盤前不查委託結果，09:00 後才補成交價量
@@ -175,6 +194,7 @@ ORDER_RESULTS_PENDING_FUTURE: Optional[Future] = None
 MARKETDATA_STOP_EVENT = threading.Event()
 
 AVG_RUNTIME = AvgRuntime()
+IND_RUNTIME = IndRuntime()
 CANDIDATE_QUOTE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="candidate-quote")
 # 所有日內 stock REST 共用節流，保留 600/min 額度餘裕，避免兩套背景工作互相超額。
 STOCK_REST_REQUEST_INTERVAL_SECONDS = 0.125
@@ -261,6 +281,80 @@ def is_vol_strategy(state):
     return bool(state and state.get('strategy_type') == STRATEGY_VOL)
 
 
+def is_ind_strategy(state):
+    return bool(state and state.get('strategy_type') == STRATEGY_IND)
+
+
+def get_ind_runtime():
+    return IND_RUNTIME
+
+
+def get_ind_config():
+    return IndConfig(market_check_time=IND_MARKET_CHECK_TIME,
+                     stock_scan_start_time=IND_STOCK_SCAN_START_TIME,
+                     entry_deadline=IND_ENTRY_DEADLINE,
+                     market_drop_percent=IND_MARKET_DROP_PERCENT,
+                     stock_max_drop_percent=IND_STOCK_MAX_DROP_PERCENT,
+                     enable_market_entry_recheck=IND_ENABLE_MARKET_ENTRY_RECHECK,
+                     market_quote_max_age_seconds=IND_MARKET_QUOTE_MAX_AGE_SECONDS)
+
+
+def get_ind_market_snapshot():
+    snapshot = market_previous_close_indices.get(IND_MARKET_KEY)
+    if (not isinstance(snapshot, dict) or not isinstance(snapshot.get('symbol'), str)
+            or not snapshot['symbol'].strip()
+            or isinstance(snapshot.get('previous_close'), bool)
+            or not finite_positive(snapshot.get('previous_close'))):
+        raise ValueError(f'IND 缺少有效 {IND_MARKET_KEY} symbol/previous_close 快照')
+    return snapshot
+
+
+def validate_ind_config():
+    get_ind_config().validate()
+    if type(IND_ENTRY_ORDER_QUANTITY) is not int or IND_ENTRY_ORDER_QUANTITY <= 0:
+        raise ValueError('IND 張數必須為正整數')
+    for value in (IND_STOP_LOSS_PERCENT, IND_TAKE_PROFIT_PERCENT, IND_MARKET_RETRY_SECONDS):
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError('IND 風控百分比及重試秒數須介於0與100')
+    time_tuple_to_minutes(IND_FORCE_CLOSE_TIME, 'IND_FORCE_CLOSE_TIME')
+    if not IND_ENTRY_DEADLINE < IND_FORCE_CLOSE_TIME <= (13, 30):
+        raise ValueError('IND 平倉時間須晚於入場截止且不晚於13:30')
+    get_ind_market_snapshot()
+
+
+def fetch_ind_market_candles(realtime_sdk):
+    snapshot = get_ind_market_snapshot()
+    with marketdata_priority(MARKETDATA_PRIORITY_INDEX):
+        requested_at = now_tpe()
+        response = get_stock_rest_client(realtime_sdk).intraday.candles(
+            symbol=snapshot['symbol'], timeframe='1', sort='asc')
+    if not isinstance(response, dict) or response.get('symbol') != snapshot['symbol']:
+        raise ValueError('IND 大盤分K標的不符或格式錯誤')
+    return response, requested_at
+
+
+def fetch_ind_market_quote(realtime_sdk):
+    snapshot = get_ind_market_snapshot()
+    with marketdata_priority(MARKETDATA_PRIORITY_INDEX):
+        requested_at = time.monotonic()
+        response = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=snapshot['symbol'])
+    return parse_market_quote(response, snapshot['symbol'], now_tpe(), requested_at)
+
+
+def check_ind_entry_market(state, now_local=None):
+    now_local = now_local or now_tpe()
+    status = IND_RUNTIME.entry_status(get_ind_config(), get_ind_market_snapshot()['previous_close'],
+                                      now_local, time.monotonic())
+    if status == 'allowed':
+        if IND_ENABLE_MARKET_ENTRY_RECHECK:
+            state['ind_entry_market_price'] = IND_RUNTIME.quote['price']
+            state['ind_entry_market_time'] = IND_RUNTIME.quote['market_time'].isoformat()
+        return True
+    trade_log('IND_MARKET_ENTRY_' + status.upper(), symbol=state.get('symbol_code_with_suf'),
+              action='僅停止IND新入場；既有委託及持倉照常管理')
+    return False
+
+
 def get_vol_config():
     return VolConfig(signal_start=VOL_SIGNAL_START_TIME, entry_deadline=VOL_ENTRY_DEADLINE,
                      min_previous_turnover=VOL_MIN_PREVIOUS_TURNOVER,
@@ -343,10 +437,12 @@ def refresh_active_order_states(states):
         ACTIVE_ORDER_STATES.update(all_order_states(states))
 
 
-def fetch_candidate_quote(symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_CANDIDATE):
+def fetch_candidate_quote(symbol, realtime_sdk, priority=MARKETDATA_PRIORITY_CANDIDATE, *, not_before=None):
     """共用候選行情工作只取資料，並保留請求開始時間。"""
     requested_at = time.monotonic()
-    return get_realtime_price(symbol, realtime_sdk, priority=priority), requested_at
+    if not_before is None:
+        return get_realtime_price(symbol, realtime_sdk, priority=priority), requested_at
+    return get_realtime_price(symbol, realtime_sdk, priority=priority, not_before=not_before), requested_at
 
 
 class OrderOutcomeUnknown(RuntimeError):
@@ -1255,7 +1351,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_vol_strategy(state):
+        if is_avg_strategy(state) or is_vol_strategy(state) or is_ind_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
@@ -1280,16 +1376,17 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     return True
 
 
-def get_realtime_price(stock_id: str, realtime_sdk, *, priority=MARKETDATA_PRIORITY_CANDIDATE):
+def get_realtime_price(stock_id: str, realtime_sdk, *, priority=MARKETDATA_PRIORITY_CANDIDATE, not_before=None):
     # 候選與持倉使用同一報價入口與共用節流。
     round_key = int((time.time() - 5) // QUOTE_ROUND_INTERVAL_SECONDS)
     with QUOTE_CACHE_LOCK:
         cached = QUOTE_ROUND_CACHE.get(stock_id)
-        if cached is not None and cached[0] == round_key:
+        if (cached is not None and cached[0] == round_key
+                and (not_before is None or cached[2] >= not_before)):
             future, owner = cached[1], False
         else:
             future, owner = Future(), True
-            QUOTE_ROUND_CACHE[stock_id] = (round_key, future)
+            QUOTE_ROUND_CACHE[stock_id] = (round_key, future, time.monotonic())
     if owner:
         try:
             with marketdata_priority(priority):
@@ -1297,7 +1394,8 @@ def get_realtime_price(stock_id: str, realtime_sdk, *, priority=MARKETDATA_PRIOR
         except Exception as exc:
             future.set_exception(exc)
             with QUOTE_CACHE_LOCK:
-                if QUOTE_ROUND_CACHE.get(stock_id) == (round_key, future):
+                cached = QUOTE_ROUND_CACHE.get(stock_id)
+                if cached is not None and cached[1] is future:
                     QUOTE_ROUND_CACHE.pop(stock_id, None)
     return future.result()
 
@@ -1832,6 +1930,8 @@ def get_current_entry_mode() -> int:
 
 
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
+    if state and state.get('strategy_type') == STRATEGY_IND:
+        return IND_STOP_LOSS_PERCENT, IND_TAKE_PROFIT_PERCENT
     if is_vol_strategy(state):
         return VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT
     if is_avg_strategy(state):
@@ -1844,6 +1944,8 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 
 
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
+    if state and state.get('strategy_type') == STRATEGY_IND:
+        return IND_FORCE_CLOSE_TIME
     if is_vol_strategy(state):
         return VOL_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
@@ -1852,6 +1954,8 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 
 
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
+    if strategy_type == STRATEGY_IND or (state and state.get('strategy_type') == STRATEGY_IND):
+        return IND_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_VOL or is_vol_strategy(state):
         return VOL_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
@@ -1889,6 +1993,8 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 
 
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
+    if state and state.get('strategy_type') == STRATEGY_IND:
+        return IND_ENTRY_DEADLINE
     if is_vol_strategy(state):
         return VOL_ENTRY_DEADLINE
     if is_avg_strategy(state):
@@ -1898,7 +2004,9 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME)
+        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME, IND_STOCK_SCAN_START_TIME)
+    if state.get('strategy_type') == STRATEGY_IND:
+        return IND_STOCK_SCAN_START_TIME
     if is_vol_strategy(state):
         return VOL_SIGNAL_START_TIME
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
@@ -1908,7 +2016,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE]
+    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE, IND_ENTRY_DEADLINE]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
 
@@ -1918,6 +2026,7 @@ def is_strategy_enabled(strategy_type: str) -> bool:
     return {
         STRATEGY_AVG: ENABLE_AVG,
         STRATEGY_VOL: ENABLE_VOL,
+        STRATEGY_IND: ENABLE_IND,
     }.get(strategy_type, False)
 
 
@@ -1936,9 +2045,11 @@ def validate_shared_risk_config() -> None:
 def validate_strategy_switches() -> None:
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
-    for name in ('ENABLE_AVG', 'ENABLE_VOL'):
+    for name in ('ENABLE_AVG', 'ENABLE_VOL', 'ENABLE_IND'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
+    if type(PREOPEN_TICKER_ATTEMPTS) is not int or PREOPEN_TICKER_ATTEMPTS <= 0:
+        raise ValueError('PREOPEN_TICKER_ATTEMPTS 必須為正整數')
 
 
 def try_open_position(state: Dict[str, Any], mysdk):
@@ -1955,7 +2066,12 @@ def try_open_position(state: Dict[str, Any], mysdk):
         return
     if TRADE_API_DEGRADED_EVENT.is_set():
         return  # 當日停止新風險；保留已送出的委託與持倉對帳。
-    if is_vol_strategy(state):
+    if is_ind_strategy(state):
+        if (not state.get('ind_entry_time')
+                or datetime.fromisoformat(state['ind_entry_time']) > now_tpe()
+                or not finite_positive(state.get('last_price'))):
+            return
+    elif is_vol_strategy(state):
         if (not state.get('vol_entry_time')
                 or datetime.fromisoformat(state['vol_entry_time']) > now_tpe()
                 or not finite_positive(state.get('last_price'))):
@@ -2033,6 +2149,8 @@ def try_open_position(state: Dict[str, Any], mysdk):
             print(f"[{state['symbol_name']}] LONG 停損低於跌停，空間太小，不執行")
             return
 
+    if is_ind_strategy(state) and not check_ind_entry_market(state):
+        return
     if check_open_status(state):
         # 所有估計欄位先初始化；送出後不再覆寫可能已由成交回報更新的狀態。
         state.update(entry_price=entry_ref_px, entry_price_source='estimated', profit_tracking_active=False)
@@ -2580,14 +2698,14 @@ def initialize_states(
     return states
 
 
-def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata):
+def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMarketdata, *, candidate_flow=None):
     global ORDER_RESULTS_PENDING_FUTURE
     realtime_quote_start_announced = False
     entry_mode_decided = False
     last_order_results_update_monotonic = 0.0
     order_query_started_monotonic = 0.0
     order_query_stall_announced = False
-    candidate_flow = SharedCandidateFlow(globals())
+    candidate_flow = candidate_flow or SharedCandidateFlow(globals())
     while True:
         raise_if_snapshot_failed()
         stop_at_force_exit_time(states)
@@ -2603,6 +2721,7 @@ def monitor(states: Dict[str, Dict[str, Any]], mysdk: SDK, realtime_sdk: EsunMar
 
         if not candidate_flow.initialized:
             candidate_flow.initialize()
+        if not entry_mode_decided:
             AVG_RUNTIME.session_state["active"] = True
             persist_entry_mode_to_stock_data(ENTRY_MODE_AVG)
             entry_mode_decided = True
@@ -2723,10 +2842,13 @@ def main(*, runtime_mode: str | None = None):
             validate_avg_config()
         if ENABLE_VOL:
             validate_vol_config()
+        if ENABLE_IND:
+            validate_ind_config()
         wait_until_main_start_time()
         TRADE_API_DEGRADED_EVENT.clear()
         AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})
         AVG_RUNTIME.next_request_monotonic = 0.0
+        IND_RUNTIME.reset()
 
         # 登入以操作API
         config = ConfigParser()
@@ -2741,6 +2863,9 @@ def main(*, runtime_mode: str | None = None):
             raise
         MARKETDATA_STOCK_REST_CLIENT = RateLimitedStockRest(realtime_sdk.rest_client.stock)
         verify_startup_snapshot_date(realtime_sdk)
+        candidate_flow = SharedCandidateFlow(globals())
+        candidate_flow.initialize()
+        candidate_flow.prepare_tickers(realtime_sdk)
         clear_state_dir()
         persist_entry_mode_to_stock_data(ENTRY_MODE_NO_TRADE)
 
@@ -2775,7 +2900,7 @@ def main(*, runtime_mode: str | None = None):
         time.sleep(align_sleep_sec)
 
         # 開始正式作業
-        monitor(states, sdk, realtime_sdk)
+        monitor(states, sdk, realtime_sdk, candidate_flow=candidate_flow)
     finally:
         TRADE_SHUTDOWN_EVENT.set()
         try:
