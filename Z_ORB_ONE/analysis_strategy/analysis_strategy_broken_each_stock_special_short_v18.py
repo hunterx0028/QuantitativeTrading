@@ -32,7 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 SLOPE_CUTOFF_TIME = (9, 20)  # 此時間完成開盤至此前（不含）的 average 斜率檢核
 MAX_MISSING_SLOPE_BARS = 5  # 09:00（含）至截止時間（不含）允許缺少的分K數；average無效亦計入，0表示不可缺棒
-MAX_NORMALIZED_SLOPE = 0.06  # %／分鐘；昨收正規化斜率須嚴格小於此值才允許入場
+MAX_NORMALIZED_SLOPE = math.tan(math.radians(3.5))  # 約0.06 %／分鐘；以1分鐘、1百分點為尺度，正規化斜率須嚴格小於此值才允許入場
 
 # IDE 直接執行時在此調整；三階段各自獨立設定。
 STAGE_1_START_TIME = (9, 0)  # STAGE_1 起算時間，包含此分鐘
@@ -794,11 +794,16 @@ def validate_settings():
             raise ValueError('停損停利百分比必須介於 0 與 100 之間')
 
 
+def format_stock_name(stock_name):
+    """日誌顯示股票名稱與代碼，省略上市／上櫃後綴。"""
+    return re.sub(r'\.TW(?:O)?$', '', stock_name)
+
+
 def format_result_line(stock_name, date_str, signal, result):
     normalized = signal.get('early_average_slope_percent')
     normalized_text = '無法計算' if normalized is None else f'{normalized:+.6f}'
     prefix = (
-        f'{date_str} {stock_name} 斜率={normalized_text} | '
+        f'{date_str} {format_stock_name(stock_name)} 斜率={normalized_text} | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
     if result['outcome'] == 'incomplete':
@@ -864,7 +869,7 @@ def main():
         if missing:
             fetched = {}
             for i, name in enumerate(missing, 1):
-                print(f'API抓取進度：{i}/{len(missing)} {name}')
+                print(f'API抓取進度：{i}/{len(missing)} {format_stock_name(name)}')
                 fetched[name] = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
             raw = {**raw, **fetched}
         if missing:

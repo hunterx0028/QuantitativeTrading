@@ -36,7 +36,7 @@ vol_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.vol import VolConfig
-from strategies.ind import IndConfig, IndRuntime, parse_market_quote
+from strategies.ind import IndConfig, IndRuntime
 
 
 class TeeStream:
@@ -111,7 +111,7 @@ AVG_STAGE_2_AMPLITUDE_PERCENT = 1.0
 AVG_STAGE_3_AMPLITUDE_PERCENT = 1.0
 AVG_SLOPE_CUTOFF_TIME = (9, 20)
 AVG_MAX_MISSING_SLOPE_BARS = 5  # 09:00（含）至斜率截止（不含）；無效 average 亦算缺棒，0 表示不可缺棒
-AVG_MAX_NORMALIZED_SLOPE = 0.06  # 相對昨收 %／分鐘，須嚴格小於此值
+AVG_MAX_NORMALIZED_SLOPE = math.tan(math.radians(3.5))  # 約0.061163 %／分鐘；以1分鐘、1百分點為尺度，須嚴格小於此值
 AVG_ENTRY_START_TIME = (10, 0)
 AVG_ENTRY_DEADLINE = (11, 0)
 # 確認完成後保留資格至截止；首次預定入場早於開始時間則當日排除 AVG。
@@ -146,9 +146,10 @@ IND_MARKET_CHECK_TIME = (9, 15)
 IND_STOCK_SCAN_START_TIME = (9, 16)
 IND_MARKET_DROP_PERCENT = 1.5
 IND_STOCK_MAX_DROP_PERCENT = 0.5
-IND_ENABLE_MARKET_ENTRY_RECHECK = False  # 開啟後反彈只封鎖當日後續IND，不影響AVG/VOL或已送單持倉
+IND_SLOPE_CUTOFF_TIME = (9, 5)  # 09:00至此分鐘（含）的已完成close整段回歸
+IND_MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約0.839100 %／分鐘，僅超過才排除
+IND_MAX_MISSING_SLOPE_BARS = 2  # 缺棒／close無效容許數；至少2筆有效資料，無法計算不入場
 IND_MARKET_RETRY_SECONDS = 5.0
-IND_MARKET_QUOTE_MAX_AGE_SECONDS = 15.0
 IND_ENTRY_DEADLINE = (12, 0)
 IND_STOP_LOSS_PERCENT = 2.0
 IND_TAKE_PROFIT_PERCENT = 5.0
@@ -295,8 +296,9 @@ def get_ind_config():
                      entry_deadline=IND_ENTRY_DEADLINE,
                      market_drop_percent=IND_MARKET_DROP_PERCENT,
                      stock_max_drop_percent=IND_STOCK_MAX_DROP_PERCENT,
-                     enable_market_entry_recheck=IND_ENABLE_MARKET_ENTRY_RECHECK,
-                     market_quote_max_age_seconds=IND_MARKET_QUOTE_MAX_AGE_SECONDS)
+                     slope_cutoff_time=IND_SLOPE_CUTOFF_TIME,
+                     max_normalized_slope=IND_MAX_NORMALIZED_SLOPE,
+                     max_missing_slope_bars=IND_MAX_MISSING_SLOPE_BARS)
 
 
 def get_ind_market_snapshot():
@@ -333,25 +335,13 @@ def fetch_ind_market_candles(realtime_sdk):
     return response, requested_at
 
 
-def fetch_ind_market_quote(realtime_sdk):
-    snapshot = get_ind_market_snapshot()
-    with marketdata_priority(MARKETDATA_PRIORITY_INDEX):
-        requested_at = time.monotonic()
-        response = get_stock_rest_client(realtime_sdk).intraday.quote(symbol=snapshot['symbol'])
-    return parse_market_quote(response, snapshot['symbol'], now_tpe(), requested_at)
-
-
 def check_ind_entry_market(state, now_local=None):
-    now_local = now_local or now_tpe()
-    status = IND_RUNTIME.entry_status(get_ind_config(), get_ind_market_snapshot()['previous_close'],
-                                      now_local, time.monotonic())
-    if status == 'allowed':
-        if IND_ENABLE_MARKET_ENTRY_RECHECK:
-            state['ind_entry_market_price'] = IND_RUNTIME.quote['price']
-            state['ind_entry_market_time'] = IND_RUNTIME.quote['market_time'].isoformat()
+    """下單前僅確認當日初始大盤資格，不重新檢查盤中反彈。"""
+    decision = IND_RUNTIME.decision
+    if decision is not None and decision['passed']:
         return True
-    trade_log('IND_MARKET_ENTRY_' + status.upper(), symbol=state.get('symbol_code_with_suf'),
-              action='僅停止IND新入場；既有委託及持倉照常管理')
+    trade_log('IND_MARKET_ENTRY_BLOCKED', symbol=state.get('symbol_code_with_suf'),
+              action='初始大盤資格未通過，禁止IND新入場；既有委託及持倉照常管理')
     return False
 
 

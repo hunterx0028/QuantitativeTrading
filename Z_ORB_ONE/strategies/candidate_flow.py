@@ -24,9 +24,7 @@ class SharedCandidateFlow:
         self.scan_timing_lock = Lock()
         self.ind_runtime = None
         self.ind_market_future = None
-        self.ind_quote_future = None
         self.ind_market_retry_at = 0.0
-        self.ind_quote_retry_at = 0.0
 
     def record_scan_completion(self, batch, future):
         """背景完成時記錄時間；僅由主流程列印整輪摘要。"""
@@ -180,8 +178,8 @@ class SharedCandidateFlow:
         disabled = self.disabled.setdefault(symbol, set())
         disabled.update(strategy for strategy in a.STRATEGY_PRIORITY
                         if not self.strategy_enabled(strategy))
-        if (self.ind_runtime is not None and (self.ind_runtime.halted
-                or (self.ind_runtime.decision is not None and not self.ind_runtime.decision['passed']))):
+        if (self.ind_runtime is not None and self.ind_runtime.decision is not None
+                and not self.ind_runtime.decision['passed']):
             disabled.add(a.STRATEGY_IND)
         for strategy, deadline in self.strategy_deadlines():
             if (now.hour, now.minute) > deadline:
@@ -404,7 +402,7 @@ class SharedCandidateFlow:
             return
 
     def process_ind_market(self, sdk, now):
-        """指數背景查詢全股票共用；只有主監控更新凍結判定與最新報價。"""
+        """指數分K背景查詢全股票共用；只有主監控更新一次性初始判定。"""
         if self.ind_runtime is None:
             return
         a = self.api
@@ -427,26 +425,13 @@ class SharedCandidateFlow:
             except Exception as exc:
                 a.trade_log('IND_MARKET_CANDLE_ERROR', error=True, error_msg=repr(exc))
             self.ind_market_retry_at = monotonic + a.IND_MARKET_RETRY_SECONDS
-        if self.ind_quote_future is not None and self.ind_quote_future.done():
-            future, self.ind_quote_future = self.ind_quote_future, None
-            try:
-                runtime.quote = future.result()
-            except Exception as exc:
-                runtime.quote = None
-                a.trade_log('IND_MARKET_QUOTE_ERROR', error=True, error_msg=repr(exc))
-            self.ind_quote_retry_at = monotonic + a.IND_MARKET_RETRY_SECONDS
-        if (now.hour, now.minute) > config.entry_deadline or runtime.halted:
+        if (now.hour, now.minute) > config.entry_deadline:
             return
         decision_ready = now.replace(hour=config.market_check_time[0],
                                      minute=config.market_check_time[1], second=0, microsecond=0) + timedelta(minutes=1)
         if (runtime.decision is None and self.ind_market_future is None
                 and now >= decision_ready and monotonic >= self.ind_market_retry_at):
             self.ind_market_future = a.MARKET_SCAN_EXECUTOR.submit(a.fetch_ind_market_candles, sdk)
-        if (config.enable_market_entry_recheck and runtime.decision is not None
-                and runtime.decision['passed'] and self.ind_quote_future is None
-                and monotonic >= self.ind_quote_retry_at
-                and any(a.STRATEGY_IND in states for states in self.candidates.values())):
-            self.ind_quote_future = a.MARKET_SCAN_EXECUTOR.submit(a.fetch_ind_market_quote, sdk)
 
     def process(self, states, sdk, trade_sdk):
         a = self.api

@@ -24,7 +24,6 @@ import math
 import re
 import sys
 import time
-from bisect import bisect_right
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -44,7 +43,9 @@ MARKET_CHECK_TIME = (9, 15)  # 當日只判斷一次，缺棒向後遞補
 STOCK_SCAN_START_TIME = (9, 16)  # 兩根有效比較棒均須不早於此時間
 MARKET_DROP_PERCENT = 1.5  # 大盤報酬率 <= -此值
 STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲股
-ENABLE_MARKET_ENTRY_RECHECK = False  # 入場時大盤反彈超過跌幅門檻，當日停止後續入場
+SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
+MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 1.732051 %／分鐘；僅超過才排除
+MAX_MISSING_SLOPE_BARS = 2  # 區間內缺棒／close無效容許數；不補值，至少須有2筆有效資料
 
 # ======================================================================
 # 共用參數；IDE 直接執行時在此調整。時間標籤視為該分鐘起點。
@@ -98,9 +99,41 @@ def first_bar_at_or_after(bars, clock, require_average=False):
     return None
 
 
+def calculate_early_close_slope(today_bars, previous_close):
+    """close 對實際分鐘線性回歸，除以昨收轉為 %／分鐘；截止分鐘包含在內。"""
+    previous_close = parse_positive_number(previous_close)
+    if previous_close is None:
+        return None
+    samples = []
+    seen_minutes = set()
+    expected_count = SLOPE_CUTOFF_TIME[0] * 60 + SLOPE_CUTOFF_TIME[1] - 9 * 60 + 1
+    for bar in today_bars:
+        dt = bar['dt']
+        if not (9, 0) <= (dt.hour, dt.minute) <= SLOPE_CUTOFF_TIME:
+            continue
+        minute = dt.hour * 60 + dt.minute
+        if dt.second or dt.microsecond or minute in seen_minutes:
+            return None
+        seen_minutes.add(minute)
+        close = parse_positive_number(bar.get('close'))
+        if close is not None:
+            samples.append((minute, close))
+    if len(samples) < 2 or expected_count - len(samples) > MAX_MISSING_SLOPE_BARS:
+        return None
+    x = np.array([minute for minute, _ in samples], dtype=float)
+    y = np.array([close for _, close in samples], dtype=float)
+    centered_x = x - x.mean()
+    slope = float(np.dot(centered_x, y - y.mean()) / np.dot(centered_x, centered_x))
+    normalized = slope / previous_close * 100
+    return normalized if math.isfinite(normalized) else None
+
+
 def find_signal(session_bars, day_info):
     market = day_info['context'].get(day_info['date_key'])
     if market is None:
+        return None
+    early_slope = calculate_early_close_slope(session_bars, day_info['previous_close'])
+    if early_slope is None or early_slope > MAX_NORMALIZED_SLOPE:
         return None
     # 股票篩選只做一次；average 無效或缺棒，向後取第一根有效棒。
     selection = first_bar_at_or_after(
@@ -131,13 +164,14 @@ def find_signal(session_bars, day_info):
                 'market_dt': market['dt'], 'market_change': market['change'],
                 'selection_dt': selection['dt'], 'stock_change': float(change),
                 'previous_dt': previous_bar['dt'], 'signal_average': average,
+                'early_close_slope_percent': early_slope,
             }
         previous_bar = bar
     return None
 
 
 def build_market_context(bars_by_stock, target_date):
-    """建立初始資格與入場重查資料；重查時僅取入場當下已知價格。"""
+    """依指定時間的大盤跌幅建立當日初始資格。"""
     context = {}
     previous_close = None
     for day, bars in sorted(bars_by_stock.get(MARKET_CACHE_KEY, {}).items()):
@@ -150,56 +184,16 @@ def build_market_context(bars_by_stock, target_date):
             if change <= -Decimal(str(MARKET_DROP_PERCENT)):
                 context[day] = {
                     'dt': check['dt'], 'change': float(change),
-                    'previous_close': previous_close, 'session_bars': session,
-                    'bar_times': [bar['dt'] for bar in session],
-                }
+                                    }
         if bars:
             previous_close = bars[-1]['close']
     return context
 
 
-def filter_entries_by_market(results, context):
-    """依實際入場時序檢查；反彈當筆起封鎖當日，先前持倉結果保留。
-
-    僅在符合其他入場限制的交易入場時重查，不以兩次入場間的行情觸發。
-    同分鐘只用 open，缺棒用先前有效棒 close，不使用入場棒 high/low/close。
-    """
-    ordered = sorted(results, key=lambda pair: (pair[0]['entry_dt'], pair[0]['name']))
-    if not ENABLE_MARKET_ENTRY_RECHECK:
-        return ordered
-    stopped_dates = set()
-    accepted = []
-    for signal, result in ordered:
-        day = signal['date_str']
-        if day in stopped_dates:
-            continue
-        market = context.get(day)
-        if market is None:
-            continue
-        entry_dt = signal['entry_dt']
-        index = bisect_right(market['bar_times'], entry_dt) - 1
-        if index < 0:
-            continue  # 無當下或更早資料，不用未來棒回填入場資格。
-        bar = market['session_bars'][index]
-        price_field = 'open' if bar['dt'] == entry_dt else 'close'
-        change = (Decimal(str(bar[price_field]))
-                  / Decimal(str(market['previous_close'])) - 1) * 100
-        if change > -Decimal(str(MARKET_DROP_PERCENT)):
-            stopped_dates.add(day)
-            continue
-        signal['strategy_fields'].update({
-            'entry_market_change': float(change),
-            'entry_market_dt': bar['dt'], 'entry_market_price_field': price_field,
-        })
-        accepted.append((signal, result))
-    return accepted
-
-
 def validate_strategy_settings():
-    if type(ENABLE_MARKET_ENTRY_RECHECK) is not bool:
-        raise ValueError('ENABLE_MARKET_ENTRY_RECHECK 必須為布林值')
     for name, clock in (('MARKET_CHECK_TIME', MARKET_CHECK_TIME),
-                        ('STOCK_SCAN_START_TIME', STOCK_SCAN_START_TIME)):
+                        ('STOCK_SCAN_START_TIME', STOCK_SCAN_START_TIME),
+                        ('SLOPE_CUTOFF_TIME', SLOPE_CUTOFF_TIME)):
         if (not isinstance(clock, tuple) or len(clock) != 2
                 or any(type(part) is not int for part in clock)
                 or not 9 * 60 <= clock[0] * 60 + clock[1] < 12 * 60 + 50
@@ -210,10 +204,19 @@ def validate_strategy_settings():
             raise ValueError('跌幅門檻必須介於 0 與 100 之間')
     if not MARKET_CACHE_KEY:
         raise ValueError('MARKET_CACHE_KEY 不得為空')
+    if SLOPE_CUTOFF_TIME <= (9, 0) or SIGNAL_START_TIME <= SLOPE_CUTOFF_TIME:
+        raise ValueError('斜率截止時間須晚於09:00，訊號起點須晚於斜率截止分鐘，避免使用未完成分K')
+    if not math.isfinite(MAX_NORMALIZED_SLOPE) or MAX_NORMALIZED_SLOPE < 0:
+        raise ValueError('MAX_NORMALIZED_SLOPE 必須為有限非負數（%／分鐘）')
+    if type(MAX_MISSING_SLOPE_BARS) is not int or MAX_MISSING_SLOPE_BARS < 0:
+        raise ValueError('MAX_MISSING_SLOPE_BARS 必須為非負整數')
 
 
 def strategy_header_lines():
     return [
+        f'早盤close斜率：09:00～{SLOPE_CUTOFF_TIME[0]:02d}:{SLOPE_CUTOFF_TIME[1]:02d}（含）'
+        f'依實際分鐘回歸／昨收×100，>{MAX_NORMALIZED_SLOPE:.6f}%/分鐘則當日不入場；'
+        f'最多缺{MAX_MISSING_SLOPE_BARS}根（含close無效），至少2筆有效資料，無法計算則不入場。',
         f'策略：v40 {MARKET_CACHE_KEY} 於 {MARKET_CHECK_TIME[0]:02d}:{MARKET_CHECK_TIME[1]:02d}'
         f'起第一根有效棒相對昨收跌幅 >= {MARKET_DROP_PERCENT:g}% 時，當日啟用一次。',
         f'個股於大盤判定時起第一根 average 有效棒跌幅 < {STOCK_MAX_DROP_PERCENT:g}% 才入選；'
@@ -221,24 +224,15 @@ def strategy_header_lines():
         f'均價比較自 {STOCK_SCAN_START_TIME[0]:02d}:{STOCK_SCAN_START_TIME[1]:02d} 起累積；'
         '前一有效棒 close >= average、本棒 close < average 才觸發；缺棒或均價無效向後遞補。',
         '大盤及個股資格確認前不入場；保留 MIN_MINUTE_BARS_BEFORE_0930 必要篩選。',
-        ('入場大盤重查啟用：每次實際入場時，大盤報酬率須 <= '
-         f'-{MARKET_DROP_PERCENT:g}%；高於門檻則取消當筆及當日所有後續入場，跌回亦不恢復。'
-         '當分鐘採open，缺棒採之前最近有效棒close；既有持倉照原規則計算。'
-         if ENABLE_MARKET_ENTRY_RECHECK else '入場大盤重查關閉。'),
     ]
 
 
 def format_strategy_text(signal):
     fields = signal['strategy_fields']
-    entry_market_text = ''
-    if 'entry_market_change' in fields:
-        entry_market_text = (
-            f' 入場大盤={fields["entry_market_change"]:+.3f}%'
-            f'({fields["entry_market_dt"]:%H:%M} {fields["entry_market_price_field"]})')
     return (f'大盤={fields["market_change"]:+.3f}%({fields["market_dt"]:%H:%M}) '
             f'個股={fields["stock_change"]:+.3f}%({fields["selection_dt"]:%H:%M}) '
-            f'比較棒={fields["previous_dt"]:%H:%M} 均價={fields["signal_average"]:.4f}'
-            + entry_market_text)
+            f'比較棒={fields["previous_dt"]:%H:%M} 均價={fields["signal_average"]:.4f} '
+            f'早盤close斜率={fields["early_close_slope_percent"]:+.6f}%/分鐘')
 
 
 def load_market_bars(payload):
@@ -610,7 +604,7 @@ def build_outcome_result(
 
 # ---------------------------------------------------------------- 進場與出場
 def resolve_entry(session_bars, signal_index):
-    """訊號棒的下一根有效分K open 入場；不符時間限制回傳 None（當日不交易）。"""
+    """訊號棒的下一根有效分K open 入場；不得晚於入場截止。"""
     if isinstance(signal_index, bool) or not isinstance(signal_index, (int, np.integer)):
         raise ValueError(f'find_signal 回傳的訊號棒索引必須為整數：{signal_index!r}')
     signal_index = int(signal_index)
@@ -619,9 +613,9 @@ def resolve_entry(session_bars, signal_index):
     if signal_index + 1 >= len(session_bars):
         return None  # 訊號棒之後已無分K
     signal_bar = session_bars[signal_index]
-    entry_bar = session_bars[signal_index + 1]
     if (signal_bar['dt'].hour, signal_bar['dt'].minute) < SIGNAL_START_TIME:
         return None
+    entry_bar = session_bars[signal_index + 1]
     if (entry_bar['dt'].hour, entry_bar['dt'].minute) > ENTRY_DEADLINE:
         return None
     return entry_bar, float(entry_bar['open'])
@@ -1047,7 +1041,7 @@ def main():
             collect_trade_candidates(name, bars, target_date, context)))
     if HISTORICAL_CACHE_DATE:
         lines.insert(0, f'歷史 cache 模式：{target_date}，使用 cache 全部股票，可檢驗股票－日期數={testable_count:,}')
-    results = filter_entries_by_market(results, context)
+    results.sort(key=lambda pair: (pair[0]['entry_dt'], pair[0]['name']))
     for signal, result in results:
         lines.append(format_result_line(signal['name'], signal['date_str'], signal, result))
     for day in sorted({signal['date_str'] for signal, _ in results}):
