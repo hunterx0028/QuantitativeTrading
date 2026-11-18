@@ -42,6 +42,9 @@ MARKET_CACHE_KEY = 'TWSE:MARKET'  # IX001 在共用 cache 中的名稱
 MARKET_CHECK_TIME = (9, 15)  # 當日只判斷一次，缺棒向後遞補
 STOCK_SCAN_START_TIME = (9, 16)  # 兩根有效比較棒均須不早於此時間
 MARKET_DROP_PERCENT = 1.5  # 大盤報酬率 <= -此值
+MARKET_SLOPE_START_TIME = (9, 10)  # 大盤斜率起算分鐘（含），須早於MARKET_CHECK_TIME
+MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(-5))  # 必須為負；大盤close正規化斜率須嚴格小於此值（%／分鐘）
+MARKET_MAX_MISSING_SLOPE_BARS = 2  # MARKET_SLOPE_START_TIME～MARKET_CHECK_TIME（含）缺棒／close無效容許數
 STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲股
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
 MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 1.732051 %／分鐘；僅超過才排除
@@ -99,17 +102,19 @@ def first_bar_at_or_after(bars, clock, require_average=False):
     return None
 
 
-def calculate_early_close_slope(today_bars, previous_close):
+def calculate_early_close_slope(today_bars, previous_close, *, start_time=(9, 0), cutoff_time=None, max_missing=None):
     """close 對實際分鐘線性回歸，除以昨收轉為 %／分鐘；截止分鐘包含在內。"""
     previous_close = parse_positive_number(previous_close)
     if previous_close is None:
         return None
+    cutoff_time = SLOPE_CUTOFF_TIME if cutoff_time is None else cutoff_time
+    max_missing = MAX_MISSING_SLOPE_BARS if max_missing is None else max_missing
     samples = []
     seen_minutes = set()
-    expected_count = SLOPE_CUTOFF_TIME[0] * 60 + SLOPE_CUTOFF_TIME[1] - 9 * 60 + 1
+    expected_count = cutoff_time[0] * 60 + cutoff_time[1] - (start_time[0] * 60 + start_time[1]) + 1
     for bar in today_bars:
         dt = bar['dt']
-        if not (9, 0) <= (dt.hour, dt.minute) <= SLOPE_CUTOFF_TIME:
+        if not start_time <= (dt.hour, dt.minute) <= cutoff_time:
             continue
         minute = dt.hour * 60 + dt.minute
         if dt.second or dt.microsecond or minute in seen_minutes:
@@ -118,7 +123,7 @@ def calculate_early_close_slope(today_bars, previous_close):
         close = parse_positive_number(bar.get('close'))
         if close is not None:
             samples.append((minute, close))
-    if len(samples) < 2 or expected_count - len(samples) > MAX_MISSING_SLOPE_BARS:
+    if len(samples) < 2 or expected_count - len(samples) > max_missing:
         return None
     x = np.array([minute for minute, _ in samples], dtype=float)
     y = np.array([close for _, close in samples], dtype=float)
@@ -181,10 +186,17 @@ def build_market_context(bars_by_stock, target_date):
         check = first_bar_at_or_after(session, MARKET_CHECK_TIME)
         if previous_close is not None and check is not None:
             change = (Decimal(str(check['close'])) / Decimal(str(previous_close)) - 1) * 100
-            if change <= -Decimal(str(MARKET_DROP_PERCENT)):
+            market_slope = calculate_early_close_slope(
+                session, previous_close, start_time=MARKET_SLOPE_START_TIME,
+                cutoff_time=MARKET_CHECK_TIME,
+                max_missing=MARKET_MAX_MISSING_SLOPE_BARS)
+            if (change <= -Decimal(str(MARKET_DROP_PERCENT))
+                    and market_slope is not None
+                    and market_slope < MARKET_MAX_NORMALIZED_SLOPE):
                 context[day] = {
                     'dt': check['dt'], 'change': float(change),
-                                    }
+                    'normalized_close_slope': market_slope,
+                }
         if bars:
             previous_close = bars[-1]['close']
     return context
@@ -192,6 +204,7 @@ def build_market_context(bars_by_stock, target_date):
 
 def validate_strategy_settings():
     for name, clock in (('MARKET_CHECK_TIME', MARKET_CHECK_TIME),
+                        ('MARKET_SLOPE_START_TIME', MARKET_SLOPE_START_TIME),
                         ('STOCK_SCAN_START_TIME', STOCK_SCAN_START_TIME),
                         ('SLOPE_CUTOFF_TIME', SLOPE_CUTOFF_TIME)):
         if (not isinstance(clock, tuple) or len(clock) != 2
@@ -202,6 +215,14 @@ def validate_strategy_settings():
     for value in (MARKET_DROP_PERCENT, STOCK_MAX_DROP_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('跌幅門檻必須介於 0 與 100 之間')
+    if (not math.isfinite(MARKET_MAX_NORMALIZED_SLOPE)
+            or MARKET_MAX_NORMALIZED_SLOPE >= 0):
+        raise ValueError('MARKET_MAX_NORMALIZED_SLOPE 必須為有限負數（%／分鐘）')
+    if (type(MARKET_MAX_MISSING_SLOPE_BARS) is not int
+            or MARKET_MAX_MISSING_SLOPE_BARS < 0):
+        raise ValueError('MARKET_MAX_MISSING_SLOPE_BARS 必須為非負整數')
+    if MARKET_SLOPE_START_TIME >= MARKET_CHECK_TIME:
+        raise ValueError('MARKET_SLOPE_START_TIME 必須早於 MARKET_CHECK_TIME')
     if not MARKET_CACHE_KEY:
         raise ValueError('MARKET_CACHE_KEY 不得為空')
     if SLOPE_CUTOFF_TIME <= (9, 0) or SIGNAL_START_TIME <= SLOPE_CUTOFF_TIME:
@@ -218,7 +239,8 @@ def strategy_header_lines():
         f'依實際分鐘回歸／昨收×100，>{MAX_NORMALIZED_SLOPE:.6f}%/分鐘則當日不入場；'
         f'最多缺{MAX_MISSING_SLOPE_BARS}根（含close無效），至少2筆有效資料，無法計算則不入場。',
         f'策略：v40 {MARKET_CACHE_KEY} 於 {MARKET_CHECK_TIME[0]:02d}:{MARKET_CHECK_TIME[1]:02d}'
-        f'起第一根有效棒相對昨收跌幅 >= {MARKET_DROP_PERCENT:g}% 時，當日啟用一次。',
+        f'起第一根有效棒相對昨收跌幅 >= {MARKET_DROP_PERCENT:g}% 時，且{MARKET_SLOPE_START_TIME[0]:02d}:{MARKET_SLOPE_START_TIME[1]:02d}至檢查時間（含）close回歸／昨收×100 '
+        f'< {MARKET_MAX_NORMALIZED_SLOPE:.6f}%/分鐘才啟用；最多缺{MARKET_MAX_MISSING_SLOPE_BARS}根，至少2筆有效資料。',
         f'個股於大盤判定時起第一根 average 有效棒跌幅 < {STOCK_MAX_DROP_PERCENT:g}% 才入選；'
         '包含上漲股，名單固定，排除篩選時已觸漲跌停者。',
         f'均價比較自 {STOCK_SCAN_START_TIME[0]:02d}:{STOCK_SCAN_START_TIME[1]:02d} 起累積；'

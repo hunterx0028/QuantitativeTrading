@@ -38,6 +38,9 @@ class IndConfig:
     stock_scan_start_time: tuple = (9, 16)
     entry_deadline: tuple = (12, 0)
     market_drop_percent: float = 1.5
+    market_slope_start_time: tuple = (9, 10)
+    market_max_normalized_slope: float = math.tan(math.radians(-5))
+    market_max_missing_slope_bars: int = 2
     stock_max_drop_percent: float = 0.5
     slope_cutoff_time: tuple = (9, 5)
     max_normalized_slope: float = math.tan(math.radians(40))
@@ -45,7 +48,7 @@ class IndConfig:
 
     def validate(self):
         for clock in (self.market_check_time, self.stock_scan_start_time, self.entry_deadline,
-                      self.slope_cutoff_time):
+                      self.slope_cutoff_time, self.market_slope_start_time):
             if (not isinstance(clock, tuple) or len(clock) != 2
                     or any(type(part) is not int for part in clock)
                     or not 0 <= clock[0] < 24 or not 0 <= clock[1] < 60):
@@ -53,6 +56,15 @@ class IndConfig:
         if not ((9, 0) <= self.market_check_time <= self.entry_deadline
                 and (9, 0) <= self.stock_scan_start_time <= self.entry_deadline):
             raise ValueError('IND 大盤檢查及個股起算須在09:00至入場截止之間')
+        if not (9, 0) <= self.market_slope_start_time < self.market_check_time:
+            raise ValueError('IND 大盤斜率起算須在09:00至大盤檢查時間之前')
+        if (type(self.market_max_normalized_slope) not in (int, float)
+                or not math.isfinite(self.market_max_normalized_slope)
+                or self.market_max_normalized_slope >= 0):
+            raise ValueError('IND 大盤斜率門檻須為有限負數（%／分鐘）')
+        if (type(self.market_max_missing_slope_bars) is not int
+                or self.market_max_missing_slope_bars < 0):
+            raise ValueError('IND 大盤斜率缺棒容許數須為非負整數')
         for value in (self.market_drop_percent, self.stock_max_drop_percent):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 100:
                 raise ValueError('IND 跌幅門檻必須介於0與100')
@@ -64,17 +76,19 @@ class IndConfig:
         if type(self.max_missing_slope_bars) is not int or self.max_missing_slope_bars < 0:
             raise ValueError('IND 斜率缺棒容許數須為非負整數')
 
-    def calculate_early_close_slope(self, session, previous_close):
+    def calculate_early_close_slope(self, session, previous_close, *, start_time=(9, 0), cutoff_time=None, max_missing=None):
         """與v40相同：close對實際分鐘回歸／昨收×100，不補缺棒。"""
         previous_close = positive(previous_close)
         if previous_close is None:
             return None
+        cutoff_time = self.slope_cutoff_time if cutoff_time is None else cutoff_time
+        max_missing = self.max_missing_slope_bars if max_missing is None else max_missing
         samples = []
         seen = set()
-        expected = self.slope_cutoff_time[0] * 60 + self.slope_cutoff_time[1] - 9 * 60 + 1
+        expected = cutoff_time[0] * 60 + cutoff_time[1] - (start_time[0] * 60 + start_time[1]) + 1
         for bar in session:
             dt = bar['dt']
-            if not (9, 0) <= (dt.hour, dt.minute) <= self.slope_cutoff_time:
+            if not start_time <= (dt.hour, dt.minute) <= cutoff_time:
                 continue
             minute = dt.hour * 60 + dt.minute
             if dt.second or dt.microsecond or minute in seen:
@@ -83,7 +97,7 @@ class IndConfig:
             close = positive(bar.get('close'))
             if close is not None:
                 samples.append((minute, close))
-        if len(samples) < 2 or expected - len(samples) > self.max_missing_slope_bars:
+        if len(samples) < 2 or expected - len(samples) > max_missing:
             return None
         mean_x = math.fsum(x for x, _ in samples) / len(samples)
         mean_y = math.fsum(y for _, y in samples) / len(samples)
@@ -95,11 +109,16 @@ class IndConfig:
     def market_decision(self, bars, previous_close, now):
         if positive(previous_close) is None:
             raise ValueError('IND 大盤昨收缺失或無效')
-        for bar in completed_session(bars, now):
+        session = completed_session(bars, now)
+        for bar in session:
             if (bar['dt'].hour, bar['dt'].minute) >= self.market_check_time:
                 change = change_percent(bar['close'], previous_close)
-                return dict(dt=bar['dt'], change=float(change),
-                            passed=change <= -Decimal(str(self.market_drop_percent)))
+                slope = self.calculate_early_close_slope(
+                    session, previous_close, start_time=self.market_slope_start_time,
+                    cutoff_time=self.market_check_time, max_missing=self.market_max_missing_slope_bars)
+                return dict(dt=bar['dt'], change=float(change), normalized_close_slope=slope,
+                            passed=(change <= -Decimal(str(self.market_drop_percent))
+                                    and slope is not None and slope < self.market_max_normalized_slope))
         return None
 
     def find_candidate(self, bars, previous_close, market, now, limit_up, limit_down):
