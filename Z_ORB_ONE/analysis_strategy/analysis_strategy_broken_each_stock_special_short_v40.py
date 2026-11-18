@@ -43,7 +43,7 @@ MARKET_CHECK_TIME = (9, 15)  # 當日只判斷一次，缺棒向後遞補
 STOCK_SCAN_START_TIME = (9, 16)  # 兩根有效比較棒均須不早於此時間
 MARKET_DROP_PERCENT = 1.5  # 大盤報酬率 <= -此值
 MARKET_SLOPE_START_TIME = (9, 10)  # 大盤斜率起算分鐘（含），須早於MARKET_CHECK_TIME
-MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(-5))  # 必須為負；大盤close正規化斜率須嚴格小於此值（%／分鐘）
+MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(5))  # 可為正、零或負；大盤close正規化斜率須嚴格小於此值（%／分鐘）
 MARKET_MAX_MISSING_SLOPE_BARS = 2  # MARKET_SLOPE_START_TIME～MARKET_CHECK_TIME（含）缺棒／close無效容許數
 STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲股
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
@@ -215,9 +215,8 @@ def validate_strategy_settings():
     for value in (MARKET_DROP_PERCENT, STOCK_MAX_DROP_PERCENT):
         if not math.isfinite(value) or not 0 < value < 100:
             raise ValueError('跌幅門檻必須介於 0 與 100 之間')
-    if (not math.isfinite(MARKET_MAX_NORMALIZED_SLOPE)
-            or MARKET_MAX_NORMALIZED_SLOPE >= 0):
-        raise ValueError('MARKET_MAX_NORMALIZED_SLOPE 必須為有限負數（%／分鐘）')
+    if not math.isfinite(MARKET_MAX_NORMALIZED_SLOPE):
+        raise ValueError('MARKET_MAX_NORMALIZED_SLOPE 必須為有限數值（%／分鐘），可為正、零或負')
     if (type(MARKET_MAX_MISSING_SLOPE_BARS) is not int
             or MARKET_MAX_MISSING_SLOPE_BARS < 0):
         raise ValueError('MARKET_MAX_MISSING_SLOPE_BARS 必須為非負整數')

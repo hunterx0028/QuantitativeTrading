@@ -59,9 +59,8 @@ class IndConfig:
         if not (9, 0) <= self.market_slope_start_time < self.market_check_time:
             raise ValueError('IND 大盤斜率起算須在09:00至大盤檢查時間之前')
         if (type(self.market_max_normalized_slope) not in (int, float)
-                or not math.isfinite(self.market_max_normalized_slope)
-                or self.market_max_normalized_slope >= 0):
-            raise ValueError('IND 大盤斜率門檻須為有限負數（%／分鐘）')
+                or not math.isfinite(self.market_max_normalized_slope)):
+            raise ValueError('IND 大盤斜率門檻須為有限數值（%／分鐘），可為正、零或負')
         if (type(self.market_max_missing_slope_bars) is not int
                 or self.market_max_missing_slope_bars < 0):
             raise ValueError('IND 大盤斜率缺棒容許數須為非負整數')
