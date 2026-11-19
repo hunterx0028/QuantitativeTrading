@@ -38,7 +38,8 @@ if str(PROJECT_ROOT) not in sys.path:
 # 【策略參數】新策略的參數加在這裡
 # ======================================================================
 STRATEGY_LOWER = 'MARKET_WEAK_RELATIVE_STRONG_V40'
-MARKET_CACHE_KEY = 'TWSE:MARKET'  # IX001 在共用 cache 中的名稱
+MARKET_CACHE_KEY = 'TWSE:MARKET'  # IX0001 在共用 cache 中的名稱
+MARKET_SYMBOL = 'IX0001'
 MARKET_CHECK_TIME = (9, 15)  # 當日只判斷一次，缺棒向後遞補
 STOCK_SCAN_START_TIME = (9, 16)  # 兩根有效比較棒均須不早於此時間
 MARKET_DROP_PERCENT = 1.5  # 大盤報酬率 <= -此值
@@ -995,8 +996,8 @@ def main():
         except (ValueError, OSError):
             if HISTORICAL_CACHE_DATE:
                 raise
-    market_bars = load_market_bars(payload)  # 缺指數即明確報錯，避免默默輸出零筆或先抓股票
     if HISTORICAL_CACHE_DATE:
+        market_bars = load_market_bars(payload)  # 歷史模式不回退 API。
         if not isinstance(payload, dict) or not payload.get('stock_names'):
             raise ValueError(f'歷史 cache 缺失或無股票清單：{cache_path}')
         stock_names = [name for name in dict.fromkeys(payload['stock_names']) if name != MARKET_CACHE_KEY]
@@ -1025,6 +1026,21 @@ def main():
             if rest_stock is None:
                 _, rest_stock = init_sdk(args.config)
             return rest_stock
+
+        # 當日模式先補齊大盤，再抓股票；歷史模式仍嚴格只讀 cache。
+        indices = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        market_raw = indices.get(MARKET_CACHE_KEY) if isinstance(indices, dict) else None
+        if not isinstance(market_raw, list) or not market_raw:
+            print(f'API抓取大盤分K：{MARKET_CACHE_KEY} ({MARKET_SYMBOL})')
+            market_raw = fetch_minute_candles(get_rest_stock(), MARKET_SYMBOL, target_date)
+            updated = dict(payload) if isinstance(payload, dict) else {}
+            updated['index_minute_raw_by_key'] = {
+                **(indices if isinstance(indices, dict) else {}), MARKET_CACHE_KEY: market_raw}
+            market_bars = load_market_bars(updated)  # 無有效資料即停止，不寫入失敗結果。
+            payload = updated
+            save_shared_api_cache(cache_path, payload, raw)
+        else:
+            market_bars = load_market_bars(payload)
 
         # cache 內沒有分K（含既有的空清單）者視為未抓過，每次執行都重抓。
         missing = [name for name in stock_names
