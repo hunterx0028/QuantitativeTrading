@@ -42,10 +42,10 @@ MARKET_CACHE_KEY = 'TWSE:MARKET'  # IX0001 在共用 cache 中的名稱
 MARKET_SYMBOL = 'IX0001'
 MARKET_CHECK_TIME = (9, 15)  # 當日只判斷一次，缺棒向後遞補
 STOCK_SCAN_START_TIME = (9, 16)  # 兩根有效比較棒均須不早於此時間
-MARKET_DROP_PERCENT = 1.5  # 大盤報酬率 <= -此值
-MARKET_SLOPE_START_TIME = (9, 10)  # 大盤斜率起算分鐘（含），須早於MARKET_CHECK_TIME
-MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(5))  # 可為正、零或負；大盤close正規化斜率須嚴格小於此值（%／分鐘）
-MARKET_MAX_MISSING_SLOPE_BARS = 2  # MARKET_SLOPE_START_TIME～MARKET_CHECK_TIME（含）缺棒／close無效容許數
+MARKET_DROP_PERCENT = 1.2  # 大盤報酬率 <= -此值
+MARKET_SLOPE_START_TIME = (9, 5)  # 大盤斜率起算分鐘（含），須早於MARKET_CHECK_TIME
+MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(-5))  # 可為正、零或負；大盤close正規化斜率須嚴格小於此值（%／分鐘）
+MARKET_MAX_MISSING_SLOPE_BARS = 3  # MARKET_SLOPE_START_TIME～MARKET_CHECK_TIME（含）缺棒／close無效容許數
 STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲股
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
 MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 1.732051 %／分鐘；僅超過才排除
