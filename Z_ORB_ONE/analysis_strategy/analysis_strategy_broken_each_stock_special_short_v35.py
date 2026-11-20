@@ -68,6 +68,8 @@ STOP_SLIPPAGE_TICKS = 0  # 停損（含跳空停損）出場價向上加計的ti
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
+MARKET_CACHE_KEY = 'TWSE:MARKET'  # 與v40共用指數容器，不列入股票清單
+MARKET_SYMBOL = 'IX0001'
 # 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
 # 非空：只使用指定 cache 內全部股票與分 K，不讀 stock_data.py、不回退 API。
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
@@ -542,6 +544,8 @@ def evaluate_candidates(
             'average_break_price': candidate['average_break_price'],
             'day_open': candidate['day_open'],
             'day_high': candidate['day_high'],
+            'day_high_dt': candidate['day_high_dt'],
+            'high_to_signal_minutes': candidate['high_to_signal_minutes'],
             'trigger_price': candidate['trigger_price'],
             'volume_ratio': candidate['volume_ratio'],
             'effective_stop_loss': effective_stop_loss,
@@ -633,6 +637,7 @@ def find_entry(today_bars, previous_close, average_daily_volume):
     limit_up = Decimal(str(limit_up_price))
     limit_down = Decimal(str(limit_down_price))
     day_high = None
+    day_high_dt = None
     cumulative_volume = 0.0
     previous_above = False  # 前一根有效分K close 是否嚴格高於當時轉弱價
     signal = None
@@ -670,7 +675,9 @@ def find_entry(today_bars, previous_close, average_daily_volume):
         high = Decimal(str(bar['high']))
         if high >= limit_up or Decimal(str(bar['low'])) <= limit_down:
             return None
-        day_high = high if day_high is None else max(day_high, high)
+        if day_high is None or high > day_high:
+            day_high = high
+            day_high_dt = bar['dt']  # 同價再觸及不更新；採首次到達此最高價的分K時間。
         cumulative_volume += bar['volume']
         trigger_price = day_high * pullback_factor
         close = Decimal(str(bar['close']))
@@ -692,6 +699,8 @@ def find_entry(today_bars, previous_close, average_daily_volume):
             'previous_close': previous_close,
             'day_open': float(day_open),
             'day_high': float(day_high),
+            'day_high_dt': day_high_dt,
+            'high_to_signal_minutes': int((bar['dt'] - day_high_dt).total_seconds() // 60),
             'trigger_price': float(trigger_price),
             'volume_ratio': volume_ratio,
         }
@@ -839,6 +848,8 @@ def format_result_line(stock_name, date_str, signal, result):
     display_name = re.sub(r'\.TW(?:O)?$', '', stock_name)
     prefix = (
         f'{date_str} {display_name} 量比={signal["volume_ratio"]:.2f} | '
+        f'高點至轉弱={signal["high_to_signal_minutes"]}分鐘 '
+        f'({signal["day_high_dt"]:%H:%M}→{signal["signal_dt"]:%H:%M}) | '
         f'{signal["entry_dt"]:%H:%M} {signal["entry_price"]:.2f} -> '
     )
     if result['outcome'] == 'incomplete':
@@ -900,15 +911,37 @@ def main():
                 _, rest_stock = init_sdk(args.config)
             return rest_stock
 
-        missing = [name for name in stock_names if not isinstance(raw.get(name), list)]
+        # 非歷史模式補齊大盤分K；既有非空資料沿用，不影響策略選股。
+        indices = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        market_raw = indices.get(MARKET_CACHE_KEY) if isinstance(indices, dict) else None
+        if not isinstance(market_raw, list) or not market_raw:
+            print(f'API抓取大盤分K：{MARKET_CACHE_KEY} ({MARKET_SYMBOL})')
+            market_raw = fetch_minute_candles(get_rest_stock(), MARKET_SYMBOL, target_date)
+            if not market_raw or not parse_bars(market_raw):
+                raise ValueError(f'{MARKET_CACHE_KEY} 無有效指數分K，不寫入失敗結果')
+            updated = dict(payload) if isinstance(payload, dict) else {}
+            updated['index_minute_raw_by_key'] = {
+                **(indices if isinstance(indices, dict) else {}), MARKET_CACHE_KEY: market_raw}
+            payload = updated
+            save_shared_api_cache(cache_path, payload, raw)
+
+        missing = [name for name in stock_names
+                   if not isinstance(raw.get(name), list) or not raw[name]]
         if missing:
             fetched = {}
             for i, name in enumerate(missing, 1):
                 print(f'API抓取進度：{i}/{len(missing)} {name}')
-                fetched[name] = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
-            raw = {**raw, **fetched}
-        if missing:
-            save_shared_api_cache(cache_path, payload, raw)
+                data = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
+                if data:  # 失敗或無資料不寫入cache，下次執行再抓。
+                    fetched[name] = data
+            if fetched:
+                raw = {**raw, **fetched}
+                save_shared_api_cache(cache_path, payload, raw)
+            skipped = [name for name in missing if name not in fetched]
+            if skipped:
+                print(f'[WARN] {len(skipped)} 檔抓取失敗或無資料，本次略過且未寫入 cache：'
+                      f'{"、".join(skipped)}', file=sys.stderr)
+        stock_names = [name for name in stock_names if isinstance(raw.get(name), list) and raw[name]]
 
     lines = [f'v35 爆量急拉後跌破轉弱價放空回測，目標日期={target_date}',
              f'訊號起點={SIGNAL_START_TIME} 最後入場={ENTRY_DEADLINE}（含） '

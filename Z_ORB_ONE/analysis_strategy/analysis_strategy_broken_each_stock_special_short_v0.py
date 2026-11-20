@@ -68,6 +68,8 @@ INTRADAY_COMPARE_END_LOWER = (12, 50)  # 強制平倉時間，以該分K open �
 # 實機程式每天可由 API 取得股票即時資訊，直接判別當日狀態，不需要此替代篩選。
 MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
+MARKET_CACHE_KEY = 'TWSE:MARKET'  # 與v40共用指數容器，不列入股票清單
+MARKET_SYMBOL = 'IX0001'
 # 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
 # 非空：只使用指定 cache 內全部股票與分 K，不讀 stock_data.py、不回退 API。
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
@@ -908,6 +910,20 @@ def main():
             if rest_stock is None:
                 _, rest_stock = init_sdk(args.config)
             return rest_stock
+
+        # 非歷史模式補齊大盤分K；既有非空資料沿用，不影響策略選股。
+        indices = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        market_raw = indices.get(MARKET_CACHE_KEY) if isinstance(indices, dict) else None
+        if not isinstance(market_raw, list) or not market_raw:
+            print(f'API抓取大盤分K：{MARKET_CACHE_KEY} ({MARKET_SYMBOL})')
+            market_raw = fetch_minute_candles(get_rest_stock(), MARKET_SYMBOL, target_date)
+            if not market_raw or not parse_bars(market_raw):
+                raise ValueError(f'{MARKET_CACHE_KEY} 無有效指數分K，不寫入失敗結果')
+            updated = dict(payload) if isinstance(payload, dict) else {}
+            updated['index_minute_raw_by_key'] = {
+                **(indices if isinstance(indices, dict) else {}), MARKET_CACHE_KEY: market_raw}
+            payload = updated
+            save_shared_api_cache(cache_path, payload, raw)
 
         # cache 內沒有分K（含既有的空清單）者視為未抓過，每次執行都重抓。
         missing = [name for name in stock_names

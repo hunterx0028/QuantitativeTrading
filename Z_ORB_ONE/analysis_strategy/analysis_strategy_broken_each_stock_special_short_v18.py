@@ -64,6 +64,8 @@ STOP_SLIPPAGE_TICKS = 0  # 固定停損（含跳空）回補價向上加計的ti
 INTRADAY_COMPARE_END_LOWER = (12, 50)
 MIN_MINUTE_BARS_BEFORE_0930 = 20  # 09:00～09:29 不足此根數，排除當日交易（當日分析前先判斷）
 STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: selected_stocks；T: total_stocks
+MARKET_CACHE_KEY = 'TWSE:MARKET'  # 與v40共用指數容器，不列入股票清單
+MARKET_SYMBOL = 'IX0001'
 # 空字串：交易當日回測，依 STOCK_DATA_SOURCE 使用 stock_data.py 的股票清單。
 # 非空：只使用指定 cache 內全部股票與分 K，不讀 stock_data.py、不回退 API。
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
@@ -872,15 +874,37 @@ def main():
                 _, rest_stock = init_sdk(args.config)
             return rest_stock
 
-        missing = [name for name in stock_names if not isinstance(raw.get(name), list)]
+        # 非歷史模式補齊大盤分K；既有非空資料沿用，不影響策略選股。
+        indices = payload.get('index_minute_raw_by_key', {}) if isinstance(payload, dict) else {}
+        market_raw = indices.get(MARKET_CACHE_KEY) if isinstance(indices, dict) else None
+        if not isinstance(market_raw, list) or not market_raw:
+            print(f'API抓取大盤分K：{MARKET_CACHE_KEY} ({MARKET_SYMBOL})')
+            market_raw = fetch_minute_candles(get_rest_stock(), MARKET_SYMBOL, target_date)
+            if not market_raw or not parse_bars(market_raw):
+                raise ValueError(f'{MARKET_CACHE_KEY} 無有效指數分K，不寫入失敗結果')
+            updated = dict(payload) if isinstance(payload, dict) else {}
+            updated['index_minute_raw_by_key'] = {
+                **(indices if isinstance(indices, dict) else {}), MARKET_CACHE_KEY: market_raw}
+            payload = updated
+            save_shared_api_cache(cache_path, payload, raw)
+
+        missing = [name for name in stock_names
+                   if not isinstance(raw.get(name), list) or not raw[name]]
         if missing:
             fetched = {}
             for i, name in enumerate(missing, 1):
                 print(f'API抓取進度：{i}/{len(missing)} {format_stock_name(name)}')
-                fetched[name] = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
-            raw = {**raw, **fetched}
-        if missing:
-            save_shared_api_cache(cache_path, payload, raw)
+                data = fetch_minute_candles(get_rest_stock(), extract_symbol(name), target_date)
+                if data:  # 失敗或無資料不寫入cache，下次執行再抓。
+                    fetched[name] = data
+            if fetched:
+                raw = {**raw, **fetched}
+                save_shared_api_cache(cache_path, payload, raw)
+            skipped = [name for name in missing if name not in fetched]
+            if skipped:
+                print(f'[WARN] {len(skipped)} 檔抓取失敗或無資料，本次略過且未寫入 cache：'
+                      f'{"、".join(skipped)}', file=sys.stderr)
+        stock_names = [name for name in stock_names if isinstance(raw.get(name), list) and raw[name]]
     lines = [f'v18 三階段 average 放空回測，目標日期={target_date}',
              f'STAGE_1起算={STAGE_1_START_TIME[0]:02d}:{STAGE_1_START_TIME[1]:02d} '
              f'根數={STAGE_1_MIN_BARS}/{STAGE_2_MIN_BARS}/{STAGE_3_MIN_BARS} '
