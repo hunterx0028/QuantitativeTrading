@@ -72,6 +72,8 @@ class VolConfig:
     pullback_percent: float = 3.0
     minute_volume_shares: int = 1000
     previous_turnover_top_percent: float = 30.0
+    average_check_delay_bars: int = 3  # Count completed bars after the signal; exclude the signal bar.
+    average_check_skip_ticks: int = 3
 
     def validate(self):
         if (type(self.previous_turnover_top_percent) not in (int, float)
@@ -84,7 +86,8 @@ class VolConfig:
                 raise ValueError('VOL invalid time')
         if not (9, 0) <= self.signal_start <= self.entry_deadline < (12, 50):
             raise ValueError('VOL invalid entry window')
-        for value in (self.average_days, self.session_minutes, self.minute_volume_shares):
+        for value in (self.average_days, self.session_minutes, self.minute_volume_shares,
+                      self.average_check_delay_bars, self.average_check_skip_ticks):
             if type(value) is not int or value <= 0:
                 raise ValueError('VOL counts/units must be positive integers')
         for value in (self.min_previous_turnover, self.min_volume_ratio, self.min_runup_percent):
@@ -158,6 +161,7 @@ class VolConfig:
         previous_above = False
         signal = None
         candidate = None
+        bars_after_signal = 0
         for bar in completed:
             if bar['dt'] > deadline:
                 break
@@ -166,7 +170,19 @@ class VolConfig:
             if candidate is not None:
                 continue  # Still inspect later completed bars for limit-up touches.
             if signal is not None:
+                bars_after_signal += 1
+                if bars_after_signal < self.average_check_delay_bars:
+                    continue
                 average = positive(bar.get('average'))
+                if bars_after_signal == self.average_check_delay_bars and average is not None:
+                    # Match v35: use the tick interval containing this bar's average.
+                    average_dec = Decimal(str(average))
+                    tick = next((Decimal(step) for upper, step in
+                                 (('10', '0.01'), ('50', '0.05'), ('100', '0.1'),
+                                  ('500', '0.5'), ('1000', '1'))
+                                 if average_dec < Decimal(upper)), Decimal('5'))
+                    if Decimal(str(bar['close'])) <= average_dec - self.average_check_skip_ticks * tick:
+                        return None, True  # Disable VOL for the day, not just this candidate.
                 if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
                     candidate = {**signal, 'vol_average_break_time': bar['dt'].isoformat(),
                                  'vol_average_break_close': bar['close'], 'vol_average_break_average': average,

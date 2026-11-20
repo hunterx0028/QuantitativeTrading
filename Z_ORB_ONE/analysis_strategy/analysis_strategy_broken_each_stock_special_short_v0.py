@@ -48,6 +48,7 @@ STRATEGY_LOWER = 'TEMPLATE_V0'  # 新策略請改為自己的名稱
 # ======================================================================
 SIGNAL_START_TIME = (9, 20)  # 訊號棒最早時間；實際入場為其後下一根有效分K open
 ENTRY_DEADLINE = (12, 0)  # 實際open入場截止（含），不允許截止次分鐘入場
+MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 
 OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
 OPTIMIZE_PROFIT_PER_LOWER = 6.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
@@ -714,6 +715,8 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date, context):
             continue
         previous = compute_yesterday_stats(yesterday)
         previous_close = previous['close']
+        if previous_close > MAX_PREVIOUS_CLOSE:
+            continue
         limit_up, limit_down = calculate_limit_prices(previous_close)
         session_bars = get_session_bars(today)
         found = find_signal(session_bars, {
@@ -774,7 +777,13 @@ def save_shared_api_cache(cache_path, payload, raw):
 
 
 # ---------------------------------------------------------------- 設定檢核與輸出
+
+
+
+
 def validate_settings():
+    if type(MAX_PREVIOUS_CLOSE) not in (int, float) or not math.isfinite(MAX_PREVIOUS_CLOSE) or MAX_PREVIOUS_CLOSE <= 0:
+        raise ValueError('MAX_PREVIOUS_CLOSE 必須為有限正數')
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
     protection_values = (PROTECT_PROFIT_PER, PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()

@@ -10,7 +10,8 @@
 進場：轉弱價＝當日最高價 × (1 − PULLBACK_PERCENT%)。
 SIGNAL_START_TIME 起，分K close 由轉弱價上方（前一根有效分K close 嚴格高於當時轉弱價）
 跌至轉弱價（含）以下，且上述條件於該棒成立，即為轉弱訊號棒；
-其後等待分K close 嚴格低於該根 average，於跌破 average 棒的下一根有效分K open 放空。
+從訊號後第 AVERAGE_CHECK_DELAY_BARS 根有效分K開始檢核 close 嚴格低於該根 average，於確認棒的下一根有效分K open 放空。
+第N根有效分K若close小於或等於其average減AVERAGE_CHECK_SKIP_TICKS個tick（tick依average價位），當日不入場；average無效則不作此排除。
 實際入場不得晚於 ENTRY_DEADLINE（含）；每檔每日最多一筆。
 09:00起至入場前任一有效分K high曾達漲停或low曾達跌停，當日不入場；入場棒僅檢查open。
 出場：固定停損、獲利保護與追蹤停利；本根low更新的出場線下一根生效，固定停損另計滑價。
@@ -48,7 +49,10 @@ VOLUME_AVERAGE_DAYS = 5  # 均量採前幾個有資料交易日；不足則當�
 MIN_VOLUME_RATIO = 4.0  # 累計量須達「均量×已過分鐘比例」的倍數
 REGULAR_SESSION_MINUTES = 270  # 09:00～13:30；已過分鐘數＝訊號棒距09:00分鐘數+1
 MIN_RUNUP_PERCENT = 7.0  # 當日最高價相對當日開盤價的最低漲幅百分比
-PULLBACK_PERCENT = 3.0  # 轉弱價＝當日最高價向下回落的百分比
+PULLBACK_PERCENT = 3.3  # 轉弱價＝當日最高價向下回落的百分比
+AVERAGE_CHECK_DELAY_BARS = 3  # 從轉弱訊號後第N根有效分K開始檢核average；1為次一根，不含訊號棒
+AVERAGE_CHECK_SKIP_TICKS = 4  # 第N根close低於average達此tick數（含）即排除當日；tick依average價位
+
 OPTIMIZE_LOSS_PER_LOWER = 2.0  # 固定停損百分比，亦用於漲停入場限制
 OPTIMIZE_PROFIT_PER_LOWER = 6.0  # 浮盈達此百分比啟動追蹤停利，不直接平倉
 
@@ -70,6 +74,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
 HISTORICAL_CACHE_DATE = "xxxxxxxx"
+MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -605,7 +610,7 @@ def evaluate_candidates(
 
 
 def find_entry(today_bars, previous_close, average_daily_volume):
-    """轉弱訊號後，等待後續分K close低於該根average，再於下一根有效分K open入場。"""
+    """轉弱訊號後第N根有效分K起檢核close低於average，確認後於下一根open入場。"""
     window = get_signal_window(today_bars)
     if window is None:
         return None
@@ -631,6 +636,7 @@ def find_entry(today_bars, previous_close, average_daily_volume):
     cumulative_volume = 0.0
     previous_above = False  # 前一根有效分K close 是否嚴格高於當時轉弱價
     signal = None
+    bars_after_signal = 0
     for bar in bars:
         if signal is not None:
             # 轉弱訊號成立後保留資格；後續棒close低於該根average後，才於再下一根open進場。
@@ -645,7 +651,15 @@ def find_entry(today_bars, previous_close, average_daily_volume):
             if (Decimal(str(bar['high'])) >= limit_up
                     or Decimal(str(bar['low'])) <= limit_down):
                 return None
+            bars_after_signal += 1
+            if bars_after_signal < AVERAGE_CHECK_DELAY_BARS:
+                continue
             average = parse_positive_number(bar.get('average'))
+            if bars_after_signal == AVERAGE_CHECK_DELAY_BARS and average is not None:
+                average_dec = Decimal(str(average))
+                skip_price = average_dec - Decimal(AVERAGE_CHECK_SKIP_TICKS) * Decimal(str(get_tick_size(average)))
+                if Decimal(str(bar['close'])) <= skip_price:
+                    return None
             if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
                 signal['average_break_dt'] = bar['dt']
                 signal['average_break_close'] = bar['close']
@@ -722,6 +736,8 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date, turnover_tab
             continue
         previous = compute_yesterday_stats(yesterday)
         previous_close = previous['close']
+        if previous_close > MAX_PREVIOUS_CLOSE:
+            continue
         previous_turnover = previous['volume'] * VOLUME_UNIT_SHARES * previous_close
         if not is_previous_turnover_qualified(stock_name, date_key, turnover_table):
             continue
@@ -771,7 +787,15 @@ def save_shared_api_cache(cache_path, payload, raw):
     cache_path.write_text(json.dumps(updated, ensure_ascii=False), encoding='utf-8')
 
 
+
+
 def validate_settings():
+    if type(AVERAGE_CHECK_SKIP_TICKS) is not int or AVERAGE_CHECK_SKIP_TICKS <= 0:
+        raise ValueError('AVERAGE_CHECK_SKIP_TICKS 必須為正整數')
+    if type(MAX_PREVIOUS_CLOSE) not in (int, float) or not math.isfinite(MAX_PREVIOUS_CLOSE) or MAX_PREVIOUS_CLOSE <= 0:
+        raise ValueError('MAX_PREVIOUS_CLOSE 必須為有限正數')
+    if type(AVERAGE_CHECK_DELAY_BARS) is not int or AVERAGE_CHECK_DELAY_BARS <= 0:
+        raise ValueError('AVERAGE_CHECK_DELAY_BARS 必須為正整數')
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
     protection_values = (PROTECT_PROFIT_PER, PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
@@ -905,7 +929,8 @@ def main():
              f'的{MIN_VOLUME_RATIO:g}倍，前日資料不足{VOLUME_AVERAGE_DAYS}日則不交易。',
              f'進場：轉弱價＝當日最高價×{100 - PULLBACK_PERCENT:g}%。訊號起點後，前一根有效分K close嚴格高於當時轉弱價、'
              '本根close小於或等於轉弱價，且選股條件於本根成立，即為轉弱訊號棒；'
-             '其後等待分K close嚴格低於該根average，於跌破average棒的下一根有效分K open放空。'
+             f'從轉弱訊號後第{AVERAGE_CHECK_DELAY_BARS}根有效分K起檢核close嚴格低於該根average，於確認棒的下一根有效分K open放空。'
+             f'第N根有效分K若close小於或等於其average減{AVERAGE_CHECK_SKIP_TICKS}個tick（tick依average價位），當日不入場；average無效則不作此排除。'
              '等待期間保留轉弱訊號資格，不重新檢查量比或因最高價更新而重設，但觸及漲跌停即取消當日交易。'
              '跌破當下條件未成立則不交易，須待重新站回轉弱價上方後再次跌破。'
              '最晚入場為截止時間（含），每檔每日最多一筆，資格不跨日。',

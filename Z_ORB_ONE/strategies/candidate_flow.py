@@ -279,7 +279,10 @@ class SharedCandidateFlow:
                     and 'slope' in checks
                     and (now.hour, now.minute) >= a.AVG_CANDLES_START_TIME):
                 signal = a.get_avg_strategy().find_avg_entry_signal(completed, cutoff, candidate_only=True)
-                if signal:
+                if signal and signal.get('rejected'):
+                    disabled.add(a.STRATEGY_AVG)
+                    a.trade_log('AVG_ENTRY_REJECTED', symbol=symbol, reason=signal['rejected'])
+                elif signal:
                     dt = signal['signal_bar']['dt']
                     entry_time = dt + timedelta(minutes=1)
                     prior = [b for b in completed if b['dt'] <= dt]
@@ -419,7 +422,10 @@ class SharedCandidateFlow:
                     a.get_ind_market_snapshot()['previous_close'], cutoff)
                 if decision is not None:
                     a.trade_log('IND_MARKET_DECISION', passed=decision['passed'],
-                                market_time=decision['dt'].isoformat(), change=decision['change'])
+                                market_time=decision['dt'].isoformat(), change=decision['change'],
+                                market_drop_percent=config.market_drop_percent,
+                                normalized_close_slope=decision.get('normalized_close_slope'),
+                                market_max_normalized_slope=config.market_max_normalized_slope)
                     if decision['passed']:
                         self.last_scan = None  # 本分鐘先前可能因等待大盤而略過IND，立即允許首輪掃描。
             except Exception as exc:

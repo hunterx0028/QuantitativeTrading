@@ -3,6 +3,7 @@
 
 Run before copying docker_space's application files to the Docker build
 folder. No trading source is rewritten or imported by this packager.
+strategy_config.py, like stock_data.py, is supplied externally by the operator.
 """
 import ast
 import shutil
@@ -29,8 +30,19 @@ def transform_singleton_to_docker(source: str, strategy_filename: str = STRATEGY
     return (
         '# -*- coding: utf-8 -*-\n'
         '# Generated entry point. Trading logic lives in the shared application.\n'
-        f'from {module_name} import main\n\n\n'
+        'from pathlib import Path\n'
+        'from runtime_environment import RuntimeEnvironment\n\n\n'
         'if __name__ == "__main__":\n'
+        '    # Configuration must exist before importing the shared strategy.\n'
+        '    base_dir = Path(__file__).resolve().parent\n'
+        '    environment = RuntimeEnvironment(str(base_dir), mode="docker")\n'
+        '    if environment.should_download_from_s3():\n'
+        '        environment.download_one_runtime_file_from_s3("strategy_config.py")\n'
+        '    if not (base_dir / "strategy_config.py").is_file():\n'
+        '        raise FileNotFoundError(\n'
+        '            "Missing strategy_config.py: supply it with stock_data.py in external"\n'
+        '        )\n'
+        f'    from {module_name} import main\n'
         '    main(runtime_mode="docker")\n'
     )
 

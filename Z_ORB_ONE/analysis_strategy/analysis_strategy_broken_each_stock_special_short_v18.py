@@ -38,8 +38,8 @@ MAX_NORMALIZED_SLOPE = math.tan(math.radians(3.5))  # 約0.06 %／分鐘；以1�
 STAGE_1_START_TIME = (9, 0)  # STAGE_1 起算時間，包含此分鐘
 STAGE_1_MIN_BARS = 8
 STAGE_2_MIN_BARS = 8
-STAGE_3_MIN_BARS = 5
-STAGE_4_MIN_BARS = 2  # 第三階段完成後連續 low < average，下一根 open 入場
+STAGE_3_MIN_BARS = 8
+STAGE_4_MIN_BARS = 3  # 第三階段完成後連續 low < average，下一根 open 入場
 
 STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
 STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1 - 2%)
@@ -70,6 +70,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
 HISTORICAL_CACHE_DATE = "xxxxxxxx"
+MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -576,7 +577,7 @@ def evaluate_candidates(
 
 
 def find_entry(today_bars):
-    """階段完成即鎖定；下一根才可開始下一階段或觸發入場。"""
+    """階段完成即鎖定。"""
     requirements = (STAGE_1_MIN_BARS, STAGE_2_MIN_BARS, STAGE_3_MIN_BARS)
     amplitudes = (STAGE_1_AMPLITUDE_PERCENT, STAGE_2_AMPLITUDE_PERCENT,
                   STAGE_3_AMPLITUDE_PERCENT)
@@ -663,6 +664,8 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date):
         if not today or not yesterday or not has_enough_minute_bars_before_0930(today):
             continue
         previous_close = compute_yesterday_stats(yesterday)['close']
+        if previous_close > MAX_PREVIOUS_CLOSE:
+            continue
         early_slope = calculate_early_average_slope(today)
         normalized_slope = normalize_slope_by_previous_close(early_slope, previous_close)
         if not is_normalized_slope_allowed(normalized_slope):
@@ -750,7 +753,11 @@ def is_normalized_slope_allowed(slope):
     return slope is not None and math.isfinite(slope) and slope < MAX_NORMALIZED_SLOPE
 
 
+
+
 def validate_settings():
+    if type(MAX_PREVIOUS_CLOSE) not in (int, float) or not math.isfinite(MAX_PREVIOUS_CLOSE) or MAX_PREVIOUS_CLOSE <= 0:
+        raise ValueError('MAX_PREVIOUS_CLOSE 必須為有限正數')
     if type(STOP_SLIPPAGE_TICKS) is not int or STOP_SLIPPAGE_TICKS < 0:
         raise ValueError('STOP_SLIPPAGE_TICKS 必須為非負整數')
     if type(MAX_MISSING_SLOPE_BARS) is not int or MAX_MISSING_SLOPE_BARS < 0:

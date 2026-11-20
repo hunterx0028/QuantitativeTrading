@@ -81,6 +81,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
 HISTORICAL_CACHE_DATE = "xxxxxxxx"
+MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
 API_REQUEST_DELAY_SEC = 1
@@ -840,6 +841,8 @@ def collect_trade_candidates(stock_name, bars_by_date, target_date, context):
             continue
         previous = compute_yesterday_stats(yesterday)
         previous_close = previous['close']
+        if previous_close > MAX_PREVIOUS_CLOSE:
+            continue
         limit_up, limit_down = calculate_limit_prices(previous_close)
         session_bars = get_session_bars(today)
         found = find_signal(session_bars, {
@@ -900,7 +903,11 @@ def save_shared_api_cache(cache_path, payload, raw):
 
 
 # ---------------------------------------------------------------- 設定檢核與輸出
+
+
 def validate_settings():
+    if type(MAX_PREVIOUS_CLOSE) not in (int, float) or not math.isfinite(MAX_PREVIOUS_CLOSE) or MAX_PREVIOUS_CLOSE <= 0:
+        raise ValueError('MAX_PREVIOUS_CLOSE 必須為有限正數')
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
     protection_values = (PROTECT_PROFIT_PER, PROTECT_LOSS_PER) if ENABLE_PROFIT_PROTECTION else ()
