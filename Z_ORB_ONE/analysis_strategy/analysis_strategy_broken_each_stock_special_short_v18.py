@@ -41,9 +41,9 @@ STAGE_2_MIN_BARS = 8
 STAGE_3_MIN_BARS = 8
 STAGE_4_MIN_BARS = 3  # 第三階段完成後連續 low < average，下一根 open 入場
 
-STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
-STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1 - 2%)
-STAGE_3_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 2%)
+STAGE_1_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 1%)
+STAGE_2_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 low < 該根 average × (1 - 1%)
+STAGE_3_AMPLITUDE_PERCENT = 1.0  # 同段至少一根 high > 該根 average × (1 + 1%)
 MIN_PRE_ENTRY_RANGE_PERCENT = 5.0  # 入場前當日高低價差須嚴格大於昨收的此百分比
 
 ENTRY_START_TIME = (10, 0)  # 包含此分鐘；首次入場時間不在區間內，當日直接排除

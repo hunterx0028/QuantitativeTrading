@@ -2,7 +2,7 @@
 
 策略：大盤一次性急跌篩選，固定相對強勢股名單，等待由上向下跌破原始 average。
 預設 09:16 起累積比較棒，最早 09:17 訊號、09:18 open 入場。
-停損 1.5%，浮盈 5% 啟動 v0 逐利；所有策略門檻與時間均可由常數調整。
+停損 2%，浮盈 5% 啟動 v0 逐利；所有策略門檻與時間均可由常數調整。
 
 以下規則由框架處理，策略不需也不應重寫：
 - 早盤篩選：09:00～09:29 不重複的整分鐘分K少於 MIN_MINUTE_BARS_BEFORE_0930 根，排除當日交易。
@@ -48,7 +48,7 @@ MARKET_MAX_NORMALIZED_SLOPE = math.tan(math.radians(-5))  # 可為正、零或�
 MARKET_MAX_MISSING_SLOPE_BARS = 3  # MARKET_SLOPE_START_TIME～MARKET_CHECK_TIME（含）缺棒／close無效容許數
 STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲股
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
-MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 1.732051 %／分鐘；僅超過才排除
+MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 0.839100 %／分鐘；僅超過才排除
 MAX_MISSING_SLOPE_BARS = 2  # 區間內缺棒／close無效容許數；不補值，至少須有2筆有效資料
 
 # ======================================================================

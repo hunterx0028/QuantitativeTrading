@@ -2161,15 +2161,6 @@ def try_close_position(state: Dict[str, Any], mysdk):
                 print(f"[{state['symbol_name']}] ✅ 己達平倉時間")
         return
 
-    pl = reached_profitable_limit_price(state)
-    if pl:
-        if close_profit_position(state, mysdk):
-            if state.get("side") == TRADE_SIDE_LONG:
-                print(f"[{state['symbol_name']}] ✅ 作多已達漲停，立即停利平倉")
-            else:
-                print(f"[{state['symbol_name']}] ✅ 作空已達跌停，立即停利平倉")
-        return
-
     if not finite_positive(state.get('last_price')):
         trade_log('POSITION_QUOTE_INCOMPLETE', error=True, **state_symbol_fields(state),
                   missing_fields='lastPrice', action='現價缺失或無效，跳過本輪價格風控，等待下一輪')
@@ -2309,37 +2300,6 @@ def reached_resize_profit(state: Dict[str, Any]) -> bool:
         return px <= profit_price
     if side == TRADE_SIDE_LONG:
         return px >= profit_price
-    return False
-
-
-def reached_profitable_limit_price(state: Dict[str, Any]) -> bool:
-    """確認入場成交後，作多曾達漲停、作空曾達跌停時立即平倉。"""
-    if not state.get("entry_fill_confirmed"):
-        return False
-
-    side = state.get("side")
-    field = 'high_price' if side == TRADE_SIDE_LONG else 'low_price'
-    if side in (TRADE_SIDE_LONG, TRADE_SIDE_SHORT) and not finite_positive(state.get(field)):
-        trade_log('POSITION_QUOTE_INCOMPLETE', error=True, **state_symbol_fields(state),
-                  missing_fields=field, action='跳過本輪觸及漲跌停判斷，等待下一輪；其餘價格風控繼續')
-        return False
-
-    if side == TRADE_SIDE_LONG:
-        try:
-            high_price = float(state.get("high_price"))
-            limit_up_price = float(state.get("limit_up_price"))
-        except (TypeError, ValueError):
-            return False
-        return high_price > 0 and limit_up_price > 0 and high_price >= limit_up_price
-
-    if side == TRADE_SIDE_SHORT:
-        try:
-            low_price = float(state.get("low_price"))
-            limit_down_price = float(state.get("limit_down_price"))
-        except (TypeError, ValueError):
-            return False
-        return low_price > 0 and limit_down_price > 0 and low_price <= limit_down_price
-
     return False
 
 
