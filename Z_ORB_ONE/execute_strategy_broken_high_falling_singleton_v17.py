@@ -82,7 +82,6 @@ from strategy_config import (
     ENABLE_VOL,
     ENABLE_IND,
     PREOPEN_TICKER_ATTEMPTS,
-    AVG_CANDLES_START_TIME,
     AVG_STAGE_1_START_TIME,
     AVG_STAGE_1_MIN_BARS,
     AVG_STAGE_2_MIN_BARS,
@@ -482,7 +481,6 @@ def get_avg_strategy() -> AvgStrategy:
     return AvgStrategy(
         config=AvgConfig(
             ENABLE_PROFIT_PROTECTION=ENABLE_PROFIT_PROTECTION,
-            AVG_CANDLES_START_TIME=AVG_CANDLES_START_TIME,
             AVG_CANDLE_POLL_SECOND=AVG_CANDLE_POLL_SECOND,
             AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS=AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS,
             AVG_ENTRY_DEADLINE=AVG_ENTRY_DEADLINE,
@@ -1247,7 +1245,7 @@ def validate_avg_config() -> None:
 
 def resolve_session_entry_mode(now_local: datetime) -> Optional[int]:
     """AVG 於自身監看時間啟動；各策略候選由共用流程獨立評估。"""
-    if (now_local.hour, now_local.minute) < AVG_CANDLES_START_TIME:
+    if (now_local.hour, now_local.minute) < AVG_ENTRY_START_TIME:
         return None
     if (now_local.hour, now_local.minute) > AVG_ENTRY_DEADLINE:
         return ENTRY_MODE_NO_TRADE

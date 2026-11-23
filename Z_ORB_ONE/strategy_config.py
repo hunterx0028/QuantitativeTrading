@@ -47,7 +47,6 @@ ENABLE_VOL = True
 ENABLE_IND = True
 PREOPEN_TICKER_ATTEMPTS = 2  # 開盤前資格查詢輪數；仍缺資料者盤中重試，確認前禁止入場
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
-AVG_CANDLES_START_TIME = (9, 52)  # AVG 型態檢核起點；斜率先檢查
 AVG_STAGE_1_START_TIME = (9, 0)
 AVG_STAGE_1_MIN_BARS = 8
 AVG_STAGE_2_MIN_BARS = 8

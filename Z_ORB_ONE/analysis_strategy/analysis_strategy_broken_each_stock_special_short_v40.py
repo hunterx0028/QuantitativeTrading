@@ -17,6 +17,8 @@
 - 昨收為前一有資料交易日最後一根 close；重複、非整分鐘或順序異常分K排除。
 """
 
+# ind 模式的回測
+
 import argparse
 import configparser
 import json

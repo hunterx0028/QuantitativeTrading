@@ -277,7 +277,7 @@ class SharedCandidateFlow:
             checks = self.check_avg_eligibility(symbol, completed, float(row[5]), cutoff, disabled)
             if (a.STRATEGY_AVG not in disabled and a.STRATEGY_AVG not in candidates
                     and 'slope' in checks
-                    and (now.hour, now.minute) >= a.AVG_CANDLES_START_TIME):
+                    and (now.hour, now.minute) >= a.AVG_ENTRY_START_TIME):
                 signal = a.get_avg_strategy().find_avg_entry_signal(completed, cutoff, candidate_only=True)
                 if signal and signal.get('rejected'):
                     disabled.add(a.STRATEGY_AVG)
@@ -423,7 +423,7 @@ class SharedCandidateFlow:
                 if decision is not None:
                     a.trade_log('IND_MARKET_DECISION', passed=decision['passed'],
                                 market_time=decision['dt'].isoformat(), change=decision['change'],
-                                market_drop_percent=config.market_drop_percent,
+                                market_drop_percent=-config.market_drop_percent,
                                 normalized_close_slope=decision.get('normalized_close_slope'),
                                 market_max_normalized_slope=config.market_max_normalized_slope)
                     if decision['passed']:
@@ -456,7 +456,7 @@ class SharedCandidateFlow:
         minute = now.strftime('%Y-%m-%d %H:%M')
         starts = []
         if self.strategy_enabled(a.STRATEGY_AVG):
-            starts.append(min(a.AVG_CANDLES_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
+            starts.append(min(a.AVG_ENTRY_START_TIME, a.AVG_SLOPE_CUTOFF_TIME))
         if hasattr(a, 'STRATEGY_VOL') and self.strategy_enabled(a.STRATEGY_VOL):
             starts.append(a.VOL_SIGNAL_START_TIME)
         if self.ind_runtime is not None and self.strategy_enabled(a.STRATEGY_IND):

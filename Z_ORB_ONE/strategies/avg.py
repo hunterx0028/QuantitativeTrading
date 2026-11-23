@@ -13,7 +13,6 @@ import requests
 
 @dataclass(frozen=True)
 class AvgConfig:
-    AVG_CANDLES_START_TIME: tuple[int, int]
     AVG_CANDLE_POLL_SECOND: int
     AVG_CANDLE_REQUEST_START_INTERVAL_SECONDS: float
     AVG_ENTRY_DEADLINE: tuple[int, int]
@@ -98,21 +97,18 @@ class AvgStrategy:
     def validate_avg_config(self, *, validate_shared_risk: bool = True) -> None:
         if self.config.AVG_STOCK_DATA_SOURCE not in ("T", "S"):
             raise ValueError('AVG_STOCK_DATA_SOURCE 必須為 "T" 或 "S"')
-        for name in ("AVG_STAGE_1_START_TIME", "AVG_CANDLES_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
+        for name in ("AVG_STAGE_1_START_TIME", "AVG_SLOPE_CUTOFF_TIME",
                      "AVG_ENTRY_START_TIME", "AVG_ENTRY_DEADLINE", "AVG_FORCE_CLOSE_TIME"):
             self.services.time_tuple_to_minutes(getattr(self.config, name), name)
         entry_start_minutes = self.services.time_tuple_to_minutes(self.config.AVG_ENTRY_START_TIME, "AVG_ENTRY_START_TIME")
         entry_deadline_minutes = self.services.time_tuple_to_minutes(self.config.AVG_ENTRY_DEADLINE, "AVG_ENTRY_DEADLINE")
         force_close_minutes = self.services.time_tuple_to_minutes(self.config.AVG_FORCE_CLOSE_TIME, "AVG_FORCE_CLOSE_TIME")
-        candles_start_minutes = self.services.time_tuple_to_minutes(self.config.AVG_CANDLES_START_TIME, "AVG_CANDLES_START_TIME")
         stage_1_start_minutes = self.services.time_tuple_to_minutes(self.config.AVG_STAGE_1_START_TIME, "AVG_STAGE_1_START_TIME")
         slope_cutoff_minutes = self.services.time_tuple_to_minutes(self.config.AVG_SLOPE_CUTOFF_TIME, "AVG_SLOPE_CUTOFF_TIME")
         if not entry_start_minutes <= entry_deadline_minutes < force_close_minutes:
             raise ValueError("AVG 需符合最早入場 <= 截止入場 < 強制平倉")
-        if not candles_start_minutes <= entry_start_minutes:
-            raise ValueError("AVG 分K開始時間不可晚於 AVG 最早入場時間")
         if (self.config.STRATEGY_START_LOWER_3 is not None
-                and self.services.time_tuple_to_minutes(self.config.STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3") > candles_start_minutes):
+                and self.services.time_tuple_to_minutes(self.config.STRATEGY_START_LOWER_3, "STRATEGY_START_LOWER_3") > entry_start_minutes):
             raise ValueError("舊三策略入口的 AVG 分K不可早於第三組 LOWER 開始時間")
         if stage_1_start_minutes > entry_deadline_minutes or slope_cutoff_minutes > entry_deadline_minutes:
             raise ValueError("AVG 階段起算及斜率檢核時間不可晚於入場截止")
@@ -452,7 +448,7 @@ class AvgStrategy:
             )
 
         now_local = self.services.now_tpe()
-        if (now_local.hour, now_local.minute) < self.config.AVG_CANDLES_START_TIME:
+        if (now_local.hour, now_local.minute) < self.config.AVG_ENTRY_START_TIME:
             return
         if now_local.second < self.config.AVG_CANDLE_POLL_SECOND:
             return
