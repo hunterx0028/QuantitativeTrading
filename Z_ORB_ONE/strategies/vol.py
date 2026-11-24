@@ -69,7 +69,7 @@ class VolConfig:
     min_volume_ratio: float = 4.0
     session_minutes: int = 270
     min_runup_percent: float = 7.0
-    pullback_percent: float = 3.0
+    pullback_percent: float = 3.3
     minute_volume_shares: int = 1000
     previous_turnover_top_percent: float = 30.0
     average_check_delay_bars: int = 3  # Count completed bars after the signal; exclude the signal bar.
