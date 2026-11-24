@@ -1,4 +1,4 @@
-"""VOL: v35 completed-minute close<average confirmation, then quote entry.
+"""VOL: v35 delayed completed-minute confirmation, then quote entry.
 
 Historical volume uses minute candles, not daily volume (which can include
 other sessions). All stored/computed volumes use shares; API minute lots x1000.
@@ -73,7 +73,7 @@ class VolConfig:
     minute_volume_shares: int = 1000
     previous_turnover_top_percent: float = 30.0
     average_check_delay_bars: int = 3  # Count completed bars after the signal; exclude the signal bar.
-    average_check_skip_ticks: int = 3
+    average_check_skip_percent: float = 0.5
 
     def validate(self):
         if (type(self.previous_turnover_top_percent) not in (int, float)
@@ -87,12 +87,16 @@ class VolConfig:
         if not (9, 0) <= self.signal_start <= self.entry_deadline < (12, 50):
             raise ValueError('VOL invalid entry window')
         for value in (self.average_days, self.session_minutes, self.minute_volume_shares,
-                      self.average_check_delay_bars, self.average_check_skip_ticks):
+                      self.average_check_delay_bars):
             if type(value) is not int or value <= 0:
                 raise ValueError('VOL counts/units must be positive integers')
         for value in (self.min_previous_turnover, self.min_volume_ratio, self.min_runup_percent):
             if not math.isfinite(value) or value < 0:
                 raise ValueError('VOL thresholds must be finite and nonnegative')
+        if (type(self.average_check_skip_percent) not in (int, float)
+                or not math.isfinite(self.average_check_skip_percent)
+                or not 0 < self.average_check_skip_percent < 100):
+            raise ValueError('VOL average check skip percent must be in (0, 100)')
         if not math.isfinite(self.pullback_percent) or not 0 < self.pullback_percent < 100:
             raise ValueError('VOL pullback must be between 0 and 100')
 
@@ -174,19 +178,13 @@ class VolConfig:
                 if bars_after_signal < self.average_check_delay_bars:
                     continue
                 average = positive(bar.get('average'))
-                if bars_after_signal == self.average_check_delay_bars and average is not None:
-                    # Match v35: use the tick interval containing this bar's average.
-                    average_dec = Decimal(str(average))
-                    tick = next((Decimal(step) for upper, step in
-                                 (('10', '0.01'), ('50', '0.05'), ('100', '0.1'),
-                                  ('500', '0.5'), ('1000', '1'))
-                                 if average_dec < Decimal(upper)), Decimal('5'))
-                    if Decimal(str(bar['close'])) <= average_dec - self.average_check_skip_ticks * tick:
-                        return None, True  # Disable VOL for the day, not just this candidate.
-                if average is not None and Decimal(str(bar['close'])) < Decimal(str(average)):
-                    candidate = {**signal, 'vol_average_break_time': bar['dt'].isoformat(),
-                                 'vol_average_break_close': bar['close'], 'vol_average_break_average': average,
-                                 'vol_entry_time': (bar['dt'] + timedelta(minutes=1)).isoformat()}
+                if average is not None:
+                    skip_price = Decimal(str(average)) * (1 - Decimal(str(self.average_check_skip_percent)) / 100)
+                    if Decimal(str(bar['close'])) < skip_price:
+                        return None, True  # Disable VOL for the day.
+                candidate = {**signal, 'vol_confirm_time': bar['dt'].isoformat(),
+                             'vol_confirm_close': bar['close'], 'vol_confirm_average': average,
+                             'vol_entry_time': (bar['dt'] + timedelta(minutes=1)).isoformat()}
                 continue
             volume = bar.get('volume')
             if volume is None or not math.isfinite(volume) or volume < 0:

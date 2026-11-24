@@ -112,7 +112,7 @@ from strategy_config import (
     VOL_MIN_RUNUP_PERCENT,
     VOL_PULLBACK_PERCENT,
     VOL_AVERAGE_CHECK_DELAY_BARS,
-    VOL_AVERAGE_CHECK_SKIP_TICKS,
+    VOL_AVERAGE_CHECK_SKIP_PERCENT,
     VOL_VOLUME_UNIT_SHARES,
     VOL_STOP_LOSS_PERCENT,
     VOL_TAKE_PROFIT_PERCENT,
@@ -336,7 +336,7 @@ def get_vol_config():
                      session_minutes=VOL_REGULAR_SESSION_MINUTES, min_runup_percent=VOL_MIN_RUNUP_PERCENT,
                      pullback_percent=VOL_PULLBACK_PERCENT, minute_volume_shares=VOL_VOLUME_UNIT_SHARES,
                      average_check_delay_bars=VOL_AVERAGE_CHECK_DELAY_BARS,
-                     average_check_skip_ticks=VOL_AVERAGE_CHECK_SKIP_TICKS)
+                     average_check_skip_percent=VOL_AVERAGE_CHECK_SKIP_PERCENT)
 
 
 def validate_vol_config():

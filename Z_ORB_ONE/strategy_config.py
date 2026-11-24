@@ -69,7 +69,7 @@ AVG_TAKE_PROFIT_PERCENT = 5.0
 AVG_FORCE_CLOSE_TIME = (12, 50)
 AVG_ENTRY_ORDER_QUANTITY = 1
 
-# VOL: v35 minute signals; completed close<average confirmation -> 15-second quote entry.
+# VOL: v35 minute signals; delayed completed-minute confirmation -> 15-second quote entry.
 # Ticker eligibility replaces the backtest's 09:00-09:29 bar-count proxy.
 VOL_SIGNAL_START_TIME = (9, 20)
 VOL_ENTRY_DEADLINE = (12, 0)
@@ -80,8 +80,8 @@ VOL_MIN_VOLUME_RATIO = 4.0
 VOL_REGULAR_SESSION_MINUTES = 270
 VOL_MIN_RUNUP_PERCENT = 7.0
 VOL_PULLBACK_PERCENT = 3.3
-VOL_AVERAGE_CHECK_DELAY_BARS = 3  # 轉弱訊號後第N根有效分K起檢核average；1為次一根
-VOL_AVERAGE_CHECK_SKIP_TICKS = 4  # 第N根close <= average減此tick數時，排除當日VOL；tick依average價位
+VOL_AVERAGE_CHECK_DELAY_BARS = 3  # 轉弱訊號後第N根有效分K為確認棒；1為次一根
+VOL_AVERAGE_CHECK_SKIP_PERCENT = 0.5  # 確認棒close < average×(1−此百分比%)時排除當日VOL
 VOL_VOLUME_UNIT_SHARES = 1000
 VOL_STOP_LOSS_PERCENT = 2.0
 VOL_TAKE_PROFIT_PERCENT = 6.0
