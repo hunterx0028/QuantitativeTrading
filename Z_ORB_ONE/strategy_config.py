@@ -34,7 +34,7 @@ PROTECT_PROFIT_PER = 2.5 # 所有策略共用：觸發獲利保護百分比
 PROTECT_LOSS_PER = 1.5 # 所有策略共用：獲利保護後的新停損百分比
 
 PROFIT_BACK_PERCENT = 0.5 # 獲利後允許回撤百分比
-PROFIT_TARGET_PERCENT = 1.0 # 逐步獲利目標百分比
+PROFIT_TARGET_PERCENT = 0.5 # 逐步獲利目標百分比
 
 REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，避開開盤初期 quote 欄位不完整
 

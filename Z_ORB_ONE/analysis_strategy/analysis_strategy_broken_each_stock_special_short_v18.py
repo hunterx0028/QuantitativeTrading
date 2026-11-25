@@ -57,7 +57,7 @@ PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比，推進保護停損
 PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比（相對入場價，尚未扣費用）
 
 PROFIT_BACK_PERCENT = 0.5  # 追蹤出場線：當次啟動／推進價格向上回撤百分比
-PROFIT_TARGET_PERCENT = 1.0  # 下次推進目標：當次啟動／推進價格再向下的百分比
+PROFIT_TARGET_PERCENT = 0.5  # 下次推進目標：當次啟動／推進價格再向下的百分比
 
 STOP_SLIPPAGE_TICKS = 0  # 固定停損（含跳空）回補價向上加計的tick數；0為不計滑價，不套用保利或逐利
 
@@ -71,7 +71,7 @@ MARKET_SYMBOL = 'IX0001'
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
-HISTORICAL_CACHE_DATE = ""
+HISTORICAL_CACHE_DATE = "xxxxxxxx"
 MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003

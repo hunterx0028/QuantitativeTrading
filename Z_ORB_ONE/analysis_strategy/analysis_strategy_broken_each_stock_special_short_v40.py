@@ -67,7 +67,7 @@ PROTECT_PROFIT_PER = 2.5  # 浮盈達此百分比啟動獲利保護
 PROTECT_LOSS_PER = 1.5  # 保護停損鎖住的毛利百分比，尚未扣費用
 
 PROFIT_BACK_PERCENT = 0.5  # 追蹤出場線相對當次low向上回撤百分比
-PROFIT_TARGET_PERCENT = 1.0  # 下一個追蹤目標相對當次low再向下的百分比
+PROFIT_TARGET_PERCENT = 0.5  # 下一個追蹤目標相對當次low再向下的百分比
 
 STOP_SLIPPAGE_TICKS = 0  # 停損（含跳空停損）出場價向上加計的tick數；0為不計滑價
 
