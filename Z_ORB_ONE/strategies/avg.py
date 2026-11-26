@@ -203,7 +203,8 @@ class AvgStrategy:
             if not 9 * 60 <= minute < cutoff:
                 continue
             if dt.second or dt.microsecond or minute in seen_minutes:
-                return None
+                # 資料異常不是 v18 的缺棒規則；拋出例外由候選流程記錄，下一輪重算。
+                raise ValueError('AVG 斜率區間分K時間重複或非整分鐘，等待下一輪')
             seen_minutes.add(minute)
             try:
                 average = float(bar.get('average'))
@@ -228,6 +229,10 @@ class AvgStrategy:
         """與 v18 find_entry 對齊：low>avg、high<avg、low>avg，之後連續 low<avg。"""
         current_minute = now_local.replace(second=0, microsecond=0)
         completed = [bar for bar in bars if bar["dt"] < current_minute]
+        times = [bar["dt"] for bar in completed]
+        if times != sorted(set(times)) or any(dt.second or dt.microsecond for dt in times):
+            # 重複棒會讓連續根數重複計算；與 IND/VOL/TOP 相同，不淘汰當日資格，下一輪重查。
+            raise ValueError('AVG 分K時間重複、非整分鐘或順序異常，等待下一輪')
         requirements = (self.config.AVG_STAGE_1_MIN_BARS, self.config.AVG_STAGE_2_MIN_BARS, self.config.AVG_STAGE_3_MIN_BARS)
         amplitudes = (self.config.AVG_STAGE_1_AMPLITUDE_PERCENT, self.config.AVG_STAGE_2_AMPLITUDE_PERCENT,
                       self.config.AVG_STAGE_3_AMPLITUDE_PERCENT)

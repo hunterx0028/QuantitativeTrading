@@ -120,7 +120,7 @@ class TopConfig:
         return result
 
     def find_candidate(self, bars, now, limit_up, limit_down):
-        """回傳 (候選欄位, 當日淘汰)。每次重播已完成分K，結果可重現。
+        """回傳 (候選欄位, 當日淘汰)。每次重播已完成分K，結果可重現；分K時間異常拋出 ValueError。
 
         與 v41 相同：09:00 起累計最高價；相鄰兩根已完成分K average 皆有效才判斷；
         訊號棒 close 自最高價回落 >= 門檻，前一棒 close < average，本棒 high >= average 且
@@ -131,7 +131,8 @@ class TopConfig:
         completed = [bar for bar in bars if session <= bar['dt'] < base]
         times = [bar['dt'] for bar in completed]
         if times != sorted(set(times)) or any(t.second or t.microsecond for t in times):
-            return None, True
+            # 與 IND 相同：單次回應異常不淘汰當日資格，由候選流程記錄後於下一輪重查。
+            raise ValueError('TOP 分K時間重複、非整分鐘或順序異常，等待下一輪')
         limit_up, limit_down = Decimal(str(limit_up)), Decimal(str(limit_down))
         pullback_ratio = 1 - Decimal(str(self.pullback_from_high_percent)) / 100
         high = Decimal('0')

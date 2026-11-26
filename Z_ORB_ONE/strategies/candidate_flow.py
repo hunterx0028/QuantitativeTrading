@@ -190,10 +190,13 @@ class SharedCandidateFlow:
         checks = self.avg_checks.setdefault(symbol, {})
         hm = now.hour, now.minute
         if 'slope' not in checks and hm >= a.AVG_SLOPE_CUTOFF_TIME:
+            # 分K時間異常會拋出例外：不寫入檢查結果，下一輪重算。
             slope = a.get_avg_strategy().calculate_avg_normalized_slope(completed, previous_close)
             if slope is None or slope >= a.AVG_MAX_NORMALIZED_SLOPE:
                 disabled.add(a.STRATEGY_AVG)
-                a.trade_log("AVG_SLOPE_REJECTED", symbol=symbol, normalized_slope=slope)
+                a.trade_log("AVG_SLOPE_REJECTED", symbol=symbol, normalized_slope=slope,
+                            reason='insufficient_valid_average_or_previous_close' if slope is None
+                            else 'slope_at_or_above_limit')
                 return checks
             checks['slope'] = slope
         return checks

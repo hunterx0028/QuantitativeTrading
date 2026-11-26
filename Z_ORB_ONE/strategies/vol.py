@@ -156,7 +156,8 @@ class VolConfig:
         completed = [bar for bar in bars if session <= bar['dt'] < base]
         times = [bar['dt'] for bar in completed]
         if times != sorted(set(times)) or any(t.second or t.microsecond for t in times):
-            return None, True
+            # 與 IND 相同：單次回應異常不淘汰當日資格，由候選流程記錄後於下一輪重查。
+            raise ValueError('VOL 分K時間重複、非整分鐘或順序異常，等待下一輪')
         if not completed:
             return None, False
         opening = Decimal(str(completed[0]['open']))
@@ -188,7 +189,8 @@ class VolConfig:
                 continue
             volume = bar.get('volume')
             if volume is None or not math.isfinite(volume) or volume < 0:
-                return None, True  # Do not invent zero volume for an incomplete response.
+                # Do not invent zero volume; like IND, retry next round instead of disabling VOL.
+                raise ValueError('VOL 分K成交量缺失或無效，等待下一輪')
             high = max(high, Decimal(str(bar['high'])))
             cumulative += volume * self.minute_volume_shares
             trigger = high * (1 - Decimal(str(self.pullback_percent)) / 100)
