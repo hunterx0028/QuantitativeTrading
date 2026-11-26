@@ -459,6 +459,8 @@ def update_selected_stocks_file(
     total_records: list[tuple] | None = None,
     vol_history_by_symbol: dict | None = None,
     vol_history_reference_date: str | None = None,
+    top_history_by_symbol: dict | None = None,
+    top_history_reference_date: str | None = None,
 ) -> None:
     source = stock_data_path.read_text(encoding="utf-8")
     source = ensure_selected_limit_stock_lists(source)
@@ -472,11 +474,20 @@ def update_selected_stocks_file(
             source = replace_stock_records_assignment(source, "total_stocks", total_records)
     # Replace the whole snapshot, including empty snapshots from old caches.
     # Do not append fields to the legacy nine-column stock tuples.
+    # 新增的變數第一次寫入時接在前一個快照變數之後（TOP 接在 vol_history_reference_date 後）。
+    previous_name = None
     for name, value in (('vol_history_by_symbol', vol_history_by_symbol or {}),
-                        ('vol_history_reference_date', vol_history_reference_date)):
+                        ('vol_history_reference_date', vol_history_reference_date),
+                        ('top_history_by_symbol', top_history_by_symbol or {}),
+                        ('top_history_reference_date', top_history_reference_date)):
         assignment = find_assignment(source, name)
         replacement = f'{name} = {pformat(value, sort_dicts=True)}'
-        if assignment is None:
+        anchor = find_assignment(source, previous_name) if previous_name else None
+        previous_name = name
+        if assignment is None and anchor is not None:
+            lines = source.splitlines()
+            source = '\n'.join(lines[:anchor[1]] + replacement.splitlines() + lines[anchor[1]:]) + '\n'
+        elif assignment is None:
             source = source.rstrip() + '\n\n' + replacement + '\n'
         else:
             lines = source.splitlines()
@@ -617,6 +628,12 @@ def main() -> None:
         if isinstance(stock.get('vol_history'), dict)
         and stock.get('record') and stock['record'][0] in pool
     }
+    top_history_by_symbol = {
+        stock['record'][0].split(':', 1)[1]: stock['top_history']
+        for stock in cached_stocks
+        if isinstance(stock.get('top_history'), dict)
+        and stock.get('record') and stock['record'][0] in pool
+    }
     update_selected_stocks_file(
         stock_data_path,
         selected_stock_records,
@@ -625,6 +642,8 @@ def main() -> None:
         total_stock_records,
         vol_history_by_symbol,
         cache_metadata.get('vol_history_reference_date'),
+        top_history_by_symbol,
+        cache_metadata.get('top_history_reference_date'),
     )
 
     log(f"done: {output_result_path}")
@@ -633,6 +652,7 @@ def main() -> None:
     log(f"selected_stocks_count={len(selected_stock_records)}")
     log(f"total_stocks_count={len(total_stock_records)}")
     log(f'vol_history_count={len(vol_history_by_symbol)}')
+    log(f'top_history_count={len(top_history_by_symbol)}')
     log(f"selected_stocks_previous_close_total={sum_previous_close_prices(selected_stock_records)}")
 
     update_script_path = base_dir.parent / "update_stock_data_industry_indices.py"

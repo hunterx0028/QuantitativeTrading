@@ -14,6 +14,7 @@ from esun_marketdata import EsunMarketdata
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from strategies.vol import build_volume_history
+from strategies.top import build_top_history
 
 REQUEST_INTERVAL_SEC = 1
 
@@ -361,6 +362,7 @@ def main() -> None:
     updated_by_stock: dict[str, tuple] = {}
     daily_price_states_by_stock: dict[str, list[dict]] = {}
     vol_history_by_stock: dict[str, dict] = {}
+    top_history_by_stock: dict[str, dict] = {}
     reference_dates = []
     stock_names = sorted(first_record_by_stock.keys())
     total = len(stock_names)
@@ -396,6 +398,12 @@ def main() -> None:
                     symbol, rest_stock, daily_response, stats_response, updated[5], execution_start_time)
             except Exception as vol_exc:
                 log(f'[WARN] {stock_name} 昨日量能不足或不一致，停用VOL/GAP: {vol_exc}')
+            try:
+                # TOP 只用本輪已取得的日K與stats，不增加API請求。
+                top_history_by_stock[stock_name] = build_top_history(
+                    daily_response, stats_response, updated, execution_start_time)
+            except Exception as top_exc:
+                log(f'[WARN] {stock_name} 前日收盤或昨日高低價不足／不一致，停用TOP: {top_exc}')
             success_count += 1
         except Exception as exc:
             log(f"[WARN] {stock_name}({symbol}) API 更新失敗，本次排除: {exc}")
@@ -411,6 +419,8 @@ def main() -> None:
         "generated_at": execution_start_time,
         "trading_dates": trading_dates,
         "vol_history_reference_date": max(reference_dates, default=None),
+        "top_history_reference_date": max(
+            (history["as_of_date"] for history in top_history_by_stock.values()), default=None),
         "stocks": [
             {
                 "stock_name": stock_name,
@@ -418,6 +428,7 @@ def main() -> None:
                 "daily_price_states": daily_price_states_by_stock[stock_name],
                 "record": updated_by_stock[stock_name],
                 "vol_history": vol_history_by_stock.get(stock_name),
+                "top_history": top_history_by_stock.get(stock_name),
             }
             for stock_name in sorted(updated_by_stock)
         ],

@@ -52,6 +52,7 @@ STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲�
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
 MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 0.839100 %／分鐘；僅超過才排除
 MAX_MISSING_SLOPE_BARS = 2  # 區間內缺棒／close無效容許數；不補值，至少須有2筆有效資料
+MAX_TRADES_PER_DAY = 3  # 每日實際入場筆數上限，依入場時間、股票名稱先後保留；None 不限
 
 # ======================================================================
 # 共用參數；IDE 直接執行時在此調整。時間標籤視為該分鐘起點。
@@ -206,7 +207,23 @@ def build_market_context(bars_by_stock, target_date):
     return context
 
 
+def apply_daily_trade_cap(results):
+    """每日實際入場筆數上限：依入場時間、股票名稱先後保留前 MAX_TRADES_PER_DAY 筆。"""
+    if MAX_TRADES_PER_DAY is None:
+        return results
+    kept, counts = [], {}
+    for signal, result in sorted(results, key=lambda pair: (pair[0]['entry_dt'], pair[0]['name'])):
+        day = signal['date_str']
+        if counts.get(day, 0) >= MAX_TRADES_PER_DAY:
+            continue
+        counts[day] = counts.get(day, 0) + 1
+        kept.append((signal, result))
+    return kept
+
+
 def validate_strategy_settings():
+    if MAX_TRADES_PER_DAY is not None and (type(MAX_TRADES_PER_DAY) is not int or MAX_TRADES_PER_DAY <= 0):
+        raise ValueError('MAX_TRADES_PER_DAY 必須為正整數或 None')
     for name, clock in (('MARKET_CHECK_TIME', MARKET_CHECK_TIME),
                         ('MARKET_SLOPE_START_TIME', MARKET_SLOPE_START_TIME),
                         ('STOCK_SCAN_START_TIME', STOCK_SCAN_START_TIME),
@@ -249,6 +266,7 @@ def strategy_header_lines():
         f'均價比較自 {STOCK_SCAN_START_TIME[0]:02d}:{STOCK_SCAN_START_TIME[1]:02d} 起累積；'
         '前一有效棒 close >= average、本棒 close < average 才觸發；缺棒或均價無效向後遞補。',
         '大盤及個股資格確認前不入場；保留 MIN_MINUTE_BARS_BEFORE_0930 必要篩選。',
+        f'每日實際入場上限={MAX_TRADES_PER_DAY}筆（依入場時間、股票名稱先後保留）。',
     ]
 
 
@@ -1087,6 +1105,7 @@ def main():
             collect_trade_candidates(name, bars, target_date, context)))
     if HISTORICAL_CACHE_DATE:
         lines.insert(0, f'歷史 cache 模式：{target_date}，使用 cache 全部股票，可檢驗股票－日期數={testable_count:,}')
+    results = apply_daily_trade_cap(results)
     results.sort(key=lambda pair: (pair[0]['entry_dt'], pair[0]['name']))
     for signal, result in results:
         lines.append(format_result_line(signal['name'], signal['date_str'], signal, result))

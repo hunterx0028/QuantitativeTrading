@@ -40,3 +40,6 @@ execute_strategy_broken_high_falling_docker_v17.py
 /Z_ORB_ONE/docker_space/strategies/
 /Z_ORB_ONE/tests/
 execute_strategy_result.txt
+
+*.gz
+*.zip

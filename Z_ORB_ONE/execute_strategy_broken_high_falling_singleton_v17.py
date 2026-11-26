@@ -33,10 +33,13 @@ market_previous_close_indices = {}
 total_stocks = []
 vol_history_by_symbol = {}
 vol_history_reference_date = None
+top_history_by_symbol = {}
+top_history_reference_date = None
 from strategies.avg import AvgConfig, AvgRuntime, AvgServices, AvgStrategy
 from strategies.candidate_flow import SharedCandidateFlow
 from strategies.vol import VolConfig
 from strategies.ind import IndConfig, IndRuntime
+from strategies.top import TopConfig
 
 
 class TeeStream:
@@ -68,6 +71,7 @@ from strategy_config import (
     STRATEGY_AVG,
     STRATEGY_VOL,
     STRATEGY_IND,
+    STRATEGY_TOP,
     TRADE_SIDE_SHORT,
     TRADE_SIDE_LONG,
     ENABLE_PROFIT_PROTECTION,
@@ -81,6 +85,7 @@ from strategy_config import (
     ENABLE_AVG,
     ENABLE_VOL,
     ENABLE_IND,
+    ENABLE_TOP,
     PREOPEN_TICKER_ATTEMPTS,
     AVG_STAGE_1_START_TIME,
     AVG_STAGE_1_MIN_BARS,
@@ -135,6 +140,16 @@ from strategy_config import (
     IND_TAKE_PROFIT_PERCENT,
     IND_FORCE_CLOSE_TIME,
     IND_ENTRY_ORDER_QUANTITY,
+    IND_MAX_TRADES_PER_DAY,
+    TOP_PREV_RANGE_MAX_PERCENT,
+    TOP_PULLBACK_FROM_HIGH_PERCENT,
+    TOP_SIGNAL_START_TIME,
+    TOP_ENTRY_DEADLINE,
+    TOP_STOP_LOSS_PERCENT,
+    TOP_TAKE_PROFIT_PERCENT,
+    TOP_FORCE_CLOSE_TIME,
+    TOP_ENTRY_ORDER_QUANTITY,
+    TOP_MAX_TRADES_PER_DAY,
     ORDER_RESULTS_UPDATE_SECONDS,
     ORDER_RESULTS_QUERY_START_TIME,
     ORDER_RESULTS_RATE_LIMIT_COOLDOWN_SECONDS,
@@ -266,6 +281,43 @@ def is_ind_strategy(state):
     return bool(state and state.get('strategy_type') == STRATEGY_IND)
 
 
+def is_top_strategy(state):
+    return bool(state and state.get('strategy_type') == STRATEGY_TOP)
+
+
+def get_top_config():
+    return TopConfig(prev_range_max_percent=TOP_PREV_RANGE_MAX_PERCENT,
+                     pullback_from_high_percent=TOP_PULLBACK_FROM_HIGH_PERCENT,
+                     signal_start=TOP_SIGNAL_START_TIME, entry_deadline=TOP_ENTRY_DEADLINE)
+
+
+def validate_daily_trade_cap(name, value):
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ValueError(f'{name} 必須為正整數或 None')
+
+
+def validate_top_config():
+    get_top_config().validate()
+    if type(TOP_ENTRY_ORDER_QUANTITY) is not int or TOP_ENTRY_ORDER_QUANTITY <= 0:
+        raise ValueError('TOP 張數必須為正整數')
+    for value in (TOP_STOP_LOSS_PERCENT, TOP_TAKE_PROFIT_PERCENT):
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 100:
+            raise ValueError('TOP 風控百分比必須介於0與100')
+    time_tuple_to_minutes(TOP_FORCE_CLOSE_TIME, 'TOP_FORCE_CLOSE_TIME')
+    if not TOP_ENTRY_DEADLINE < TOP_FORCE_CLOSE_TIME <= (13, 30):
+        raise ValueError('TOP 平倉時間須晚於入場截止且不晚於13:30')
+    validate_daily_trade_cap('TOP_MAX_TRADES_PER_DAY', TOP_MAX_TRADES_PER_DAY)
+
+
+def get_top_reference_date():
+    # 與 VOL 相同：產業指數快照日期不一致時不沿用舊的前一日資料。
+    dates = [str(value.get('time', ''))[:10] for value in market_previous_close_indices.values()
+             if isinstance(value, dict) and value.get('time')]
+    if dates and max(dates) != top_history_reference_date:
+        return None
+    return top_history_reference_date
+
+
 def get_ind_runtime():
     return IND_RUNTIME
 
@@ -304,6 +356,7 @@ def validate_ind_config():
     time_tuple_to_minutes(IND_FORCE_CLOSE_TIME, 'IND_FORCE_CLOSE_TIME')
     if not IND_ENTRY_DEADLINE < IND_FORCE_CLOSE_TIME <= (13, 30):
         raise ValueError('IND 平倉時間須晚於入場截止且不晚於13:30')
+    validate_daily_trade_cap('IND_MAX_TRADES_PER_DAY', IND_MAX_TRADES_PER_DAY)
     get_ind_market_snapshot()
 
 
@@ -390,6 +443,9 @@ def verify_startup_snapshot_date(realtime_sdk):
                 raise ValueError(f'{key} 快照日期={actual!r}，最近交易日={expected}')
         if ENABLE_VOL and vol_history_reference_date != expected:
             raise ValueError(f'量能參考日={vol_history_reference_date!r}，最近交易日={expected}')
+        # TOP 前一日資料缺漏時只停用TOP；有資料但日期不符視同快照過期（同VOL）。
+        if ENABLE_TOP and top_history_by_symbol and top_history_reference_date != expected:
+            raise ValueError(f'TOP前一日資料參考日={top_history_reference_date!r}，最近交易日={expected}')
         trade_log('SNAPSHOT_DATE_VERIFIED', reference_date=expected)
         return expected
     except Exception as exc:
@@ -1325,7 +1381,7 @@ def recalc_entry_position_prices(state: Dict[str, Any]) -> bool:
     open_profit_target = entry_price * (optimize_profit_per / 100.0)
 
     if side == TRADE_SIDE_SHORT:
-        if is_avg_strategy(state) or is_vol_strategy(state) or is_ind_strategy(state):
+        if is_avg_strategy(state) or is_vol_strategy(state) or is_ind_strategy(state) or is_top_strategy(state):
             state["profit_price"] = max(
                 floor_price_to_tick_value(entry_price - open_profit_target),
                 state.get("limit_down_price", 0),
@@ -1906,6 +1962,8 @@ def get_current_entry_mode() -> int:
 def get_optimize_loss_profit_percent(state: Dict[str, Any]) -> tuple[float, float]:
     if state and state.get('strategy_type') == STRATEGY_IND:
         return IND_STOP_LOSS_PERCENT, IND_TAKE_PROFIT_PERCENT
+    if is_top_strategy(state):
+        return TOP_STOP_LOSS_PERCENT, TOP_TAKE_PROFIT_PERCENT
     if is_vol_strategy(state):
         return VOL_STOP_LOSS_PERCENT, VOL_TAKE_PROFIT_PERCENT
     if is_avg_strategy(state):
@@ -1920,6 +1978,8 @@ def get_protect_loss_profit_percent(state: Dict[str, Any] | None = None) -> tupl
 def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state and state.get('strategy_type') == STRATEGY_IND:
         return IND_FORCE_CLOSE_TIME
+    if is_top_strategy(state):
+        return TOP_FORCE_CLOSE_TIME
     if is_vol_strategy(state):
         return VOL_FORCE_CLOSE_TIME
     if is_avg_strategy(state):
@@ -1930,6 +1990,8 @@ def get_force_close_time(state: Dict[str, Any] | None = None) -> tuple[int, int]
 def get_entry_order_quantity(state: Dict[str, Any] | None = None, strategy_type: str | None = None) -> int:
     if strategy_type == STRATEGY_IND or (state and state.get('strategy_type') == STRATEGY_IND):
         return IND_ENTRY_ORDER_QUANTITY
+    if strategy_type == STRATEGY_TOP or is_top_strategy(state):
+        return TOP_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_VOL or is_vol_strategy(state):
         return VOL_ENTRY_ORDER_QUANTITY
     if strategy_type == STRATEGY_AVG or is_avg_strategy(state):
@@ -1969,6 +2031,8 @@ def check_open_status(state: Dict[str, Any]) -> bool:
 def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
     if state and state.get('strategy_type') == STRATEGY_IND:
         return IND_ENTRY_DEADLINE
+    if is_top_strategy(state):
+        return TOP_ENTRY_DEADLINE
     if is_vol_strategy(state):
         return VOL_ENTRY_DEADLINE
     if is_avg_strategy(state):
@@ -1978,9 +2042,11 @@ def get_entry_check_end_time(state: Dict[str, Any]) -> tuple[int, int]:
 
 def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int, int]:
     if state is None:
-        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME, IND_STOCK_SCAN_START_TIME)
+        return min(AVG_ENTRY_START_TIME, VOL_SIGNAL_START_TIME, IND_STOCK_SCAN_START_TIME, TOP_SIGNAL_START_TIME)
     if state.get('strategy_type') == STRATEGY_IND:
         return IND_STOCK_SCAN_START_TIME
+    if is_top_strategy(state):
+        return TOP_SIGNAL_START_TIME
     if is_vol_strategy(state):
         return VOL_SIGNAL_START_TIME
     if is_avg_strategy(state) or get_current_entry_mode() == ENTRY_MODE_AVG:
@@ -1990,7 +2056,7 @@ def get_entry_check_start_time(state: Dict[str, Any] | None = None) -> tuple[int
 
 def get_latest_entry_check_end_time(states: Dict[str, Dict[str, Any]] | None = None) -> tuple[int, int]:
     # 尚未送單的候選不在 states；顯示截止時間仍須涵蓋所有策略。
-    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE, IND_ENTRY_DEADLINE]
+    times = [AVG_ENTRY_DEADLINE, VOL_ENTRY_DEADLINE, IND_ENTRY_DEADLINE, TOP_ENTRY_DEADLINE]
     times.extend(get_entry_check_end_time(state) for state in (states or {}).values())
     return max(times)
 
@@ -2001,6 +2067,7 @@ def is_strategy_enabled(strategy_type: str) -> bool:
         STRATEGY_AVG: ENABLE_AVG,
         STRATEGY_VOL: ENABLE_VOL,
         STRATEGY_IND: ENABLE_IND,
+        STRATEGY_TOP: ENABLE_TOP,
     }.get(strategy_type, False)
 
 
@@ -2019,7 +2086,7 @@ def validate_shared_risk_config() -> None:
 def validate_strategy_switches() -> None:
     if type(ENABLE_PROFIT_PROTECTION) is not bool:
         raise ValueError('ENABLE_PROFIT_PROTECTION 必須為布林值')
-    for name in ('ENABLE_AVG', 'ENABLE_VOL', 'ENABLE_IND'):
+    for name in ('ENABLE_AVG', 'ENABLE_VOL', 'ENABLE_IND', 'ENABLE_TOP'):
         if type(globals()[name]) is not bool:
             raise ValueError(f'{name} 必須為 True/False')
     if type(PREOPEN_TICKER_ATTEMPTS) is not int or PREOPEN_TICKER_ATTEMPTS <= 0:
@@ -2048,6 +2115,11 @@ def try_open_position(state: Dict[str, Any], mysdk):
     elif is_vol_strategy(state):
         if (not state.get('vol_entry_time')
                 or datetime.fromisoformat(state['vol_entry_time']) > now_tpe()
+                or not finite_positive(state.get('last_price'))):
+            return
+    elif is_top_strategy(state):
+        if (not state.get('top_entry_time')
+                or datetime.fromisoformat(state['top_entry_time']) > now_tpe()
                 or not finite_positive(state.get('last_price'))):
             return
     elif is_avg_strategy(state):
@@ -2738,6 +2810,7 @@ def main(*, runtime_mode: str | None = None):
     global stock_data, selected_stocks, market_previous_close_indices, total_stocks
     global MARKETDATA_STOCK_REST_CLIENT
     global vol_history_by_symbol, vol_history_reference_date
+    global top_history_by_symbol, top_history_reference_date
     environment = RuntimeEnvironment(BASE_DIR, mode=runtime_mode or os.getenv("QUANT_RUNTIME_MODE", "local"))
     #print(10*get_tick_size(74.3))
 
@@ -2771,6 +2844,12 @@ def main(*, runtime_mode: str | None = None):
             vol_history_by_symbol = {}
         if ENABLE_VOL and not vol_history_by_symbol:
             print('[WARN] stock_data沒有VOL歷史量能，本日僅停用各檔VOL；請先重跑aggregate v3及v3_re')
+        top_history_by_symbol = getattr(stock_data, 'top_history_by_symbol', {})
+        top_history_reference_date = getattr(stock_data, 'top_history_reference_date', None)
+        if not isinstance(top_history_by_symbol, dict):
+            top_history_by_symbol = {}
+        if ENABLE_TOP and not top_history_by_symbol:
+            print('[WARN] stock_data沒有TOP前一日資料，本日僅停用各檔TOP；請先重跑aggregate v3及v3_re')
         stock_data.entry_mode = ENTRY_MODE_NO_TRADE
         if ENABLE_AVG:
             validate_avg_config()
@@ -2778,6 +2857,8 @@ def main(*, runtime_mode: str | None = None):
             validate_vol_config()
         if ENABLE_IND:
             validate_ind_config()
+        if ENABLE_TOP:
+            validate_top_config()
         wait_until_main_start_time()
         TRADE_API_DEGRADED_EVENT.clear()
         AVG_RUNTIME.session_state.update({"active": False, "last_scan_minute_key": None, "candidate_count": 0})

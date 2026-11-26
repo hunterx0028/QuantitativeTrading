@@ -10,6 +10,7 @@
 | `strategies/fall.py` | FALL 訊號、候選註冊、當日狀態、篩選排程、報價輪詢與監控流程 |
 | `strategies/avg.py` | AVG 股票池副本、設定驗證、分 K 解析、斜率、四階段訊號、候選與持倉報價排程 |
 | `strategies/broken.py` | BROKEN 固定窗口、價差上限、low/close 連續確認及當分鐘 open 檢查 |
+| `strategies/top.py` | TOP（v41）前一日資料建立與驗證、昨日窄幅名單、均價反壓訊號 |
 | `strategies/candidate_flow.py` | 三策略共用背景分 K、獨立候選與淘汰、送單仲裁、即時報價及整輪耗時紀錄 |
 | `runtime_environment.py` | 本機檔案／S3 準備、延後載入股票池、互動／非互動登入及登出清理 |
 | `marketdata_transport.py` | 日內行情 HTTP 連線及讀取逾時；需與主程式放在同一層 |
@@ -26,6 +27,10 @@
 FALL 僅依 `FALL_ENTRY_CONFIRM_BARS` 連續確認根數判斷。只計訊號窗口結束後、low 嚴格低於昨收的完整分K；單根跌幅再大也不能提前確認。
 
 FALL 已取消固定百分比停損及其入場空間篩選。確認成交後，持倉每分鐘繼續查詢分K，從首次成交確認時間所在分鐘的下一根起，僅檢查查詢開始時已完成的棒。若 high > 該根有效 average，記錄均價上方第一個合法 tick 為參考價並走既有市價平倉流程；實際成交以券商回報為準。缺少 average 不補算，行情查詢失敗會在後續輪次重試；獲利保護、追蹤停利、統一平倉及委託防重仍有效。`FALL_AVERAGE_STOP_TRIGGERED` 記錄觸發資料，`FALL_AVERAGE_STOP_ERROR` 記錄查詢或處理失敗。
+
+TOP 對應回測 v41：昨日振幅（昨高−昨低）／前日收盤 <= `TOP_PREV_RANGE_MAX_PERCENT` 的股票，於 `TOP_SIGNAL_START_TIME` 起，完成分K收盤自當日最高價回落 >= `TOP_PULLBACK_FROM_HIGH_PERCENT`，且前一棒 close < average、本棒 high >= average 但 close < average（均價反壓）時建立候選，訊號棒下一分鐘起以即時報價入場。前一日資料由 aggregate v3 以已取得的日K產生，經 v3_re 寫入 `stock_data.top_history_by_symbol`／`top_history_reference_date`（位於 `vol_history_reference_date` 之後）；缺漏或昨收不一致只停用該檔 TOP。
+
+`TOP_MAX_TRADES_PER_DAY`、`IND_MAX_TRADES_PER_DAY` 為每日嘗試送單筆數上限（含拒單、委託中及結果未知），達到後該策略停止新候選與分K掃描，既有委託及持倉照常管理；`None` 表示不限。`STRATEGY_DAILY_CAP_REACHED` 記錄被上限擋下的候選，`STRATEGY_LOCKED` 另記錄當日累計嘗試數。
 
 `stock_data.py` 不會在主程式或策略模組匯入時被讀取。只有呼叫 `main()` 後，完成環境準備才載入股票池。仍維持每日只啟動一次、不支援盤中恢復的原有前提。
 

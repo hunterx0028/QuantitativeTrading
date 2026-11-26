@@ -20,6 +20,8 @@ class SharedCandidateFlow:
         self.initialized = False
         self.tickers = {}
         self.vol_turnover_eligibility = {}
+        self.top_range_eligibility = {}
+        self.entry_attempts = {}  # strategy -> 當日已嘗試送單筆數（含拒單／結果未知）
         self.scan_timing = None
         self.scan_timing_lock = Lock()
         self.ind_runtime = None
@@ -65,6 +67,8 @@ class SharedCandidateFlow:
             supported.add(a.STRATEGY_IND)
             if self.strategy_enabled(a.STRATEGY_IND):
                 self.ind_runtime = a.get_ind_runtime()
+        if hasattr(a, 'STRATEGY_TOP'):
+            supported.add(a.STRATEGY_TOP)
         if len(a.STRATEGY_PRIORITY) != len(supported) or set(a.STRATEGY_PRIORITY) != supported:
             raise ValueError(f"STRATEGY_PRIORITY 必須各包含 {sorted(supported)} 一次")
         if a.STOCK_DATA_SOURCE not in ("T", "S"):
@@ -81,6 +85,18 @@ class SharedCandidateFlow:
             a.trade_log('VOL_TURNOVER_FILTER', pool_count=len(self.rows),
                         ranked_count=len(self.vol_turnover_eligibility),
                         eligible_count=sum(self.vol_turnover_eligibility.values()))
+        if hasattr(a, 'STRATEGY_TOP') and self.strategy_enabled(a.STRATEGY_TOP):
+            # 開盤前固定名單；資料缺漏、日期不符或昨日振幅過大者只停用TOP。
+            self.top_range_eligibility = a.get_top_config().build_eligibility(
+                self.rows, a.top_history_by_symbol, a.get_top_reference_date(), a.now_tpe())
+            for symbol in self.rows:
+                if not self.top_range_eligibility.get(symbol, (False, None))[0]:
+                    self.disabled.setdefault(symbol, set()).add(a.STRATEGY_TOP)
+            a.trade_log('TOP_RANGE_FILTER', pool_count=len(self.rows),
+                        valid_history_count=sum(value[1] is not None for value in self.top_range_eligibility.values()),
+                        eligible_count=sum(value[0] for value in self.top_range_eligibility.values()),
+                        eligible=','.join(sorted(symbol for symbol, value in self.top_range_eligibility.items()
+                                                 if value[0])))
         self.initialized = True
 
     def prepare_tickers(self, sdk):
@@ -122,6 +138,14 @@ class SharedCandidateFlow:
         check = self.namespace.get('is_strategy_enabled')
         return check(strategy) if check is not None else True
 
+    def daily_trade_cap(self, strategy):
+        """每日嘗試送單上限；未設定（或 None）代表不限。"""
+        return self.namespace.get(f'{strategy}_MAX_TRADES_PER_DAY')
+
+    def daily_cap_reached(self, strategy):
+        cap = self.daily_trade_cap(strategy)
+        return cap is not None and self.entry_attempts.get(strategy, 0) >= cap
+
     def fetch_candles(self, row, sdk):
         a = self.api
         requested_at = a.now_tpe()
@@ -156,6 +180,8 @@ class SharedCandidateFlow:
             deadlines.append((a.STRATEGY_VOL, a.VOL_ENTRY_DEADLINE))
         if hasattr(a, 'STRATEGY_IND'):
             deadlines.append((a.STRATEGY_IND, a.IND_ENTRY_DEADLINE))
+        if hasattr(a, 'STRATEGY_TOP'):
+            deadlines.append((a.STRATEGY_TOP, a.TOP_ENTRY_DEADLINE))
         return deadlines
 
     def check_avg_eligibility(self, symbol, completed, previous_close, now, disabled):
@@ -184,6 +210,8 @@ class SharedCandidateFlow:
         for strategy, deadline in self.strategy_deadlines():
             if (now.hour, now.minute) > deadline:
                 disabled.add(strategy)
+        # 已達每日送單上限的策略停止新候選與分K掃描；既有委託及持倉不受影響。
+        disabled.update(strategy for strategy in a.STRATEGY_PRIORITY if self.daily_cap_reached(strategy))
         candidates = self.candidates.get(symbol, {})
         for strategy, state in list(candidates.items()):
             if strategy in disabled:
@@ -273,6 +301,16 @@ class SharedCandidateFlow:
                 state = self.add_candidate(symbol, a.STRATEGY_VOL, signal, ticker, now)
                 # Never enter using a quote requested before confirmation was available.
                 state['vol_quote_not_before'] = a.time.monotonic()
+        if (hasattr(a, 'STRATEGY_TOP') and a.STRATEGY_TOP not in disabled
+                and a.STRATEGY_TOP not in candidates):
+            signal, rejected = a.get_top_config().find_candidate(bars, cutoff, up, down)
+            if rejected:
+                disabled.add(a.STRATEGY_TOP)
+                a.trade_log('TOP_REJECTED', symbol=symbol, reason='limit_touched_deadline_or_bars_invalid')
+            elif signal:
+                signal['top_prev_range_percent'] = self.top_range_eligibility.get(symbol, (False, None))[1]
+                state = self.add_candidate(symbol, a.STRATEGY_TOP, signal, ticker, now)
+                state['top_quote_not_before'] = a.time.monotonic()
         if a.STRATEGY_AVG not in disabled:
             checks = self.check_avg_eligibility(symbol, completed, float(row[5]), cutoff, disabled)
             if (a.STRATEGY_AVG not in disabled and a.STRATEGY_AVG not in candidates
@@ -339,6 +377,7 @@ class SharedCandidateFlow:
             self.update_quote(state, quote, now)
             is_vol = strategy == getattr(a, 'STRATEGY_VOL', None)
             is_ind = strategy == getattr(a, 'STRATEGY_IND', None)
+            is_top = strategy == getattr(a, 'STRATEGY_TOP', None)
             # 所有策略共用：入場前曾觸及漲跌停，當日不得進場。
             if high >= state['limit_up_price'] or low <= state['limit_down_price']:
                 self.disabled.setdefault(symbol, set()).add(strategy)
@@ -361,6 +400,12 @@ class SharedCandidateFlow:
                         or requested_at is None
                         or requested_at < state.get('vol_quote_not_before', float('inf'))):
                     continue
+            elif is_top:
+                if (not state.get('top_entry_time')
+                        or datetime.fromisoformat(state['top_entry_time']) > now
+                        or requested_at is None
+                        or requested_at < state.get('top_quote_not_before', float('inf'))):
+                    continue
             elif a.is_avg_strategy(state):
                 if not state.get('avg_entry_time') or datetime.fromisoformat(state['avg_entry_time']) > now:
                     continue
@@ -372,6 +417,11 @@ class SharedCandidateFlow:
                 a.trade_log('CANDIDATE_STOP_SPACE_REJECTED', symbol=symbol, strategy=strategy)
                 continue
             if is_ind and not a.check_ind_entry_market(state, now):
+                self.prune(symbol, now)
+                continue
+            if self.daily_cap_reached(strategy):
+                # prune 已會移除達上限策略的候選；此處為送單前的第二道防線。
+                self.disabled.setdefault(symbol, set()).add(strategy)
                 self.prune(symbol, now)
                 continue
             state.update(entry_trigger_price=float(px), entry_signal_price=float(px), entry_signal_time=now.isoformat())
@@ -391,8 +441,15 @@ class SharedCandidateFlow:
                     self.rows.pop(symbol, None)
                     self.candidates.pop(symbol, None)
                     self.persist(state)
+                    self.entry_attempts[strategy] = self.entry_attempts.get(strategy, 0) + 1
                     a.trade_log('STRATEGY_LOCKED', symbol=symbol, strategy=strategy,
-                                reason='entry_submission', signal_time=state.get('entry_signal_time'))
+                                reason='entry_submission', signal_time=state.get('entry_signal_time'),
+                                daily_attempts=self.entry_attempts[strategy],
+                                daily_cap=self.daily_trade_cap(strategy))
+                    if self.daily_cap_reached(strategy):
+                        a.trade_log('STRATEGY_DAILY_CAP_REACHED', strategy=strategy,
+                                    cap=self.daily_trade_cap(strategy), attempts=self.entry_attempts[strategy],
+                                    action='停止此策略新候選與進場，既有委託及持倉照常管理')
                 else:
                     with a.ORDER_STATE_LOCK:
                         if states.get(symbol) is state:
@@ -461,6 +518,8 @@ class SharedCandidateFlow:
             starts.append(a.VOL_SIGNAL_START_TIME)
         if self.ind_runtime is not None and self.strategy_enabled(a.STRATEGY_IND):
             starts.append(min(a.IND_MARKET_CHECK_TIME, a.IND_STOCK_SCAN_START_TIME))
+        if hasattr(a, 'STRATEGY_TOP') and self.strategy_enabled(a.STRATEGY_TOP):
+            starts.append(a.TOP_SIGNAL_START_TIME)
         start = min(starts) if starts else (23, 59)
         if (not self.candles and self.scan_timing is None
                 and minute != self.last_scan and now.second >= a.AVG_CANDLE_POLL_SECOND

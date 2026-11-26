@@ -22,6 +22,7 @@ FORCE_EXIT_TIME = (13, 30)  # 13:30 強制關閉程式
 STRATEGY_AVG = 'AVG'
 STRATEGY_VOL = 'VOL'
 STRATEGY_IND = 'IND'
+STRATEGY_TOP = 'TOP'
 
 TRADE_SIDE_SHORT = 'SHORT'
 TRADE_SIDE_LONG = 'LONG'
@@ -40,11 +41,12 @@ REALTIME_QUOTE_START_TIME = (9, 3)  # 09:03 後才開始抓個股即時行情，
 
 # 共用股票池；候選可並存，同輪完整進場條件成立依順位送單，送單後才固定歸屬。
 STOCK_DATA_SOURCE = "T"
-STRATEGY_PRIORITY = ["AVG", "IND", "VOL"]
+STRATEGY_PRIORITY = ["AVG", "IND", "VOL", "TOP"]
 # 每日啟動前設定；False 停止該策略的新候選與進場，既有持倉仍繼續風控。
 ENABLE_AVG = True
 ENABLE_VOL = True
 ENABLE_IND = True
+ENABLE_TOP = True
 PREOPEN_TICKER_ATTEMPTS = 2  # 開盤前資格查詢輪數；仍缺資料者盤中重試，確認前禁止入場
 # T: total_stocks；S: selected_stocks；共用候選流程使用副本。
 AVG_STAGE_1_START_TIME = (9, 0)
@@ -106,6 +108,19 @@ IND_STOP_LOSS_PERCENT = 2.0
 IND_TAKE_PROFIT_PERCENT = 5.0
 IND_FORCE_CLOSE_TIME = (12, 50)
 IND_ENTRY_ORDER_QUANTITY = 1
+IND_MAX_TRADES_PER_DAY = 3  # 每日IND嘗試送單筆數上限（含拒單／結果未知），達到後停止IND新進場；None不限
+
+# TOP：v41 昨日窄幅、自高點回落後均價反壓；完成分K確認後以即時報價入場，不等待下一根open。
+# 昨日高低價及前日收盤由 aggregate v3 產生 stock_data.top_history_by_symbol。
+TOP_PREV_RANGE_MAX_PERCENT = 3.2  # （昨高−昨低）／前日收盤×100 <= 此值才保留TOP
+TOP_PULLBACK_FROM_HIGH_PERCENT = 3.5  # 訊號棒close相對09:00起最高價回落 >= 此值
+TOP_SIGNAL_START_TIME = (9, 16)  # 訊號棒最早時間
+TOP_ENTRY_DEADLINE = (12, 0)
+TOP_STOP_LOSS_PERCENT = 2.0
+TOP_TAKE_PROFIT_PERCENT = 5.0
+TOP_FORCE_CLOSE_TIME = (12, 50)
+TOP_ENTRY_ORDER_QUANTITY = 1
+TOP_MAX_TRADES_PER_DAY = 3  # 每日TOP嘗試送單筆數上限（含拒單／結果未知），達到後停止TOP新進場；None不限
 
 
 ORDER_RESULTS_UPDATE_SECONDS = 10.0  # 成交價量校正查詢間隔，避免每筆下單後立即查詢造成交易 API 連線異常
