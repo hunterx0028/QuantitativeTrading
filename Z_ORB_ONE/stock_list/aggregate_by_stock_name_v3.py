@@ -433,6 +433,8 @@ def main() -> None:
             for stock_name in sorted(updated_by_stock)
         ],
     }
+    # 本階段只寫入 aggregate 快取，不改寫 stock_data.py，
+    # 其中手動維護的 tx_night_session_close 留給 v3_re 原樣保留。
     output_path.write_text(
         json.dumps(cache, ensure_ascii=False, indent=2),
         encoding="utf-8",

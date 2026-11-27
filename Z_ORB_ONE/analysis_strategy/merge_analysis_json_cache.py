@@ -33,7 +33,8 @@ def merge_cache(cache_dir=DEFAULT_CACHE_DIR):
     if not cache_dir.is_dir():
         raise ValueError(f'找不到 cache 資料夾：{cache_dir}')
     target = cache_dir / TARGET_NAME
-    sources = sorted((p for p in cache_dir.glob('*.json') if p != target),
+    sources = sorted((p for p in cache_dir.glob('*.json')
+                      if p != target and p.name != 'TX_night_session_close.json'),
                      key=lambda p: (p.stat().st_mtime_ns, p.name))
     paths = ([target] if target.exists() else []) + sources
     merged = {'stock_names': []}

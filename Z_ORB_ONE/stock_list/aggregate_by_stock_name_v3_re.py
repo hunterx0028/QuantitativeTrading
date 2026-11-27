@@ -463,6 +463,12 @@ def update_selected_stocks_file(
     top_history_reference_date: str | None = None,
 ) -> None:
     source = stock_data_path.read_text(encoding="utf-8")
+    # 夜盤資料由外部維護，不隨選股或歷史快照更新。
+    night_assignment = find_assignment(source, "tx_night_session_close")
+    night_source = None
+    if night_assignment is not None:
+        start, end = night_assignment
+        night_source = source.splitlines()[start:end]
     source = ensure_selected_limit_stock_lists(source)
     source = replace_stock_records_assignment(source, "selected_stocks", selected_records)
     source = replace_stock_records_assignment(source, "selected_limit_up_stocks", limit_up_records)
@@ -493,6 +499,13 @@ def update_selected_stocks_file(
             lines = source.splitlines()
             start, end = assignment
             source = '\n'.join(lines[:start] + replacement.splitlines() + lines[end:]) + '\n'
+    if night_source is not None:
+        assignment = find_assignment(source, "tx_night_session_close")
+        if assignment is None:
+            raise ValueError("tx_night_session_close 遺失，取消寫入 stock_data.py")
+        start, end = assignment
+        if source.splitlines()[start:end] != night_source:
+            raise ValueError("tx_night_session_close 被改動，取消寫入 stock_data.py")
     stock_data_path.write_text(source, encoding="utf-8")
 
 

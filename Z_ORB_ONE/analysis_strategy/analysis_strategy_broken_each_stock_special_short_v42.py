@@ -69,7 +69,7 @@ STOCK_DATA_SOURCE = "T"  # 僅 HISTORICAL_CACHE_DATE 為空時使用；S: select
 # YYYYMMDD：讀取對應日期 cache，優先於 --to。
 # 字面值 "xxxxxxxx"：讀取 analysis_json_cache/analysis_strategy_broken_each_stock_special_short_api_cache_xxxxxxxx.json，
 # 以檔內最新有效分K日期為截止日，回測檔內全部可用歷史日期；不連 API、不讀 stock_data.py。
-HISTORICAL_CACHE_DATE = "xxxxxxxx"
+HISTORICAL_CACHE_DATE = ""
 MAX_PREVIOUS_CLOSE = 300.0  # 昨收大於此值排除當日交易；等於仍允許
 BROKERAGE_FEE_RATE = 0.001425
 SELL_TRANSACTION_TAX_RATE = 0.003
@@ -947,7 +947,9 @@ def main():
                 raise ValueError('xxxxxxxx cache 沒有可用分K，無法判定回測截止日')
             target_date = max(cached_dates)
     else:
-        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
+        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks, tx_night_session_close
+        from Z_ORB_ONE.analysis_strategy.tx_night_session_cache import update_tx_night_session_close
+        update_tx_night_session_close(tx_night_session_close)
         if STOCK_DATA_SOURCE not in ('S', 'T'):
             raise ValueError('STOCK_DATA_SOURCE 必須為 S 或 T')
         stocks = selected_stocks if STOCK_DATA_SOURCE == 'S' else total_stocks

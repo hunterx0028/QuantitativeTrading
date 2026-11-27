@@ -52,7 +52,7 @@ STOCK_MAX_DROP_PERCENT = 0.5  # 個股篩選報酬率 > -此值，包含上漲�
 SLOPE_CUTOFF_TIME = (9, 5)  # close 回歸區間 09:00 至此分鐘（含），預設共 6 根
 MAX_NORMALIZED_SLOPE = math.tan(math.radians(40))  # 約 0.839100 %／分鐘；僅超過才排除
 MAX_MISSING_SLOPE_BARS = 2  # 區間內缺棒／close無效容許數；不補值，至少須有2筆有效資料
-MAX_TRADES_PER_DAY = 3  # 每日實際入場筆數上限，依入場時間、股票名稱先後保留；None 不限
+MAX_TRADES_PER_DAY = None  # 每日實際入場筆數上限，依入場時間、股票名稱先後保留；None 不限
 
 # ======================================================================
 # 共用參數；IDE 直接執行時在此調整。時間標籤視為該分鐘起點。
@@ -1038,7 +1038,9 @@ def main():
                 raise ValueError('xxxxxxxx cache 沒有可用分K，無法判定回測截止日')
             target_date = max(cached_dates)
     else:
-        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
+        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks, tx_night_session_close
+        from Z_ORB_ONE.analysis_strategy.tx_night_session_cache import update_tx_night_session_close
+        update_tx_night_session_close(tx_night_session_close)
         if STOCK_DATA_SOURCE not in ('S', 'T'):
             raise ValueError('STOCK_DATA_SOURCE 必須為 S 或 T')
         stocks = selected_stocks if STOCK_DATA_SOURCE == 'S' else total_stocks

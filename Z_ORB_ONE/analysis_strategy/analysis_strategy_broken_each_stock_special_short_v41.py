@@ -935,7 +935,9 @@ def main():
                 raise ValueError('xxxxxxxx cache 沒有可用分K，無法判定回測截止日')
             target_date = max(cached_dates)
     else:
-        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks
+        from Z_ORB_ONE.stock_data import selected_stocks, total_stocks, tx_night_session_close
+        from Z_ORB_ONE.analysis_strategy.tx_night_session_cache import update_tx_night_session_close
+        update_tx_night_session_close(tx_night_session_close)
         if STOCK_DATA_SOURCE not in ('S', 'T'):
             raise ValueError('STOCK_DATA_SOURCE 必須為 S 或 T')
         stocks = selected_stocks if STOCK_DATA_SOURCE == 'S' else total_stocks

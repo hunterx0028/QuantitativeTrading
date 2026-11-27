@@ -108,7 +108,7 @@ IND_STOP_LOSS_PERCENT = 2.0
 IND_TAKE_PROFIT_PERCENT = 5.0
 IND_FORCE_CLOSE_TIME = (12, 50)
 IND_ENTRY_ORDER_QUANTITY = 1
-IND_MAX_TRADES_PER_DAY = 3  # 每日IND嘗試送單筆數上限（含拒單／結果未知），達到後停止IND新進場；None不限
+IND_MAX_TRADES_PER_DAY = None  # 每日IND嘗試送單筆數上限（含拒單／結果未知），達到後停止IND新進場；None不限
 
 # TOP：v41 昨日窄幅、自高點回落後均價反壓；完成分K確認後以即時報價入場，不等待下一根open。
 # 昨日高低價及前日收盤由 aggregate v3 產生 stock_data.top_history_by_symbol。
